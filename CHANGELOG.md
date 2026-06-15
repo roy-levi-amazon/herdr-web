@@ -18,9 +18,14 @@
 - Narrowed web bridge command validation for browser-launched pane input, splits, and agent starts.
 - Added same-origin browser request checks to bridge API and WebSocket routes.
 - Included Rust formatting checks for the vendored bridge overlay in the root lint command.
+- Changed mobile terminal taps to focus the command input by default, with raw terminal focus behind
+  a keyboard-row button.
+- Moved mobile arrow keys into the expanded keyboard and added separate `1`, `2`, and `3` quick keys.
 
 ### Fixed
 
+- Sent desktop `Shift+Tab` through the web terminal as backtab instead of letting it fall through
+  to browser focus traversal or plain Tab handling.
 - Allowed the embedded Ghostty WASM loader under the bridge CSP so the terminal renderer can mount.
 - Reworded terminal attach conflict copy and reports when uploads skip files beyond the batch limit.
 - Rechecked sanitized upload filenames after truncation.

@@ -1,6 +1,6 @@
-import { Keyboard, Paperclip, Send } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
-import type { ChangeEvent, ClipboardEvent, DragEvent } from "react";
+import { Keyboard, Paperclip, Send, SquareTerminal } from "lucide-react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import type { ChangeEvent, ClipboardEvent, DragEvent, RefObject } from "react";
 import { ConfirmDialog } from "./overlays";
 import { shellQuote } from "./shell";
 import { GhosttyRenderer } from "./terminalRenderer";
@@ -47,6 +47,7 @@ export function TerminalView({
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const mobileCommandInputRef = useRef<HTMLInputElement | null>(null);
   const rendererRef = useRef<TerminalRenderer | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const uploadInputId = useId();
@@ -66,6 +67,20 @@ export function TerminalView({
   autoFocusRef.current = autoFocus;
   const scrollSensitivityRef = useRef(scrollSensitivity);
   scrollSensitivityRef.current = scrollSensitivity;
+  const mobileControlsRef = useRef(mobileControls);
+  mobileControlsRef.current = mobileControls;
+
+  const focusMobileCommandInput = useCallback(() => {
+    if (!mobileControlsRef.current) {
+      return false;
+    }
+    const input = mobileCommandInputRef.current;
+    if (!input || input.disabled) {
+      return true;
+    }
+    input.focus();
+    return true;
+  }, []);
 
   // Re-apply scroll tuning live when crossing the desktop/mobile breakpoint,
   // without tearing down the socket.
@@ -108,6 +123,7 @@ export function TerminalView({
         }
 
         renderer.setScrollSensitivity(scrollSensitivityRef.current);
+        renderer.setTapFocusHandler(focusMobileCommandInput);
 
         disposeInput = renderer.onInput((data) => {
           if (socket?.readyState === WebSocket.OPEN) {
@@ -245,6 +261,10 @@ export function TerminalView({
       host.replaceChildren();
     };
   }, [pane?.terminal_id]);
+
+  useEffect(() => {
+    rendererRef.current?.setTapFocusHandler(mobileControls ? focusMobileCommandInput : null);
+  }, [focusMobileCommandInput, mobileControls]);
 
   useEffect(() => {
     return () => {
@@ -479,9 +499,11 @@ export function TerminalView({
       ) : null}
       {mobileControls ? (
         <MobileTerminalControls
+          commandInputRef={mobileCommandInputRef}
           disabled={!pane || connectionState !== "attached"}
           uploadDisabled={uploadDisabled}
           onInput={sendTerminalInput}
+          onTerminalFocus={() => rendererRef.current?.focusTextInput()}
           onUpload={openFilePicker}
           onSubmitCommand={(command) => enqueueTerminalInput([command, "\r"])}
         />
@@ -500,15 +522,19 @@ export function TerminalView({
 }
 
 function MobileTerminalControls({
+  commandInputRef,
   disabled,
   uploadDisabled,
   onInput,
+  onTerminalFocus,
   onUpload,
   onSubmitCommand,
 }: {
+  commandInputRef: RefObject<HTMLInputElement | null>;
   disabled: boolean;
   uploadDisabled: boolean;
   onInput: (data: string) => void;
+  onTerminalFocus: () => void;
   onUpload: () => void;
   onSubmitCommand: (command: string) => void;
 }) {
@@ -534,6 +560,7 @@ function MobileTerminalControls({
           type="button"
           aria-label={expanded ? "Hide special keys" : "Show special keys"}
           title={expanded ? "Hide keys" : "Keys"}
+          data-active={expanded ? "true" : "false"}
           onClick={() => setExpanded((open) => !open)}
         >
           <Keyboard size={15} />
@@ -549,6 +576,22 @@ function MobileTerminalControls({
           <Paperclip size={15} />
         </button>
         <button
+          className="term-key term-key-icon"
+          type="button"
+          aria-label="Focus terminal keyboard"
+          title="Terminal keyboard"
+          disabled={disabled}
+          onPointerDown={(event) => {
+            if (event.pointerType === "touch" || event.pointerType === "pen") {
+              event.preventDefault();
+              onTerminalFocus();
+            }
+          }}
+          onClick={onTerminalFocus}
+        >
+          <SquareTerminal size={15} />
+        </button>
+        <button
           className="term-key"
           type="button"
           data-active={ctrlLatch ? "true" : "false"}
@@ -558,6 +601,17 @@ function MobileTerminalControls({
           Ctrl
         </button>
         {COMMON_KEYS.map((key) => (
+          <button
+            key={key.label}
+            className="term-key"
+            type="button"
+            disabled={disabled}
+            onClick={() => sendKey(key)}
+          >
+            {key.label}
+          </button>
+        ))}
+        {QUICK_NUMBER_KEYS.map((key) => (
           <button
             key={key.label}
             className="term-key"
@@ -596,6 +650,7 @@ function MobileTerminalControls({
         }}
       >
         <input
+          ref={commandInputRef}
           className="term-native-input mono"
           type="text"
           autoCapitalize="none"
@@ -632,14 +687,19 @@ const COMMON_KEYS: TerminalKey[] = [
   { label: "Tab", data: "\t" },
   { label: "C-c", data: "\x03" },
   { label: "C-d", data: "\x04" },
-  { label: "Enter", data: "\r" },
+];
+
+const QUICK_NUMBER_KEYS: TerminalKey[] = [
+  { label: "1", data: "1" },
+  { label: "2", data: "2" },
+  { label: "3", data: "3" },
+];
+
+const SPECIAL_KEYS: TerminalKey[] = [
   { label: "←", data: "\x1B[D" },
   { label: "↑", data: "\x1B[A" },
   { label: "↓", data: "\x1B[B" },
   { label: "→", data: "\x1B[C" },
-];
-
-const SPECIAL_KEYS: TerminalKey[] = [
   { label: "Bksp", data: "\x7F" },
   { label: "Del", data: "\x1B[3~" },
   { label: "Home", data: "\x1B[H" },

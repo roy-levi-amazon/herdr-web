@@ -2,6 +2,7 @@ import { FitAddon, init, Terminal } from "ghostty-web";
 
 const TERMINAL_FONT_FAMILY =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "DejaVu Sans Mono", monospace';
+const TERMINAL_TEXT_INPUT_TAP_GRACE_MS = 4000;
 
 const ghosttyReady = init();
 
@@ -15,9 +16,11 @@ export type TerminalRenderer = {
   write(data: string | Uint8Array): void;
   onInput(callback: (data: string) => void): () => void;
   onScroll(callback: (lines: number) => void): () => void;
+  setTapFocusHandler(callback: (() => boolean) | null): void;
   fit(): TerminalSize;
   refreshMetrics(): TerminalSize;
   focus(): void;
+  focusTextInput(): void;
   setScrollSensitivity(value: number): void;
   dispose(): void;
 };
@@ -30,6 +33,8 @@ export class GhosttyRenderer implements TerminalRenderer {
   #scrollCallback: ((lines: number) => void) | null = null;
   #touchCleanup: (() => void) | null = null;
   #mobileInputCleanup: (() => void) | null = null;
+  #tapFocusHandler: (() => boolean) | null = null;
+  #textInputTapGraceUntil = 0;
 
   async mount(container: HTMLElement) {
     await ghosttyReady;
@@ -68,6 +73,18 @@ export class GhosttyRenderer implements TerminalRenderer {
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(container);
+    terminal.attachCustomKeyEventHandler((event) => {
+      const output = customKeyboardEventOutput(event);
+      if (!output) {
+        return false;
+      }
+      event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === "function") {
+        event.stopImmediatePropagation();
+      }
+      terminal.input(output, true);
+      return true;
+    });
     terminal.textarea?.blur();
     container.blur();
     container.removeAttribute("contenteditable");
@@ -98,6 +115,10 @@ export class GhosttyRenderer implements TerminalRenderer {
     };
   }
 
+  setTapFocusHandler(callback: (() => boolean) | null) {
+    this.#tapFocusHandler = callback;
+  }
+
   fit() {
     const terminal = this.#requireTerminal();
     this.#fitAddon?.fit();
@@ -116,6 +137,23 @@ export class GhosttyRenderer implements TerminalRenderer {
 
   focus() {
     this.#terminal?.focus();
+  }
+
+  focusTextInput() {
+    const textarea = this.#terminal?.textarea;
+    if (!textarea) {
+      this.#terminal?.focus();
+      return;
+    }
+    this.#textInputTapGraceUntil = performance.now() + TERMINAL_TEXT_INPUT_TAP_GRACE_MS;
+    textarea.classList.add("ghostty-keyboard-input");
+    textarea.focus({ preventScroll: true });
+    window.setTimeout(() => {
+      if (textarea.isConnected) {
+        textarea.classList.add("ghostty-keyboard-input");
+        textarea.focus({ preventScroll: true });
+      }
+    }, 0);
   }
 
   setScrollSensitivity(value: number) {
@@ -172,6 +210,24 @@ export class GhosttyRenderer implements TerminalRenderer {
     let touchMoved = false;
     let touchScrolled = false;
     let pendingTouchLines = 0;
+    const redirectTapFocus = (event: TouchEvent | MouseEvent) => {
+      if (
+        document.activeElement === terminal.textarea ||
+        performance.now() < this.#textInputTapGraceUntil
+      ) {
+        return false;
+      }
+      if (!this.#tapFocusHandler?.()) {
+        return false;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === "function") {
+        event.stopImmediatePropagation();
+      }
+      terminal.textarea?.blur();
+      return true;
+    };
     const onTouchStart = (event: TouchEvent) => {
       if (event.touches.length === 1) {
         const touch = event.touches[0];
@@ -222,6 +278,8 @@ export class GhosttyRenderer implements TerminalRenderer {
           event.stopImmediatePropagation();
         }
         terminal.textarea?.blur();
+      } else {
+        redirectTapFocus(event);
       }
       lastTouchY = null;
       touchStartX = null;
@@ -230,16 +288,23 @@ export class GhosttyRenderer implements TerminalRenderer {
       touchScrolled = false;
       pendingTouchLines = 0;
     };
+    const onMouseDown = (event: MouseEvent) => {
+      if (event.button === 0) {
+        redirectTapFocus(event);
+      }
+    };
 
     container.addEventListener("touchstart", onTouchStart, { capture: true, passive: true });
     container.addEventListener("touchmove", onTouchMove, { capture: true, passive: false });
     container.addEventListener("touchend", onTouchEnd, { capture: true });
     container.addEventListener("touchcancel", onTouchEnd, { capture: true });
+    container.addEventListener("mousedown", onMouseDown, { capture: true });
     this.#touchCleanup = () => {
       container.removeEventListener("touchstart", onTouchStart, { capture: true });
       container.removeEventListener("touchmove", onTouchMove, { capture: true });
       container.removeEventListener("touchend", onTouchEnd, { capture: true });
       container.removeEventListener("touchcancel", onTouchEnd, { capture: true });
+      container.removeEventListener("mousedown", onMouseDown, { capture: true });
     };
   }
 
@@ -256,6 +321,19 @@ export class GhosttyRenderer implements TerminalRenderer {
     let lastKeydown: { data: string; time: number } | null = null;
     let processedTextareaValue = "";
     const onKeydown = (event: KeyboardEvent) => {
+      const customOutput = textareaKeyboardEventOutput(event);
+      if (customOutput) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === "function") {
+          event.stopImmediatePropagation();
+        }
+        textarea.value = "";
+        processedTextareaValue = "";
+        terminal.input(customOutput, true);
+        cleanupEditableArtifacts(this.#container);
+        return;
+      }
       const output = keyboardEventOutput(event);
       if (output) {
         lastKeydown = { data: output, time: performance.now() };
@@ -326,6 +404,10 @@ export class GhosttyRenderer implements TerminalRenderer {
       processedTextareaValue = "";
       cleanupEditableArtifacts(this.#container);
     };
+    const onBlur = () => {
+      textarea.classList.remove("ghostty-keyboard-input");
+      this.#textInputTapGraceUntil = 0;
+    };
 
     textarea.addEventListener("keydown", onKeydown, { capture: true });
     textarea.addEventListener("beforeinput", onBeforeInput, { capture: true });
@@ -333,6 +415,7 @@ export class GhosttyRenderer implements TerminalRenderer {
     textarea.addEventListener("compositionstart", onCompositionStart, { capture: true });
     textarea.addEventListener("compositionupdate", onCompositionUpdate, { capture: true });
     textarea.addEventListener("compositionend", onCompositionEnd, { capture: true });
+    textarea.addEventListener("blur", onBlur);
     this.#mobileInputCleanup = () => {
       textarea.removeEventListener("keydown", onKeydown, { capture: true });
       textarea.removeEventListener("beforeinput", onBeforeInput, { capture: true });
@@ -340,6 +423,7 @@ export class GhosttyRenderer implements TerminalRenderer {
       textarea.removeEventListener("compositionstart", onCompositionStart, { capture: true });
       textarea.removeEventListener("compositionupdate", onCompositionUpdate, { capture: true });
       textarea.removeEventListener("compositionend", onCompositionEnd, { capture: true });
+      textarea.removeEventListener("blur", onBlur);
     };
   }
 }
@@ -423,6 +507,20 @@ function keyboardEventOutput(event: KeyboardEvent) {
     default:
       return null;
   }
+}
+
+function customKeyboardEventOutput(event: KeyboardEvent) {
+  if (event.key === "Tab" && event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+    return "\x1B[Z";
+  }
+  return null;
+}
+
+function textareaKeyboardEventOutput(event: KeyboardEvent) {
+  if (event.key !== "Tab" || event.ctrlKey || event.altKey || event.metaKey) {
+    return customKeyboardEventOutput(event);
+  }
+  return event.shiftKey ? "\x1B[Z" : "\t";
 }
 
 function normalizeWheelLines(event: WheelEvent, rows: number, sensitivity: number) {
