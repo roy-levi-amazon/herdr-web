@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { commands, createdPaneId, probeSplitSupported } from "./commands";
+import { commands, createdPaneId, probeSupportedCommands } from "./commands";
 import type { LaunchSpec } from "./commands";
 import { LaunchDialog } from "./LaunchDialog";
 import { resolveLaunchSpec } from "./launch";
@@ -18,10 +18,13 @@ import type { MenuItem } from "./overlays";
 import { TerminalView } from "./TerminalView";
 import {
   aggregateStatus,
+  canClearTabName,
+  canClearWorkspaceName,
   choosePaneForTab,
   choosePaneForWorkspace,
   chooseSelectedPane,
   countAttention,
+  displayTabLabel,
   isAttention,
   isLoud,
   paneMeta,
@@ -31,7 +34,7 @@ import {
   spaceSubtitle,
   statusLabel,
 } from "./state";
-import type { AgentStatus, PaneInfo, Snapshot, TabInfo, WorkspaceInfo } from "./types";
+import type { AgentStatus, PaneInfo, Snapshot, WorkspaceInfo } from "./types";
 
 type LoadState = "loading" | "ready" | "error";
 type Scope = "space" | "all";
@@ -39,8 +42,21 @@ type SidebarView = "agents" | "tabs";
 type AgentSort = "attention" | "status" | "workspace";
 type AgentGroup = "none" | "workspace";
 type MenuKind = "space" | "tab" | "pane";
-type MenuState = { kind: MenuKind; id: string; label: string; x: number; y: number };
-type DialogState = { mode: "rename" | "close"; kind: MenuKind; id: string; label: string };
+type MenuState = {
+  kind: MenuKind;
+  id: string;
+  label: string;
+  x: number;
+  y: number;
+  clearable?: boolean;
+};
+type DialogState = {
+  mode: "rename" | "close";
+  kind: MenuKind;
+  id: string;
+  label: string;
+  clearable?: boolean;
+};
 type DisplayPrefs = {
   scope: Scope;
   sidebarView: SidebarView;
@@ -183,6 +199,7 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [splitSupported, setSplitSupported] = useState(false);
+  const [paneMoveSupported, setPaneMoveSupported] = useState(false);
   const [refitToken, setRefitToken] = useState(0);
   const isNarrow = useIsNarrow();
   const snapshotRef = useRef<Snapshot | null>(null);
@@ -318,13 +335,13 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [error]);
 
-  // Feature-detect whether the bridge permits `pane.split` so the split
-  // controls only appear when they will actually work.
+  // Feature-detect bridge-gated commands so controls only appear when they work.
   useEffect(() => {
     let cancelled = false;
-    void probeSplitSupported().then((ok) => {
+    void probeSupportedCommands().then((supportedCommands) => {
       if (!cancelled) {
-        setSplitSupported(ok);
+        setSplitSupported(supportedCommands.has("pane.split"));
+        setPaneMoveSupported(supportedCommands.has("pane.move"));
       }
     });
     return () => {
@@ -368,6 +385,17 @@ export function App() {
     () => snapshot?.panes.find((pane) => pane.pane_id === resolvedPaneId) ?? null,
     [snapshot, resolvedPaneId],
   );
+  const selectedPaneMenuPress = useLongPress((x, y) => {
+    if (selectedPane) {
+      setMenu({
+        kind: "pane",
+        id: selectedPane.pane_id,
+        label: paneTitle(selectedPane),
+        x,
+        y,
+      });
+    }
+  });
 
   useEffect(() => {
     if (isNarrow) {
@@ -549,15 +577,24 @@ export function App() {
     if (!menu) {
       return;
     }
-    const { kind, id, label } = menu;
+    const { kind, id, label, clearable } = menu;
     setMenu(null);
     if (key === "rename") {
-      setDialog({ mode: "rename", kind, id, label });
+      setDialog({ mode: "rename", kind, id, label, clearable });
     } else if (key === "close") {
       setDialog({ mode: "close", kind, id, label });
     } else if (key === "newtab") {
       setActiveSpaceId(id);
       setLaunchTarget({ mode: "tab", workspaceId: id });
+    } else if (key === "move_new_tab" && kind === "pane") {
+      const pane = snapshotRef.current?.panes.find((item) => item.pane_id === id);
+      if (!pane) {
+        setError("Pane not found");
+        return;
+      }
+      void exec(() => commands.movePaneToNewTab(id, pane.workspace_id, label), true);
+    } else if (key === "move_new_space" && kind === "pane") {
+      void exec(() => commands.movePaneToNewWorkspace(id, label), true);
     }
   };
 
@@ -572,6 +609,18 @@ export function App() {
         : kind === "tab"
           ? () => commands.renameTab(id, value)
           : () => commands.renamePane(id, value);
+    void exec(action).then((ok) => ok && setDialog(null));
+  };
+
+  const clearRename = () => {
+    if (!dialog || dialog.kind === "pane") {
+      return;
+    }
+    const { kind, id } = dialog;
+    const action =
+      kind === "space"
+        ? () => commands.renameWorkspace(id, null)
+        : () => commands.renameTab(id, null);
     void exec(action).then((ok) => ok && setDialog(null));
   };
 
@@ -640,7 +689,9 @@ export function App() {
           onRefresh={refreshNow}
           onCreateSpace={() => void exec(() => commands.createWorkspace(), true)}
           onCreateTab={(workspaceId) => setLaunchTarget({ mode: "tab", workspaceId })}
-          onMenu={(kind, id, label, x, y) => setMenu({ kind, id, label, x, y })}
+          onMenu={(kind, id, label, x, y, clearable) =>
+            setMenu({ kind, id, label, x, y, clearable })
+          }
         />
         <div
           className="sidebar-resizer"
@@ -686,7 +737,9 @@ export function App() {
           selectedPane={selectedPane}
           onSelectTab={selectTab}
           onCreateTab={(workspaceId) => setLaunchTarget({ mode: "tab", workspaceId })}
-          onMenu={(kind, id, label, x, y) => setMenu({ kind, id, label, x, y })}
+          onMenu={(kind, id, label, x, y, clearable) =>
+            setMenu({ kind, id, label, x, y, clearable })
+          }
         />
         <header className="stage-bar">
           <button
@@ -698,7 +751,7 @@ export function App() {
           >
             {isNarrow ? <ChevronLeft size={20} /> : <PanelLeft size={18} />}
           </button>
-          <div className="stage-id">
+          <div className="stage-id" {...selectedPaneMenuPress}>
             <span className="stage-title">{selectedPane ? paneTitle(selectedPane) : "herdr-web"}</span>
             <span className="stage-sub mono">
               {stageBreadcrumb(snapshot, selectedPane, loadState)}
@@ -770,7 +823,7 @@ export function App() {
           x={menu.x}
           y={menu.y}
           title={menu.label}
-          items={menuItems(menu.kind)}
+          items={menuItems(menu.kind, paneMoveSupported)}
           onPick={onMenuPick}
           onClose={() => setMenu(null)}
         />
@@ -784,6 +837,7 @@ export function App() {
           busy={busy}
           onCancel={() => setDialog(null)}
           onSubmit={submitRename}
+          onClear={dialog.clearable ? clearRename : undefined}
         />
       ) : null}
 
@@ -862,7 +916,14 @@ function TabBar({
   selectedPane: PaneInfo | null;
   onSelectTab: (tabId: string) => void;
   onCreateTab: (workspaceId: string) => void;
-  onMenu: (kind: MenuKind, id: string, label: string, x: number, y: number) => void;
+  onMenu: (
+    kind: MenuKind,
+    id: string,
+    label: string,
+    x: number,
+    y: number,
+    clearable?: boolean,
+  ) => void;
 }) {
   if (!snapshot || !activeSpace) {
     return null;
@@ -877,24 +938,27 @@ function TabBar({
       : activeSpace.active_tab_id;
   return (
     <div className="tabbar" role="tablist" aria-label="Tabs">
-      {tabs.map((tab) => (
-        <button
-          key={tab.tab_id}
-          type="button"
-          className="tabbar-tab"
-          role="tab"
-          aria-selected={tab.tab_id === activeTabId}
-          data-active={tab.tab_id === activeTabId}
-          onClick={() => onSelectTab(tab.tab_id)}
-          onContextMenu={(event) => {
-            event.preventDefault();
-            onMenu("tab", tab.tab_id, tab.label, event.clientX, event.clientY);
-          }}
-        >
-          <span className="dot" data-status={tab.agent_status} />
-          <span className="tabbar-name">{tab.label}</span>
-        </button>
-      ))}
+      {tabs.map((tab) => {
+        const label = displayTabLabel(tab, snapshot.panes);
+        return (
+          <button
+            key={tab.tab_id}
+            type="button"
+            className="tabbar-tab"
+            role="tab"
+            aria-selected={tab.tab_id === activeTabId}
+            data-active={tab.tab_id === activeTabId}
+            onClick={() => onSelectTab(tab.tab_id)}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              onMenu("tab", tab.tab_id, label, event.clientX, event.clientY, canClearTabName(tab));
+            }}
+          >
+            <span className="dot" data-status={tab.agent_status} />
+            <span className="tabbar-name">{label}</span>
+          </button>
+        );
+      })}
       <button
         className="tabbar-add"
         type="button"
@@ -947,7 +1011,14 @@ function Switcher({
   onRefresh: () => void;
   onCreateSpace: () => void;
   onCreateTab: (workspaceId: string) => void;
-  onMenu: (kind: MenuKind, id: string, label: string, x: number, y: number) => void;
+  onMenu: (
+    kind: MenuKind,
+    id: string,
+    label: string,
+    x: number,
+    y: number,
+    clearable?: boolean,
+  ) => void;
 }) {
   const panes = snapshot?.panes ?? [];
   const roll = aggregateStatus(panes);
@@ -1108,7 +1179,14 @@ function Switcher({
                     )}
                     onSelect={() => onSelectSpace(workspace.workspace_id)}
                     onMenu={(x, y) =>
-                      onMenu("space", workspace.workspace_id, workspace.label, x, y)
+                      onMenu(
+                        "space",
+                        workspace.workspace_id,
+                        workspace.label,
+                        x,
+                        y,
+                        canClearWorkspaceName(workspace, snapshot.panes),
+                      )
                     }
                   />
                 ))
@@ -1181,35 +1259,41 @@ function Switcher({
                         <span className="grp-space-name">{group.workspace.label}</span>
                         <span className="grp-space-line" />
                       </div>
-                      {group.panes.map((pane) => (
-                        <AgentRow
-                          key={pane.pane_id}
-                          index={agentPaneIndex++}
-                          pane={pane}
-                          workspace={group.workspace}
-                          tab={snapshot.tabs.find((tab) => tab.tab_id === pane.tab_id)}
-                          active={pane.pane_id === selectedPane?.pane_id}
-                          onSelect={() => onSelectPane(pane)}
-                          onMenu={(x, y) => onMenu("pane", pane.pane_id, paneTitle(pane), x, y)}
-                        />
-                      ))}
+                      {group.panes.map((pane) => {
+                        const tab = snapshot.tabs.find((item) => item.tab_id === pane.tab_id);
+                        return (
+                          <AgentRow
+                            key={pane.pane_id}
+                            index={agentPaneIndex++}
+                            pane={pane}
+                            workspace={group.workspace}
+                            tabLabel={tab ? displayTabLabel(tab, snapshot.panes) : undefined}
+                            active={pane.pane_id === selectedPane?.pane_id}
+                            onSelect={() => onSelectPane(pane)}
+                            onMenu={(x, y) => onMenu("pane", pane.pane_id, paneTitle(pane), x, y)}
+                          />
+                        );
+                      })}
                     </Fragment>
                   ))
                 ) : (
-                  agentPanes.map((pane, index) => (
-                    <AgentRow
-                      key={pane.pane_id}
-                      index={index}
-                      pane={pane}
-                      workspace={snapshot.workspaces.find(
-                        (workspace) => workspace.workspace_id === pane.workspace_id,
-                      )}
-                      tab={snapshot.tabs.find((tab) => tab.tab_id === pane.tab_id)}
-                      active={pane.pane_id === selectedPane?.pane_id}
-                      onSelect={() => onSelectPane(pane)}
-                      onMenu={(x, y) => onMenu("pane", pane.pane_id, paneTitle(pane), x, y)}
-                    />
-                  ))
+                  agentPanes.map((pane, index) => {
+                    const tab = snapshot.tabs.find((item) => item.tab_id === pane.tab_id);
+                    return (
+                      <AgentRow
+                        key={pane.pane_id}
+                        index={index}
+                        pane={pane}
+                        workspace={snapshot.workspaces.find(
+                          (workspace) => workspace.workspace_id === pane.workspace_id,
+                        )}
+                        tabLabel={tab ? displayTabLabel(tab, snapshot.panes) : undefined}
+                        active={pane.pane_id === selectedPane?.pane_id}
+                        onSelect={() => onSelectPane(pane)}
+                        onMenu={(x, y) => onMenu("pane", pane.pane_id, paneTitle(pane), x, y)}
+                      />
+                    );
+                  })
                 )
               ) : spaceGroups.every((group) => group.tabs.length === 0) ? (
                 <div className="empty">
@@ -1226,28 +1310,33 @@ function Switcher({
                         <span className="grp-space-line" />
                       </div>
                     ) : null}
-                    {group.tabs.map(({ tab, panes: tabPanes }) => (
-                      <div className="tabgrp" key={tab.tab_id}>
-                        {group.workspace.tab_count > 1 || tabPanes.length > 1 ? (
-                          <TabDivider
-                            tab={tab}
-                            count={tabPanes.length}
-                            onSelect={() => onSelectTab(tab.tab_id)}
-                            onMenu={(x, y) => onMenu("tab", tab.tab_id, tab.label, x, y)}
-                          />
-                        ) : null}
-                        {tabPanes.map((pane) => (
-                          <PaneRow
-                            key={pane.pane_id}
-                            index={paneIndex++}
-                            pane={pane}
-                            active={pane.pane_id === selectedPane?.pane_id}
-                            onSelect={() => onSelectPane(pane)}
-                            onMenu={(x, y) => onMenu("pane", pane.pane_id, paneTitle(pane), x, y)}
-                          />
-                        ))}
-                      </div>
-                    ))}
+                    {group.tabs.map(({ tab, panes: tabPanes }) => {
+                      const label = displayTabLabel(tab, snapshot.panes);
+                      return (
+                        <div className="tabgrp" key={tab.tab_id}>
+                          {group.workspace.tab_count > 1 || tabPanes.length > 1 ? (
+                            <TabDivider
+                              label={label}
+                              count={tabPanes.length}
+                              onSelect={() => onSelectTab(tab.tab_id)}
+                              onMenu={(x, y) =>
+                                onMenu("tab", tab.tab_id, label, x, y, canClearTabName(tab))
+                              }
+                            />
+                          ) : null}
+                          {tabPanes.map((pane) => (
+                            <PaneRow
+                              key={pane.pane_id}
+                              index={paneIndex++}
+                              pane={pane}
+                              active={pane.pane_id === selectedPane?.pane_id}
+                              onSelect={() => onSelectPane(pane)}
+                              onMenu={(x, y) => onMenu("pane", pane.pane_id, paneTitle(pane), x, y)}
+                            />
+                          ))}
+                        </div>
+                      );
+                    })}
                   </Fragment>
                 ))
               )}
@@ -1295,12 +1384,12 @@ function SpaceRow({
 }
 
 function TabDivider({
-  tab,
+  label,
   count,
   onSelect,
   onMenu,
 }: {
-  tab: TabInfo;
+  label: string;
   count: number;
   onSelect: () => void;
   onMenu: (x: number, y: number) => void;
@@ -1309,7 +1398,7 @@ function TabDivider({
   return (
     <div className="tab-div">
       <button type="button" className="tab-head" {...press}>
-        <span className="tab-name">{tab.label}</span>
+        <span className="tab-name">{label}</span>
         {count > 1 ? (
           <span className="tab-split mono">
             <SplitGlyph />
@@ -1363,7 +1452,7 @@ function PaneRow({
 function AgentRow({
   pane,
   workspace,
-  tab,
+  tabLabel,
   active,
   index,
   onSelect,
@@ -1371,13 +1460,14 @@ function AgentRow({
 }: {
   pane: PaneInfo;
   workspace?: WorkspaceInfo;
-  tab?: TabInfo;
+  tabLabel?: string;
   active: boolean;
   index: number;
   onSelect: () => void;
   onMenu: (x: number, y: number) => void;
 }) {
   const press = useLongPress(onMenu, onSelect);
+  const iconKind = agentIconKind(pane);
   return (
     <button
       className="pane-row agent-row"
@@ -1389,8 +1479,11 @@ function AgentRow({
     >
       <span className="dot" data-status={pane.agent_status} />
       <span className="pane-body">
-        <span className="pane-name">{agentTitle(pane)}</span>
-        <span className="pane-meta mono">{agentSubtitle(pane, workspace, tab)}</span>
+        <span className="pane-name agent-title">
+          {iconKind ? <AgentIcon kind={iconKind} /> : null}
+          <span className="agent-title-text">{agentTitle(pane)}</span>
+        </span>
+        <span className="pane-meta mono">{agentSubtitle(pane, workspace, tabLabel)}</span>
       </span>
       {isLoud(pane.agent_status) ? (
         <span className="pane-word" data-status={pane.agent_status}>
@@ -1398,6 +1491,55 @@ function AgentRow({
         </span>
       ) : null}
     </button>
+  );
+}
+
+type AgentIconKind = "claude" | "codex" | "pi";
+
+function agentIconKind(pane: PaneInfo): AgentIconKind | null {
+  // Best-effort cosmetic match: prefer structured agent fields before user labels.
+  const values = [pane.agent, pane.display_agent, pane.label, pane.title];
+  for (const value of values) {
+    const label = value?.toLowerCase().trim();
+    if (!label) {
+      continue;
+    }
+    if (label.includes("claude")) {
+      return "claude";
+    }
+    if (label.includes("codex")) {
+      return "codex";
+    }
+    if (/(^|[^a-z0-9])pi([^a-z0-9]|$)/u.test(label)) {
+      return "pi";
+    }
+  }
+  return null;
+}
+
+function AgentIcon({ kind }: { kind: AgentIconKind }) {
+  if (kind === "claude") {
+    return (
+      <svg className="agent-icon agent-icon-claude" viewBox="0 0 256 257" aria-hidden="true">
+        <path d="m50.228 170.321 50.357-28.257.843-2.463-.843-1.361h-2.462l-8.426-.518-28.775-.778-24.952-1.037-24.175-1.296-6.092-1.297L0 125.796l.583-3.759 5.12-3.434 7.324.648 16.202 1.101 24.304 1.685 17.629 1.037 26.118 2.722h4.148l.583-1.685-1.426-1.037-1.101-1.037-25.147-17.045-27.22-18.017-14.258-10.37-7.713-5.25-3.888-4.925-1.685-10.758 7-7.713 9.397.649 2.398.648 9.527 7.323 20.35 15.75L94.817 91.9l3.889 3.24 1.555-1.102.195-.777-1.75-2.917-14.453-26.118-15.425-26.572-6.87-11.018-1.814-6.61c-.648-2.723-1.102-4.991-1.102-7.778l7.972-10.823L71.42 0 82.05 1.426l4.472 3.888 6.61 15.101 10.694 23.786 16.591 32.34 4.861 9.592 2.592 8.879.973 2.722h1.685v-1.556l1.36-18.211 2.528-22.36 2.463-28.776.843-8.1 4.018-9.722 7.971-5.25 6.222 2.981 5.12 7.324-.713 4.73-3.046 19.768-5.962 30.98-3.889 20.739h2.268l2.593-2.593 10.499-13.934 17.628-22.036 7.778-8.749 9.073-9.657 5.833-4.601h11.018l8.1 12.055-3.628 12.443-11.342 14.388-9.398 12.184-13.48 18.147-8.426 14.518.778 1.166 2.01-.194 30.46-6.481 16.462-2.982 19.637-3.37 8.88 4.148.971 4.213-3.5 8.62-20.998 5.184-24.628 4.926-36.682 8.685-.454.324.519.648 16.526 1.555 7.065.389h17.304l32.21 2.398 8.426 5.574 5.055 6.805-.843 5.184-12.962 6.611-17.498-4.148-40.83-9.721-14-3.5h-1.944v1.167l11.666 11.406 21.387 19.314 26.767 24.887 1.36 6.157-3.434 4.86-3.63-.518-23.526-17.693-9.073-7.972-20.545-17.304h-1.36v1.814l4.73 6.935 25.017 37.59 1.296 11.536-1.814 3.76-6.481 2.268-7.13-1.297-14.647-20.544-15.1-23.138-12.185-20.739-1.49.843-7.194 77.448-3.37 3.953-7.778 2.981-6.48-4.925-3.436-7.972 3.435-15.749 4.148-20.544 3.37-16.333 3.046-20.285 1.815-6.74-.13-.454-1.49.194-15.295 20.999-23.267 31.433-18.406 19.702-4.407 1.75-7.648-3.954.713-7.064 4.277-6.286 25.47-32.405 15.36-20.092 9.917-11.6-.065-1.686h-.583L44.07 198.125l-12.055 1.555-5.185-4.86.648-7.972 2.463-2.593 20.35-13.999-.064.065Z" />
+      </svg>
+    );
+  }
+  if (kind === "codex") {
+    return (
+      <svg className="agent-icon agent-icon-codex" viewBox="0 0 256 260" aria-hidden="true">
+        <path d="M239.184 106.203a64.716 64.716 0 0 0-5.576-53.103C219.452 28.459 191 15.784 163.213 21.74A65.586 65.586 0 0 0 52.096 45.22a64.716 64.716 0 0 0-43.23 31.36c-14.31 24.602-11.061 55.634 8.033 76.74a64.665 64.665 0 0 0 5.525 53.102c14.174 24.65 42.644 37.324 70.446 31.36a64.72 64.72 0 0 0 48.754 21.744c28.481.025 53.714-18.361 62.414-45.481a64.767 64.767 0 0 0 43.229-31.36c14.137-24.558 10.875-55.423-8.083-76.483Zm-97.56 136.338a48.397 48.397 0 0 1-31.105-11.255l1.535-.87 51.67-29.825a8.595 8.595 0 0 0 4.247-7.367v-72.85l21.845 12.636c.218.111.37.32.409.563v60.367c-.056 26.818-21.783 48.545-48.601 48.601Zm-104.466-44.61a48.345 48.345 0 0 1-5.781-32.589l1.534.921 51.722 29.826a8.339 8.339 0 0 0 8.441 0l63.181-36.425v25.221a.87.87 0 0 1-.358.665l-52.335 30.184c-23.257 13.398-52.97 5.431-66.404-17.803ZM23.549 85.38a48.499 48.499 0 0 1 25.58-21.333v61.39a8.288 8.288 0 0 0 4.195 7.316l62.874 36.272-21.845 12.636a.819.819 0 0 1-.767 0L41.353 151.53c-23.211-13.454-31.171-43.144-17.804-66.405v.256Zm179.466 41.695-63.08-36.63L161.73 77.86a.819.819 0 0 1 .768 0l52.233 30.184a48.6 48.6 0 0 1-7.316 87.635v-61.391a8.544 8.544 0 0 0-4.4-7.213Zm21.742-32.69-1.535-.922-51.619-30.081a8.39 8.39 0 0 0-8.492 0L99.98 99.808V74.587a.716.716 0 0 1 .307-.665l52.233-30.133a48.652 48.652 0 0 1 72.236 50.391v.205ZM88.061 139.097l-21.845-12.585a.87.87 0 0 1-.41-.614V65.685a48.652 48.652 0 0 1 79.757-37.346l-1.535.87-51.67 29.825a8.595 8.595 0 0 0-4.246 7.367l-.051 72.697Zm11.868-25.58 28.138-16.217 28.188 16.218v32.434l-28.086 16.218-28.188-16.218-.052-32.434Z" />
+      </svg>
+    );
+  }
+  return (
+    <svg className="agent-icon agent-icon-pi" viewBox="0 0 800 800" aria-hidden="true">
+      <path
+        fillRule="evenodd"
+        d="M165.29 165.29H517.36V400H400V517.36H282.65V634.72H165.29ZM282.65 282.65V400H400V282.65Z"
+      />
+      <path d="M517.36 400H634.72V634.72H517.36Z" />
+    </svg>
   );
 }
 
@@ -1477,13 +1619,13 @@ function agentTitle(pane: PaneInfo) {
   return pane.display_agent || pane.label || pane.agent || pane.title || paneTitle(pane);
 }
 
-function agentSubtitle(pane: PaneInfo, workspace?: WorkspaceInfo, tab?: TabInfo) {
+function agentSubtitle(pane: PaneInfo, workspace?: WorkspaceInfo, tabLabel?: string) {
   const stateText =
     pane.custom_status ||
     pane.state_labels?.[statusLabel(pane.agent_status)] ||
     statusLabel(pane.agent_status);
   const dir = basename(pane.foreground_cwd || pane.cwd);
-  return [stateText, workspace?.label, tab?.label, dir].filter(Boolean).join(" · ");
+  return [stateText, workspace?.label, tabLabel, dir].filter(Boolean).join(" · ");
 }
 
 function basename(path?: string) {
@@ -1514,7 +1656,7 @@ function SplitGlyph() {
   );
 }
 
-function menuItems(kind: MenuKind): MenuItem[] {
+function menuItems(kind: MenuKind, paneMoveSupported: boolean): MenuItem[] {
   if (kind === "space") {
     return [
       { key: "rename", label: "Rename" },
@@ -1528,10 +1670,17 @@ function menuItems(kind: MenuKind): MenuItem[] {
       { key: "close", label: "Close tab", danger: true },
     ];
   }
-  return [
+  const paneItems: MenuItem[] = [
     { key: "rename", label: "Rename" },
-    { key: "close", label: "Close pane", danger: true },
   ];
+  if (paneMoveSupported) {
+    paneItems.push(
+      { key: "move_new_tab", label: "Move to new tab" },
+      { key: "move_new_space", label: "Move to new space" },
+    );
+  }
+  paneItems.push({ key: "close", label: "Close pane", danger: true });
+  return paneItems;
 }
 
 function closeCopy(kind: MenuKind) {
@@ -1610,7 +1759,8 @@ function stageBreadcrumb(snapshot: Snapshot | null, pane: PaneInfo | null, loadS
   }
   const workspace = snapshot?.workspaces.find((item) => item.workspace_id === pane.workspace_id);
   const tab = snapshot?.tabs.find((item) => item.tab_id === pane.tab_id);
-  return [workspace?.label, tab?.label].filter(Boolean).join(" · ") || pane.pane_id;
+  const tabLabel = tab && snapshot ? displayTabLabel(tab, snapshot.panes) : undefined;
+  return [workspace?.label, tabLabel].filter(Boolean).join(" · ") || pane.pane_id;
 }
 
 async function fetchSnapshot() {

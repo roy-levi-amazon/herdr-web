@@ -9,6 +9,7 @@ export type WorkspaceInfo = {
   tab_count: number;
   active_tab_id: string;
   agent_status: AgentStatus;
+  can_clear_name?: boolean;
 };
 
 export type TabInfo = {
@@ -19,6 +20,7 @@ export type TabInfo = {
   focused: boolean;
   pane_count: number;
   agent_status: AgentStatus;
+  can_clear_name?: boolean;
 };
 
 export type PaneInfo = {

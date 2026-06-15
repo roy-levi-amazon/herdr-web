@@ -631,6 +631,32 @@ button {
   font-weight: 550;
 }
 
+.agent-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  fill: currentColor;
+  color: var(--subtext1);
+}
+
+.agent-icon-claude {
+  color: #d97757;
+}
+
 .agent-row[data-status="blocked"] {
   border-color: color-mix(in srgb, var(--st-blocked) 22%, transparent);
 }
@@ -1409,6 +1435,10 @@ button {
 .btn:disabled {
   cursor: default;
   opacity: 0.5;
+}
+
+.btn-clear {
+  margin-right: auto;
 }
 
 .btn-primary {

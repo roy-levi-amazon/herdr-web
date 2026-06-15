@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  canClearTabName,
+  canClearWorkspaceName,
   choosePaneForTab,
   choosePaneForWorkspace,
   chooseSelectedPane,
+  displayTabLabel,
   paneTitle,
   sortPanesForPicker,
 } from "./state";
-import type { PaneInfo, Snapshot } from "./types";
+import type { PaneInfo, Snapshot, TabInfo, WorkspaceInfo } from "./types";
 
 const pane = (pane_id: string, focused = false, agent_status: PaneInfo["agent_status"] = "idle") =>
   ({
@@ -18,6 +21,29 @@ const pane = (pane_id: string, focused = false, agent_status: PaneInfo["agent_st
     agent_status,
     revision: 1,
   }) satisfies PaneInfo;
+
+const tab = (label: string, tab_id = "1-1") =>
+  ({
+    tab_id,
+    workspace_id: "1",
+    number: 1,
+    label,
+    focused: false,
+    pane_count: 1,
+    agent_status: "idle",
+  }) satisfies TabInfo;
+
+const workspace = (label: string) =>
+  ({
+    workspace_id: "1",
+    number: 1,
+    label,
+    focused: true,
+    pane_count: 1,
+    tab_count: 1,
+    active_tab_id: "1-1",
+    agent_status: "idle",
+  }) satisfies WorkspaceInfo;
 
 const snapshot = (panes: PaneInfo[]): Snapshot => ({
   workspaces: [
@@ -104,5 +130,50 @@ describe("paneTitle", () => {
       "herdr",
     );
     expect(paneTitle(pane("1-2"))).toBe("Terminal");
+  });
+});
+
+describe("displayTabLabel", () => {
+  it("uses the single pane title for default numeric tab labels", () => {
+    expect(displayTabLabel(tab("1"), [{ ...pane("1-1"), label: "Codex" }])).toBe("Codex");
+  });
+
+  it("keeps explicit tab labels", () => {
+    expect(displayTabLabel(tab("review"), [{ ...pane("1-1"), label: "Codex" }])).toBe("review");
+  });
+
+  it("keeps numeric tab labels when a tab has multiple panes", () => {
+    expect(
+      displayTabLabel(tab("2"), [
+        { ...pane("1-1"), label: "Codex" },
+        { ...pane("1-2"), tab_id: "1-1", label: "Claude" },
+      ]),
+    ).toBe("2");
+  });
+});
+
+describe("rename clear heuristics", () => {
+  it("treats numeric tab labels as already default", () => {
+    expect(canClearTabName(tab("1"))).toBe(false);
+    expect(canClearTabName(tab("review"))).toBe(true);
+  });
+
+  it("uses bridge-provided tab clearability when available", () => {
+    expect(canClearTabName({ ...tab("review"), can_clear_name: false })).toBe(false);
+  });
+
+  it("treats cwd-derived workspace labels as already default", () => {
+    const panes = [{ ...pane("1-1"), cwd: "/home/kevin/worktrees/herdr-web" }];
+
+    expect(canClearWorkspaceName(workspace("herdr-web"), panes)).toBe(false);
+    expect(canClearWorkspaceName(workspace("Herdr Web"), panes)).toBe(true);
+  });
+
+  it("uses bridge-provided workspace clearability when cwd heuristics would differ", () => {
+    const panes = [{ ...pane("1-1"), cwd: "/home/kevin/worktrees/herdr-web/web/src" }];
+
+    expect(canClearWorkspaceName({ ...workspace("herdr-web"), can_clear_name: false }, panes)).toBe(
+      false,
+    );
   });
 });

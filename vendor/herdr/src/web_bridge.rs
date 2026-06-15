@@ -26,8 +26,8 @@ use tracing::{debug, info, warn};
 use crate::api::client::{ApiClient, ApiClientError};
 use crate::api::schema::{
     EmptyParams, EventsSubscribeParams, Method, PaneInfo, PaneLayoutParams, PaneLayoutSnapshot,
-    PaneListParams, Request, ResponseResult, SplitDirection, Subscription, TabInfo, TabListParams,
-    WorkspaceInfo,
+    PaneListParams, PaneMoveDestination, Request, ResponseResult, SplitDirection, Subscription,
+    TabInfo, TabListParams, WorkspaceInfo,
 };
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode,
@@ -71,11 +71,25 @@ struct RequestPolicy {
 
 #[derive(Debug, Serialize)]
 struct Snapshot {
-    workspaces: Vec<WorkspaceInfo>,
-    tabs: Vec<TabInfo>,
+    workspaces: Vec<SnapshotWorkspaceInfo>,
+    tabs: Vec<SnapshotTabInfo>,
     panes: Vec<PaneInfo>,
     layouts: Vec<PaneLayoutSnapshot>,
     selected_pane_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotWorkspaceInfo {
+    #[serde(flatten)]
+    info: WorkspaceInfo,
+    can_clear_name: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotTabInfo {
+    #[serde(flatten)]
+    info: TabInfo,
+    can_clear_name: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -524,6 +538,8 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "pane.send_input",
     // Layout-mutating: the web client builds splits directly.
     "pane.split",
+    // Narrow live pane moves: new tab or new workspace destinations only.
+    "pane.move",
     // Agent creation: exposes Herdr's native agent.start placement and argv path.
     "agent.start",
 ];
@@ -693,6 +709,20 @@ fn validate_web_command(method: &Method) -> Result<(), BridgeError> {
                 ));
             }
         }
+        Method::WorkspaceRename(params) => {
+            if params.workspace_id.trim().is_empty() {
+                return Err(BridgeError::BadRequest(
+                    "workspace_id is required".to_string(),
+                ));
+            }
+            validate_optional_label(&params.label, "workspace.rename label")?;
+        }
+        Method::TabRename(params) => {
+            if params.tab_id.trim().is_empty() {
+                return Err(BridgeError::BadRequest("tab_id is required".to_string()));
+            }
+            validate_optional_label(&params.label, "tab.rename label")?;
+        }
         Method::PaneSendInput(params) => {
             if params.pane_id.trim().is_empty() {
                 return Err(BridgeError::BadRequest("pane_id is required".to_string()));
@@ -729,6 +759,41 @@ fn validate_web_command(method: &Method) -> Result<(), BridgeError> {
                 ));
             }
         }
+        Method::PaneMove(params) => {
+            if params.pane_id.trim().is_empty() {
+                return Err(BridgeError::BadRequest("pane_id is required".to_string()));
+            }
+            if !params.focus {
+                return Err(BridgeError::BadRequest(
+                    "pane.move must focus the moved pane through herdr-web".to_string(),
+                ));
+            }
+            match &params.destination {
+                PaneMoveDestination::NewTab {
+                    workspace_id,
+                    label,
+                } => {
+                    if workspace_id
+                        .as_deref()
+                        .is_none_or(|workspace_id| workspace_id.trim().is_empty())
+                    {
+                        return Err(BridgeError::BadRequest(
+                            "pane.move new_tab requires workspace_id through herdr-web".to_string(),
+                        ));
+                    }
+                    validate_optional_label(label, "pane.move new_tab label")?;
+                }
+                PaneMoveDestination::NewWorkspace { label, tab_label } => {
+                    validate_optional_label(label, "pane.move new_workspace label")?;
+                    validate_optional_label(tab_label, "pane.move new_workspace tab_label")?;
+                }
+                PaneMoveDestination::Tab { .. } => {
+                    return Err(BridgeError::BadRequest(
+                        "pane.move to existing tabs is not exposed through herdr-web".to_string(),
+                    ));
+                }
+            }
+        }
         Method::AgentStart(params) => {
             if params.name.trim().is_empty() || params.name.len() > 120 {
                 return Err(BridgeError::BadRequest(
@@ -756,6 +821,18 @@ fn validate_web_command(method: &Method) -> Result<(), BridgeError> {
             }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+fn validate_optional_label(label: &Option<String>, field: &str) -> Result<(), BridgeError> {
+    if label
+        .as_deref()
+        .is_some_and(|label| label.trim().is_empty() || label.len() > 120)
+    {
+        return Err(BridgeError::BadRequest(format!(
+            "{field} must be non-empty and up to 120 bytes"
+        )));
     }
     Ok(())
 }
@@ -823,9 +900,10 @@ async fn command_handler(
         "method": body.method,
         "params": params,
     });
-    let request: Request = serde_json::from_value(request_value)
+    let mut request: Request = serde_json::from_value(request_value)
         .map_err(|err| BridgeError::BadRequest(format!("invalid command: {err}")))?;
     validate_web_command(&request.method)?;
+    fill_clear_rename_labels(&state.api, &mut request.method)?;
 
     let api = state.api.clone();
     let response = tokio::task::spawn_blocking(move || api.request(request))
@@ -834,6 +912,56 @@ async fn command_handler(
     let value = serde_json::to_value(response.result)
         .map_err(|err| BridgeError::Protocol(err.to_string()))?;
     Ok(Json(value))
+}
+
+fn fill_clear_rename_labels(api: &ApiClient, method: &mut Method) -> Result<(), BridgeError> {
+    match method {
+        Method::WorkspaceRename(params) if params.label.is_none() => {
+            params.label = Some(default_workspace_label(api, &params.workspace_id)?);
+        }
+        Method::TabRename(params) if params.label.is_none() => {
+            params.label = Some(default_tab_label(api, &params.tab_id)?);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn default_tab_label(api: &ApiClient, tab_id: &str) -> Result<String, BridgeError> {
+    match api_request(
+        api,
+        "herdr-web:clear-tab-label",
+        Method::TabList(TabListParams::default()),
+    )? {
+        ResponseResult::TabList { tabs } => tabs
+            .into_iter()
+            .find(|tab| tab.tab_id == tab_id)
+            .map(|tab| tab.number.to_string())
+            .ok_or_else(|| BridgeError::BadRequest(format!("tab not found: {tab_id}"))),
+        other => Err(BridgeError::Protocol(format!(
+            "unexpected response: {other:?}"
+        ))),
+    }
+}
+
+fn default_workspace_label(api: &ApiClient, workspace_id: &str) -> Result<String, BridgeError> {
+    Ok(default_workspace_label_from_panes(
+        workspace_id,
+        current_panes(api)?.iter(),
+    ))
+}
+
+fn default_workspace_label_from_panes<'a>(
+    workspace_id: &str,
+    panes: impl Iterator<Item = &'a PaneInfo>,
+) -> String {
+    panes
+        .filter(|pane| pane.workspace_id == workspace_id)
+        .filter_map(|pane| pane.foreground_cwd.as_ref().or(pane.cwd.as_ref()))
+        .min()
+        .map(|cwd| crate::workspace::derive_label_from_cwd(Path::new(cwd)))
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or_else(|| "workspace".to_string())
 }
 
 async fn selection_handler(
@@ -1000,6 +1128,27 @@ async fn snapshot_handler(
     let panes = current_panes(&state.api)?;
     let layouts = collect_tab_layouts(&state.api, &tabs, &panes);
     let selected_pane_id = shared_selected_pane(&state, &panes)?;
+    let workspaces = workspaces
+        .into_iter()
+        .map(|workspace| {
+            let can_clear_name = workspace.label
+                != default_workspace_label_from_panes(&workspace.workspace_id, panes.iter());
+            SnapshotWorkspaceInfo {
+                info: workspace,
+                can_clear_name,
+            }
+        })
+        .collect();
+    let tabs = tabs
+        .into_iter()
+        .map(|tab| {
+            let can_clear_name = !is_default_tab_label(&tab.label);
+            SnapshotTabInfo {
+                info: tab,
+                can_clear_name,
+            }
+        })
+        .collect();
 
     Ok(Json(Snapshot {
         workspaces,
@@ -1008,6 +1157,11 @@ async fn snapshot_handler(
         layouts,
         selected_pane_id,
     }))
+}
+
+fn is_default_tab_label(label: &str) -> bool {
+    let label = label.trim();
+    !label.is_empty() && label.chars().all(|ch| ch.is_ascii_digit())
 }
 
 async fn capabilities_handler(
@@ -1615,6 +1769,7 @@ mod tests {
         assert!(ALLOWED_COMMANDS.contains(&"pane.send_input"));
         // pane.split is intentionally allowed so the web client can create splits.
         assert!(ALLOWED_COMMANDS.contains(&"pane.split"));
+        assert!(ALLOWED_COMMANDS.contains(&"pane.move"));
         assert!(ALLOWED_COMMANDS.contains(&"agent.start"));
     }
 
@@ -1797,6 +1952,42 @@ mod tests {
     }
 
     #[test]
+    fn validates_narrow_workspace_and_tab_rename_commands() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "workspace.rename",
+            "params": {
+                "workspace_id": "w1",
+                "label": null
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_ok());
+
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "tab.rename",
+            "params": {
+                "tab_id": "w1:t1",
+                "label": "Review"
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_ok());
+
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "tab.rename",
+            "params": {
+                "tab_id": "w1:t1",
+                "label": "   "
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_err());
+    }
+
+    #[test]
     fn validates_narrow_pane_launch_commands() {
         let request: Request = serde_json::from_value(serde_json::json!({
             "id": "test",
@@ -1845,6 +2036,73 @@ mod tests {
                 "direction": "down",
                 "cwd": "/tmp",
                 "env": { "X": "1" }
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_err());
+    }
+
+    #[test]
+    fn validates_narrow_pane_moves() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "pane.move",
+            "params": {
+                "pane_id": "w1:p1",
+                "destination": {
+                    "type": "new_tab",
+                    "workspace_id": "w1",
+                    "label": "Moved"
+                },
+                "focus": true
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_ok());
+
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "pane.move",
+            "params": {
+                "pane_id": "w1:p1",
+                "destination": {
+                    "type": "new_workspace",
+                    "label": "Moved",
+                    "tab_label": "Pane"
+                },
+                "focus": true
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_ok());
+
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "pane.move",
+            "params": {
+                "pane_id": "w1:p1",
+                "destination": {
+                    "type": "tab",
+                    "tab_id": "w1:t2",
+                    "target_pane_id": "w1:p2",
+                    "split": "right"
+                },
+                "focus": true
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_err());
+
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "pane.move",
+            "params": {
+                "pane_id": "w1:p1",
+                "destination": {
+                    "type": "new_tab",
+                    "workspace_id": "w1"
+                },
+                "focus": false
             }
         }))
         .unwrap();

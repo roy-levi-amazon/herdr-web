@@ -15,6 +15,12 @@ protocol details that are not exposed as a stable library or daemon API.
 The browser app is not vendored into Herdr. It lives at `web/`, and the bridge serves `web/dist`
 through `--static-dir`.
 
+## Current Snapshot
+
+- Upstream checkout: `/home/kevin/worktrees/herdr`
+- Upstream commit: `41d1c14e0784cf63dc4cddda21c7e5fd99813b24`
+- Upstream release: `v0.7.0`
+
 ## Why Not Copy Only A Few Files?
 
 The bridge needs private pieces across Herdr:

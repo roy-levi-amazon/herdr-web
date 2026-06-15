@@ -14,6 +14,15 @@ The goal is to provide a browser-native interface for monitoring and controlling
 desktop and mobile clients. It keeps the terminal experience close to Herdr while adding web-focused
 navigation, multi-client viewing, mobile input controls, and synchronized pane selection.
 
+## Highlights
+
+- Shared browser terminal viewing with synchronized pane selection across desktop and mobile.
+- Mobile-friendly command input and extended terminal key controls.
+- Agent-focused sidebar with styled icons for detected Codex/OpenAI, Claude, and Pi panes.
+- Image and file uploads from the terminal toolbar, paste, or drag/drop, with uploaded paths inserted
+  into the active terminal input.
+- Context menus for renaming, closing, splitting, and moving panes between tabs or spaces.
+
 ## Screenshots
 
 | Desktop | Mobile switcher | Mobile terminal |

@@ -164,23 +164,35 @@ impl App {
         let tab_id = self.public_tab_id(ws_idx, tab_idx).unwrap_or_else(|| {
             crate::workspace::public_tab_id_for_number(&workspace_id, tab_idx + 1)
         });
-        let Some(tab) = self
-            .state
-            .workspaces
-            .get_mut(ws_idx)
-            .and_then(|ws| ws.tabs.get_mut(tab_idx))
-        else {
-            return tab_not_found(id, &params.tab_id);
-        };
-        tab.set_custom_name(params.label.clone());
+        {
+            let Some(tab) = self
+                .state
+                .workspaces
+                .get_mut(ws_idx)
+                .and_then(|ws| ws.tabs.get_mut(tab_idx))
+            else {
+                return tab_not_found(id, &params.tab_id);
+            };
+            if let Some(label) = params.label {
+                tab.set_custom_name(label);
+            } else {
+                tab.clear_custom_name();
+            }
+        }
         crate::logging::tab_renamed(&workspace_id, &tab_id);
         self.schedule_session_save();
+        let tab_label = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.tab_display_name(tab_idx))
+            .unwrap_or_else(|| (tab_idx + 1).to_string());
         self.emit_event(EventEnvelope {
             event: EventKind::TabRenamed,
             data: EventData::TabRenamed {
                 tab_id: self.public_tab_id(ws_idx, tab_idx).unwrap(),
                 workspace_id: self.public_workspace_id(ws_idx),
-                label: params.label,
+                label: tab_label,
             },
         });
         let tab = self.tab_info(ws_idx, tab_idx).unwrap();

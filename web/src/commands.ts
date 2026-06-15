@@ -36,12 +36,13 @@ export function createdPaneId(result: CommandResult): string | null {
   const rootPane = result.root_pane as { pane_id?: string } | undefined;
   const pane = result.pane as { pane_id?: string } | undefined;
   const agent = result.agent as { pane_id?: string } | undefined;
-  return rootPane?.pane_id ?? pane?.pane_id ?? agent?.pane_id ?? null;
+  const moveResult = result.move_result as { pane?: { pane_id?: string } } | undefined;
+  return rootPane?.pane_id ?? pane?.pane_id ?? agent?.pane_id ?? moveResult?.pane?.pane_id ?? null;
 }
 
 export const commands = {
   createWorkspace: () => runCommand("workspace.create", { focus: true }),
-  renameWorkspace: (workspaceId: string, label: string) =>
+  renameWorkspace: (workspaceId: string, label: string | null) =>
     runCommand("workspace.rename", { workspace_id: workspaceId, label }),
   closeWorkspace: (workspaceId: string) =>
     runCommand("workspace.close", { workspace_id: workspaceId }),
@@ -50,7 +51,8 @@ export const commands = {
 
   createTab: (workspaceId: string, label?: string) =>
     runCommand("tab.create", { workspace_id: workspaceId, focus: true, label }),
-  renameTab: (tabId: string, label: string) => runCommand("tab.rename", { tab_id: tabId, label }),
+  renameTab: (tabId: string, label: string | null) =>
+    runCommand("tab.rename", { tab_id: tabId, label }),
   closeTab: (tabId: string) => runCommand("tab.close", { tab_id: tabId }),
   focusTab: (tabId: string) => runCommand("tab.focus", { tab_id: tabId }),
 
@@ -62,6 +64,18 @@ export const commands = {
   // Layout-mutating: requires the bridge allow-list to include `pane.split`.
   splitPane: (targetPaneId: string, direction: SplitDirection) =>
     runCommand("pane.split", { target_pane_id: targetPaneId, direction, focus: true }),
+  movePaneToNewTab: (paneId: string, workspaceId: string, label?: string) =>
+    runCommand("pane.move", {
+      pane_id: paneId,
+      destination: { type: "new_tab", workspace_id: workspaceId, label },
+      focus: true,
+    }),
+  movePaneToNewWorkspace: (paneId: string, label?: string) =>
+    runCommand("pane.move", {
+      pane_id: paneId,
+      destination: { type: "new_workspace", label },
+      focus: true,
+    }),
 
   startAgentSplit: (tabId: string, direction: SplitDirection, spec: LaunchSpec) =>
     runCommand("agent.start", {
@@ -73,12 +87,16 @@ export const commands = {
     }),
 
   createLaunchTab: async (workspaceId: string, spec: LaunchSpec) => {
-    const result = await commands.createTab(workspaceId, spec.title);
+    const result = await commands.createTab(workspaceId);
+    const paneId = createdPaneId(result);
+    if (!paneId) {
+      throw new Error("new tab did not return a root pane");
+    }
+    const title = spec.title.trim();
+    if (title) {
+      await commands.renamePane(paneId, title);
+    }
     if (spec.kind !== "shell") {
-      const paneId = createdPaneId(result);
-      if (!paneId) {
-        throw new Error("new tab did not return a root pane");
-      }
       await commands.runPaneCommand(paneId, shellCommand(agentArgv(spec.kind)));
     }
     return result;
@@ -102,16 +120,18 @@ export const commands = {
   },
 };
 
-/** Best-effort probe: is `pane.split` permitted by the bridge allow-list? */
-export async function probeSplitSupported(): Promise<boolean> {
+export async function probeSupportedCommands(): Promise<Set<string>> {
   try {
     const response = await fetch("/api/capabilities");
     if (!response.ok) {
-      return false;
+      return new Set();
     }
     const body = (await response.json()) as { commands?: unknown };
-    return Array.isArray(body.commands) && body.commands.includes("pane.split");
+    if (!Array.isArray(body.commands)) {
+      return new Set();
+    }
+    return new Set(body.commands.filter((command): command is string => typeof command === "string"));
   } catch {
-    return false;
+    return new Set();
   }
 }

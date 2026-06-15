@@ -8,6 +8,11 @@
 
 - Added a bridge capabilities endpoint so the web app can discover supported commands without
   sending probe commands to Herdr.
+- Added pane context-menu actions to move a pane into a new tab or a new workspace when the bridge
+  exposes `pane.move`.
+- Added styled Codex/OpenAI, Claude, and Pi icons in the agent list.
+- Added a clear-name action for workspace and tab rename dialogs so custom names can return to
+  their default labels.
 - Added release-process documentation and a GitHub Release script.
 - Added top-level agent onboarding guidance for web app, bridge overlay, vendoring, testing, and release work.
 
@@ -21,6 +26,9 @@
 - Changed mobile terminal taps to focus the command input by default, with raw terminal focus behind
   a keyboard-row button.
 - Moved mobile arrow keys into the expanded keyboard and added separate `1`, `2`, and `3` quick keys.
+- Changed new-tab launches so the entered title names the created pane while default-looking single-pane tabs display that pane title.
+- Added bridge-provided clear-name state to snapshots so the web UI does not guess whether a workspace
+  or tab name is already default.
 
 ### Fixed
 
@@ -34,5 +42,7 @@
 - Fixed sidebar active workspace selection so explicit space picks are not overridden by a previously selected pane.
 - Made terminal upload controls keyboard-operable and guarded upload status against overlapping uploads.
 - Avoided duplicate default agent names when launching repeated agent splits.
+- Kept clear-name requests compatible with older running Herdr daemons by translating them in the bridge.
+- Hid the clear-name action when a workspace or tab is already using its default label.
 
 ### Removed

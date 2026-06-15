@@ -177,7 +177,7 @@ fn tab_rename(args: &[String]) -> std::io::Result<i32> {
         id: "cli:tab:rename".into(),
         method: Method::TabRename(TabRenameParams {
             tab_id: super::normalize_tab_id(&args[0]),
-            label: args[1..].join(" "),
+            label: Some(args[1..].join(" ")),
         }),
     })?)
 }
