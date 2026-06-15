@@ -371,7 +371,8 @@ async fn add_security_headers(request: AxumRequest, next: Next) -> Response {
     headers.insert(
         HeaderName::from_static("content-security-policy"),
         HeaderValue::from_static(
-            "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; \
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' data:; \
+             img-src 'self' data: blob:; \
              style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'none'; \
              frame-ancestors 'none'",
         ),

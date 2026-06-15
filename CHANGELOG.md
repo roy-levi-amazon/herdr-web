@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- Allowed the embedded Ghostty WASM loader under the bridge CSP so the terminal renderer can mount.
 - Reworded terminal attach conflict copy and reports when uploads skip files beyond the batch limit.
 - Rechecked sanitized upload filenames after truncation.
 - Pointed the bridge launcher at the stable Herdr socket by default so the debug bridge does not
