@@ -9,11 +9,12 @@
     "test:web": "npm run test --prefix web",
     "lint:web": "npm run lint --prefix web",
     "vendor:check": "scripts/check-vendor.sh",
+    "bridge:fmt": "cargo fmt --manifest-path vendor/herdr/Cargo.toml --check",
     "bridge:build": "cargo build --manifest-path vendor/herdr/Cargo.toml --bin herdr",
     "bridge:test": "cargo test --manifest-path vendor/herdr/Cargo.toml --bin herdr web_bridge",
     "build": "npm run build:web && npm run bridge:build",
     "test": "npm run test:web && npm run bridge:test",
-    "lint": "npm run lint:web",
+    "lint": "npm run lint:web && npm run bridge:fmt",
     "check": "npm run vendor:check && npm run lint && npm run test && npm run build",
     "release": "node scripts/release.mjs"
   }

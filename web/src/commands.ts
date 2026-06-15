@@ -105,21 +105,12 @@ export const commands = {
 /** Best-effort probe: is `pane.split` permitted by the bridge allow-list? */
 export async function probeSplitSupported(): Promise<boolean> {
   try {
-    const response = await fetch("/api/command", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      // A bogus pane id can never split anything; we only read the error shape.
-      body: JSON.stringify({
-        method: "pane.split",
-        params: { target_pane_id: "__probe__", direction: "right" },
-      }),
-    });
-    if (response.ok) {
-      return true;
+    const response = await fetch("/api/capabilities");
+    if (!response.ok) {
+      return false;
     }
-    const body = (await response.json().catch(() => ({}))) as { error?: string };
-    // "command not allowed: pane.split" => blocked; anything else => method reached.
-    return !/not allowed/i.test(body.error ?? "");
+    const body = (await response.json()) as { commands?: unknown };
+    return Array.isArray(body.commands) && body.commands.includes("pane.split");
   } catch {
     return false;
   }

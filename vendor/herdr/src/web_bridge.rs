@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::io::{self, ErrorKind, Write};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -11,14 +12,16 @@ use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::header::{HOST, ORIGIN};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{extract::Request as AxumRequest, Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use interprocess::TryClone as _;
 use serde::{Deserialize, Serialize};
 use tower_http::services::ServeDir;
+use tracing::{debug, info, warn};
 
 use crate::api::client::{ApiClient, ApiClientError};
 use crate::api::schema::{
@@ -53,10 +56,17 @@ struct BridgeOptions {
 struct BridgeState {
     api: ApiClient,
     client_socket_path: PathBuf,
+    request_policy: RequestPolicy,
     terminal_sessions: Arc<Mutex<HashMap<String, SharedTerminalSession>>>,
     selected_pane_id: Arc<Mutex<Option<String>>>,
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
     upload_dir: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct RequestPolicy {
+    bind_host: String,
+    bind_port: u16,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,6 +76,11 @@ struct Snapshot {
     panes: Vec<PaneInfo>,
     layouts: Vec<PaneLayoutSnapshot>,
     selected_pane_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct Capabilities {
+    commands: &'static [&'static str],
 }
 
 #[derive(Debug, Deserialize)]
@@ -307,14 +322,21 @@ fn print_help() {
 
 async fn run_server(options: BridgeOptions) -> io::Result<()> {
     if !is_loopback_bind_host(&options.host) {
-        eprintln!(
-            "warning: herdr web-bridge has no browser authentication yet; bind only on trusted networks"
+        warn!(
+            host = %options.host,
+            port = options.port,
+            "herdr web-bridge has no browser authentication yet; bind only on trusted networks"
         );
     }
     ensure_upload_dir(&options.upload_dir)?;
+    let request_policy = RequestPolicy {
+        bind_host: options.host.clone(),
+        bind_port: options.port,
+    };
     let state = BridgeState {
         api: ApiClient::local(),
         client_socket_path: crate::server::socket_paths::client_socket_path(),
+        request_policy,
         terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
         selected_pane_id: Arc::new(Mutex::new(None)),
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
@@ -322,19 +344,39 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
     };
     let app = Router::new()
         .route("/api/snapshot", get(snapshot_handler))
+        .route("/api/capabilities", get(capabilities_handler))
         .route("/api/command", post(command_handler))
         .route("/api/selection", post(selection_handler))
         .route("/api/uploads", post(upload_handler))
         .route("/ws/events", get(events_ws_handler))
         .route("/ws/ui-events", get(ui_events_ws_handler))
         .route("/ws/terminal", get(terminal_ws_handler))
-        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .fallback_service(ServeDir::new(options.static_dir))
+        .layer(middleware::from_fn(add_security_headers))
+        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .with_state(state);
     let bind = format!("{}:{}", options.host, options.port);
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    eprintln!("herdr web-bridge listening on http://{bind}");
+    info!(url = %format!("http://{bind}"), "herdr web-bridge listening");
     axum::serve(listener, app).await
+}
+
+async fn add_security_headers(request: AxumRequest, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(
+            "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; \
+             style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'none'; \
+             frame-ancestors 'none'",
+        ),
+    );
+    response
 }
 
 fn is_loopback_bind_host(host: &str) -> bool {
@@ -414,9 +456,18 @@ fn sanitize_upload_file_name(input: &str) -> Option<String> {
             }
             truncated.push(ch);
         }
-        return Some(truncated);
+        return finalize_upload_file_name(truncated);
     }
-    Some(output)
+    finalize_upload_file_name(output)
+}
+
+fn finalize_upload_file_name(name: String) -> Option<String> {
+    let name = name.trim_matches('.').trim().to_string();
+    if name.is_empty() || name == "." || name == ".." {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 fn generated_upload_name(mime: Option<&str>) -> String {
@@ -476,13 +527,45 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "agent.start",
 ];
 
-fn ensure_allowed_origin(headers: &HeaderMap) -> Result<(), BridgeError> {
-    if request_origin_allowed(headers) {
+fn ensure_allowed_request(headers: &HeaderMap, policy: &RequestPolicy) -> Result<(), BridgeError> {
+    if request_allowed(headers, policy) {
         return Ok(());
     }
     Err(BridgeError::Forbidden(
         "cross-origin requests are not allowed".to_string(),
     ))
+}
+
+fn request_allowed(headers: &HeaderMap, policy: &RequestPolicy) -> bool {
+    request_host_allowed(headers, policy) && request_origin_allowed(headers)
+}
+
+fn request_host_allowed(headers: &HeaderMap, policy: &RequestPolicy) -> bool {
+    let Some(host) = headers.get(HOST).and_then(|host| host.to_str().ok()) else {
+        return false;
+    };
+    host_authority_allowed(host, policy)
+}
+
+fn host_authority_allowed(authority: &str, policy: &RequestPolicy) -> bool {
+    let host = host_part(authority);
+    if host.is_empty() {
+        return false;
+    }
+
+    if is_loopback_host(host) {
+        return true;
+    }
+
+    if !authority_port_matches(authority, policy.bind_port) {
+        return false;
+    }
+
+    if is_unspecified_bind_host(&policy.bind_host) {
+        return host.parse::<IpAddr>().is_ok();
+    }
+
+    host.eq_ignore_ascii_case(&policy.bind_host)
 }
 
 fn request_origin_allowed(headers: &HeaderMap) -> bool {
@@ -519,10 +602,39 @@ fn same_authority(left: &str, right: &str) -> bool {
 
 fn is_loopback_authority(authority: &str) -> bool {
     let host = host_part(authority);
-    host.eq_ignore_ascii_case("localhost")
-        || host == "127.0.0.1"
-        || host.starts_with("127.")
-        || host == "::1"
+    is_loopback_host(host)
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+}
+
+fn is_unspecified_bind_host(host: &str) -> bool {
+    matches!(host, "0.0.0.0" | "::" | "[::]")
+}
+
+fn authority_port_matches(authority: &str, expected_port: u16) -> bool {
+    match authority_port(authority) {
+        Some(port) => port == expected_port,
+        None => expected_port == 80,
+    }
+}
+
+fn authority_port(authority: &str) -> Option<u16> {
+    if authority.parse::<IpAddr>().is_ok() {
+        return None;
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        let end = rest.find(']')?;
+        return rest[end + 1..]
+            .strip_prefix(':')
+            .and_then(|port| port.parse().ok());
+    }
+    let (_, port) = authority.rsplit_once(':')?;
+    if port.contains(':') {
+        return None;
+    }
+    port.parse().ok()
 }
 
 fn host_part(authority: &str) -> &str {
@@ -531,11 +643,55 @@ fn host_part(authority: &str) -> &str {
             return &rest[..end];
         }
     }
+    if authority.parse::<IpAddr>().is_ok() {
+        return authority;
+    }
     authority.split(':').next().unwrap_or(authority)
 }
 
 fn validate_web_command(method: &Method) -> Result<(), BridgeError> {
     match method {
+        Method::WorkspaceCreate(params) => {
+            if params.cwd.is_some() || !params.env.is_empty() || !params.focus {
+                return Err(BridgeError::BadRequest(
+                    "workspace.create is limited to focused default workspaces through herdr-web"
+                        .to_string(),
+                ));
+            }
+            if params
+                .label
+                .as_deref()
+                .is_some_and(|label| label.trim().is_empty() || label.len() > 120)
+            {
+                return Err(BridgeError::BadRequest(
+                    "workspace.create label must be non-empty and up to 120 bytes".to_string(),
+                ));
+            }
+        }
+        Method::TabCreate(params) => {
+            if params
+                .workspace_id
+                .as_deref()
+                .is_none_or(|workspace_id| workspace_id.trim().is_empty())
+                || params.cwd.is_some()
+                || !params.env.is_empty()
+                || !params.focus
+            {
+                return Err(BridgeError::BadRequest(
+                    "tab.create is limited to focused tabs in an existing workspace through herdr-web"
+                        .to_string(),
+                ));
+            }
+            if params
+                .label
+                .as_deref()
+                .is_some_and(|label| label.trim().is_empty() || label.len() > 120)
+            {
+                return Err(BridgeError::BadRequest(
+                    "tab.create label must be non-empty and up to 120 bytes".to_string(),
+                ));
+            }
+        }
         Method::PaneSendInput(params) => {
             if params.pane_id.trim().is_empty() {
                 return Err(BridgeError::BadRequest("pane_id is required".to_string()));
@@ -648,7 +804,7 @@ async fn command_handler(
     headers: HeaderMap,
     Json(body): Json<CommandRequest>,
 ) -> Result<Json<serde_json::Value>, BridgeError> {
-    ensure_allowed_origin(&headers)?;
+    ensure_allowed_request(&headers, &state.request_policy)?;
     if !ALLOWED_COMMANDS.contains(&body.method.as_str()) {
         return Err(BridgeError::Forbidden(format!(
             "command not allowed: {}",
@@ -684,7 +840,7 @@ async fn selection_handler(
     headers: HeaderMap,
     Json(body): Json<SelectionRequest>,
 ) -> Result<Json<serde_json::Value>, BridgeError> {
-    ensure_allowed_origin(&headers)?;
+    ensure_allowed_request(&headers, &state.request_policy)?;
     let pane_id = body.pane_id.trim();
     if pane_id.is_empty() {
         return Err(BridgeError::BadRequest("missing pane_id".to_string()));
@@ -716,7 +872,8 @@ async fn upload_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<UploadResponse>, UploadError> {
-    ensure_allowed_origin(&headers).map_err(|err| UploadError::Forbidden(err.to_string()))?;
+    ensure_allowed_request(&headers, &state.request_policy)
+        .map_err(|err| UploadError::Forbidden(err.to_string()))?;
     if body.len() > MAX_UPLOAD_BYTES {
         return Err(UploadError::TooLarge);
     }
@@ -725,12 +882,11 @@ async fn upload_handler(
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_string());
-    eprintln!(
-        "herdr web-bridge upload request: name={:?} bytes={} mime={:?} overwrite={}",
-        query.name,
-        body.len(),
-        mime,
-        query.overwrite
+    debug!(
+        bytes = body.len(),
+        mime = ?mime,
+        overwrite = query.overwrite,
+        "herdr web-bridge upload request"
     );
     let name = match query.name.as_deref().and_then(sanitize_upload_file_name) {
         Some(name) => name,
@@ -745,9 +901,9 @@ async fn upload_handler(
     let existing = tokio::fs::symlink_metadata(&destination).await.ok();
     if let Some(existing) = existing {
         if !query.overwrite {
-            eprintln!(
-                "herdr web-bridge upload conflict: {}",
-                destination.display()
+            info!(
+                name = %name,
+                "herdr web-bridge upload conflict"
             );
             return Err(UploadError::Conflict {
                 name,
@@ -807,11 +963,15 @@ async fn upload_handler(
             mime,
         },
     };
-    eprintln!("herdr web-bridge upload saved: {}", response.file.path);
+    info!(bytes = body.len(), "herdr web-bridge upload saved");
     Ok(Json(response))
 }
 
-async fn snapshot_handler(State(state): State<BridgeState>) -> Result<Json<Snapshot>, BridgeError> {
+async fn snapshot_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Result<Json<Snapshot>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
     let workspaces = match api_request(
         &state.api,
         "herdr-web:workspace-list",
@@ -846,6 +1006,16 @@ async fn snapshot_handler(State(state): State<BridgeState>) -> Result<Json<Snaps
         panes,
         layouts,
         selected_pane_id,
+    }))
+}
+
+async fn capabilities_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Result<Json<Capabilities>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    Ok(Json(Capabilities {
+        commands: ALLOWED_COMMANDS,
     }))
 }
 
@@ -917,7 +1087,7 @@ async fn terminal_ws_handler(
     Query(query): Query<TerminalQuery>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(err) = ensure_allowed_origin(&headers) {
+    if let Err(err) = ensure_allowed_request(&headers, &state.request_policy) {
         return err.into_response();
     }
     ws.on_upgrade(move |socket| handle_terminal_socket(socket, state, query))
@@ -929,7 +1099,7 @@ async fn events_ws_handler(
     State(state): State<BridgeState>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(err) = ensure_allowed_origin(&headers) {
+    if let Err(err) = ensure_allowed_request(&headers, &state.request_policy) {
         return err.into_response();
     }
     ws.on_upgrade(move |socket| handle_events_socket(socket, state))
@@ -941,7 +1111,7 @@ async fn ui_events_ws_handler(
     State(state): State<BridgeState>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(err) = ensure_allowed_origin(&headers) {
+    if let Err(err) = ensure_allowed_request(&headers, &state.request_policy) {
         return err.into_response();
     }
     ws.on_upgrade(move |socket| handle_ui_events_socket(socket, state))
@@ -1448,6 +1618,57 @@ mod tests {
     }
 
     #[test]
+    fn request_gate_allows_same_origin_and_loopback_dev_proxy() {
+        let policy = test_policy("127.0.0.1", 8787);
+        assert!(request_allowed(
+            &origin_headers("127.0.0.1:8787", None),
+            &policy
+        ));
+        assert!(request_allowed(
+            &origin_headers("127.0.0.1:8787", Some("http://127.0.0.1:8787")),
+            &policy
+        ));
+        assert!(request_allowed(
+            &origin_headers("127.0.0.1:5173", Some("http://127.0.0.1:5173")),
+            &policy
+        ));
+    }
+
+    #[test]
+    fn request_gate_rejects_dns_rebinding_hosts() {
+        let policy = test_policy("0.0.0.0", 4000);
+        assert!(!request_allowed(
+            &origin_headers("evil.example:4000", Some("http://evil.example:4000")),
+            &policy
+        ));
+        assert!(request_allowed(
+            &origin_headers("192.168.1.10:4000", Some("http://192.168.1.10:4000")),
+            &policy
+        ));
+        assert!(!request_allowed(
+            &origin_headers("192.168.1.10:8787", Some("http://192.168.1.10:8787")),
+            &policy
+        ));
+    }
+
+    #[test]
+    fn request_gate_rejects_cross_site_browser_origins() {
+        let policy = test_policy("127.0.0.1", 8787);
+        assert!(!request_allowed(
+            &origin_headers("127.0.0.1:8787", Some("https://example.com")),
+            &policy
+        ));
+        assert!(!request_allowed(
+            &origin_headers("192.168.1.10:8787", Some("http://127.0.0.1:5173")),
+            &policy
+        ));
+        assert!(!request_allowed(
+            &origin_headers("127.0.0.1:8787", Some("null")),
+            &policy
+        ));
+    }
+
+    #[test]
     fn origin_gate_allows_same_origin_and_loopback_dev_proxy() {
         assert!(request_origin_allowed(&origin_headers(
             "127.0.0.1:8787",
@@ -1480,6 +1701,19 @@ mod tests {
     }
 
     #[test]
+    fn host_gate_accepts_exact_loopback_and_ip_literal_binds() {
+        let loopback = test_policy("127.0.0.1", 8787);
+        assert!(host_authority_allowed("localhost:5173", &loopback));
+        assert!(host_authority_allowed("127.0.0.1:8787", &loopback));
+        assert!(!host_authority_allowed("127.0.0.2:8787", &loopback));
+
+        let lan = test_policy("0.0.0.0", 4000);
+        assert!(host_authority_allowed("192.168.1.10:4000", &lan));
+        assert!(host_authority_allowed("[::1]:5173", &lan));
+        assert!(!host_authority_allowed("evil.example:4000", &lan));
+    }
+
+    #[test]
     fn validates_narrow_agent_start_commands() {
         let request: Request = serde_json::from_value(serde_json::json!({
             "id": "test",
@@ -1504,6 +1738,56 @@ mod tests {
                 "split": "right",
                 "focus": true,
                 "argv": ["sh", "-c", "date"],
+                "env": { "X": "1" }
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_err());
+    }
+
+    #[test]
+    fn validates_narrow_workspace_and_tab_create_commands() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "workspace.create",
+            "params": {
+                "focus": true
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_ok());
+
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "workspace.create",
+            "params": {
+                "focus": true,
+                "cwd": "/tmp",
+                "env": { "X": "1" }
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_err());
+
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "tab.create",
+            "params": {
+                "workspace_id": "w1",
+                "focus": true,
+                "label": "Codex"
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_ok());
+
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "tab.create",
+            "params": {
+                "workspace_id": "w1",
+                "focus": true,
+                "cwd": "/tmp",
                 "env": { "X": "1" }
             }
         }))
@@ -1612,6 +1896,18 @@ mod tests {
     }
 
     #[test]
+    fn upload_file_name_sanitization_rechecks_truncated_name() {
+        let name = format!("{}.", "a".repeat(180));
+        let expected = "a".repeat(180);
+        assert_eq!(
+            sanitize_upload_file_name(&name).as_deref(),
+            Some(expected.as_str())
+        );
+        let dots = ".".repeat(181);
+        assert_eq!(sanitize_upload_file_name(&dots), None);
+    }
+
+    #[test]
     fn upload_extension_comes_from_mime() {
         assert_eq!(upload_extension_for_mime(Some("image/png")), Some("png"));
         assert_eq!(
@@ -1638,5 +1934,12 @@ mod tests {
             headers.insert(ORIGIN, origin.parse().unwrap());
         }
         headers
+    }
+
+    fn test_policy(bind_host: &str, bind_port: u16) -> RequestPolicy {
+        RequestPolicy {
+            bind_host: bind_host.to_string(),
+            bind_port,
+        }
     }
 }

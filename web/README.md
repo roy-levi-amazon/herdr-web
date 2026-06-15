@@ -32,6 +32,7 @@ development session.
 
 The app expects these bridge routes:
 
+- `/api/capabilities`
 - `/api/snapshot`
 - `/api/command`
 - `/api/selection`

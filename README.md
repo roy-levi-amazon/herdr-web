@@ -73,6 +73,7 @@ Useful narrower commands:
 npm run lint:web
 npm run test:web
 npm run build:web
+npm run bridge:fmt
 npm run bridge:test
 npm run bridge:build
 scripts/check-vendor.sh
@@ -133,6 +134,7 @@ Bind to `0.0.0.0` only on trusted networks.
 
 The bridge exposes:
 
+- `GET /api/capabilities`: bridge feature flags and allow-listed browser commands
 - `GET /api/snapshot`: workspaces, tabs, panes, layouts, and shared web selection
 - `POST /api/command`: allow-listed workspace/tab/pane commands
 - `POST /api/selection`: bridge-owned selected pane for syncing browser clients
@@ -149,8 +151,9 @@ Input, scroll, and resize from any browser are forwarded through the shared atta
 currently last resize wins. The header's refit button forces the current browser to send a fresh
 fit/resize frame.
 
-Browser-originated API and WebSocket requests must be same-origin with the bridge, with loopback
-development proxy origins allowed for Vite. This is a CSRF guard, not user authentication.
+API and WebSocket requests must use an allowed bridge `Host` header. Browser-originated requests
+must also be same-origin with the bridge, with loopback development proxy origins allowed for Vite.
+This is a DNS-rebinding/CSRF guard, not user authentication.
 
 Pane selection is bridge-owned. Selecting a pane in one browser updates `/api/selection`, broadcasts
 over `/ws/ui-events`, and other browsers switch to the same pane.

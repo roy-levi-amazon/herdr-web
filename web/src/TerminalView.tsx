@@ -36,6 +36,8 @@ type UploadConflictState = {
   resolve: (replace: boolean) => void;
 };
 
+const MAX_UPLOAD_FILES = 8;
+
 export function TerminalView({
   pane,
   autoFocus = true,
@@ -341,16 +343,24 @@ export function TerminalView({
     }
     uploadInFlightRef.current = true;
     setUploading(true);
-    showUploadStatus(`Uploading ${files.length} file${files.length === 1 ? "" : "s"}`);
+    const uploadFiles = files.slice(0, MAX_UPLOAD_FILES);
+    const skippedCount = files.length - uploadFiles.length;
+    showUploadStatus(
+      `Uploading ${uploadFiles.length} file${uploadFiles.length === 1 ? "" : "s"}${
+        skippedCount > 0 ? `; skipping ${skippedCount}` : ""
+      }`,
+    );
     try {
       const uploaded: UploadedFile[] = [];
-      for (const file of files.slice(0, 8)) {
+      for (const file of uploadFiles) {
         uploaded.push(await uploadWithOverwritePrompt(file, confirmUploadReplace));
       }
       if (uploaded.length > 0) {
         enqueueTerminalInput([uploaded.map((file) => shellQuote(file.path)).join(" ")]);
         showUploadStatus(
-          `Uploaded ${uploaded.length} file${uploaded.length === 1 ? "" : "s"}`,
+          `Uploaded ${uploaded.length} file${uploaded.length === 1 ? "" : "s"}${
+            skippedCount > 0 ? `; skipped ${skippedCount}` : ""
+          }`,
           2500,
         );
       } else {
@@ -682,10 +692,10 @@ function isNonRetryableAttachClose(reason: string | null) {
 
 function connectionCopy(state: ConnectionState, reason: string | null) {
   if (reason?.includes("already has an attached client")) {
-    return "Attached in another browser";
+    return "Attached elsewhere";
   }
   if (reason?.includes("terminal attach taken over")) {
-    return "Detached by another browser";
+    return "Detached elsewhere";
   }
   switch (state) {
     case "connecting":
