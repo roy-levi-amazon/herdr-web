@@ -886,9 +886,10 @@ async fn command_handler(
         "method": body.method,
         "params": params,
     });
-    let request: Request = serde_json::from_value(request_value)
+    let mut request: Request = serde_json::from_value(request_value)
         .map_err(|err| BridgeError::BadRequest(format!("invalid command: {err}")))?;
     validate_web_command(&request.method)?;
+    fill_clear_rename_labels(&state.api, &mut request.method)?;
 
     let api = state.api.clone();
     let response = tokio::task::spawn_blocking(move || api.request(request))
@@ -897,6 +898,48 @@ async fn command_handler(
     let value = serde_json::to_value(response.result)
         .map_err(|err| BridgeError::Protocol(err.to_string()))?;
     Ok(Json(value))
+}
+
+fn fill_clear_rename_labels(api: &ApiClient, method: &mut Method) -> Result<(), BridgeError> {
+    match method {
+        Method::WorkspaceRename(params) if params.label.is_none() => {
+            params.label = Some(default_workspace_label(api, &params.workspace_id)?);
+        }
+        Method::TabRename(params) if params.label.is_none() => {
+            params.label = Some(default_tab_label(api, &params.tab_id)?);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn default_tab_label(api: &ApiClient, tab_id: &str) -> Result<String, BridgeError> {
+    match api_request(
+        api,
+        "herdr-web:clear-tab-label",
+        Method::TabList(TabListParams::default()),
+    )? {
+        ResponseResult::TabList { tabs } => tabs
+            .into_iter()
+            .find(|tab| tab.tab_id == tab_id)
+            .map(|tab| tab.number.to_string())
+            .ok_or_else(|| BridgeError::BadRequest(format!("tab not found: {tab_id}"))),
+        other => Err(BridgeError::Protocol(format!(
+            "unexpected response: {other:?}"
+        ))),
+    }
+}
+
+fn default_workspace_label(api: &ApiClient, workspace_id: &str) -> Result<String, BridgeError> {
+    let label = current_panes(api)?
+        .into_iter()
+        .filter(|pane| pane.workspace_id == workspace_id)
+        .filter_map(|pane| pane.foreground_cwd.or(pane.cwd))
+        .min()
+        .map(|cwd| crate::workspace::derive_label_from_cwd(Path::new(&cwd)))
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or_else(|| "workspace".to_string());
+    Ok(label)
 }
 
 async fn selection_handler(
