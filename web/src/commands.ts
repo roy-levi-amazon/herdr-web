@@ -36,7 +36,8 @@ export function createdPaneId(result: CommandResult): string | null {
   const rootPane = result.root_pane as { pane_id?: string } | undefined;
   const pane = result.pane as { pane_id?: string } | undefined;
   const agent = result.agent as { pane_id?: string } | undefined;
-  return rootPane?.pane_id ?? pane?.pane_id ?? agent?.pane_id ?? null;
+  const moveResult = result.move_result as { pane?: { pane_id?: string } } | undefined;
+  return rootPane?.pane_id ?? pane?.pane_id ?? agent?.pane_id ?? moveResult?.pane?.pane_id ?? null;
 }
 
 export const commands = {
@@ -62,6 +63,18 @@ export const commands = {
   // Layout-mutating: requires the bridge allow-list to include `pane.split`.
   splitPane: (targetPaneId: string, direction: SplitDirection) =>
     runCommand("pane.split", { target_pane_id: targetPaneId, direction, focus: true }),
+  movePaneToNewTab: (paneId: string, workspaceId: string, label?: string) =>
+    runCommand("pane.move", {
+      pane_id: paneId,
+      destination: { type: "new_tab", workspace_id: workspaceId, label },
+      focus: true,
+    }),
+  movePaneToNewWorkspace: (paneId: string, label?: string) =>
+    runCommand("pane.move", {
+      pane_id: paneId,
+      destination: { type: "new_workspace", label },
+      focus: true,
+    }),
 
   startAgentSplit: (tabId: string, direction: SplitDirection, spec: LaunchSpec) =>
     runCommand("agent.start", {
@@ -102,16 +115,25 @@ export const commands = {
   },
 };
 
-/** Best-effort probe: is `pane.split` permitted by the bridge allow-list? */
-export async function probeSplitSupported(): Promise<boolean> {
+async function probeCommandSupported(method: string): Promise<boolean> {
   try {
     const response = await fetch("/api/capabilities");
     if (!response.ok) {
       return false;
     }
     const body = (await response.json()) as { commands?: unknown };
-    return Array.isArray(body.commands) && body.commands.includes("pane.split");
+    return Array.isArray(body.commands) && body.commands.includes(method);
   } catch {
     return false;
   }
+}
+
+/** Best-effort probe: is `pane.split` permitted by the bridge allow-list? */
+export function probeSplitSupported(): Promise<boolean> {
+  return probeCommandSupported("pane.split");
+}
+
+/** Best-effort probe: is `pane.move` permitted by the bridge allow-list? */
+export function probePaneMoveSupported(): Promise<boolean> {
+  return probeCommandSupported("pane.move");
 }

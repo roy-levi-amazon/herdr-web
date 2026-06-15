@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createdPaneId, probeSplitSupported } from "./commands";
+import { createdPaneId, probePaneMoveSupported, probeSplitSupported } from "./commands";
 
 describe("command helpers", () => {
   afterEach(() => {
@@ -10,6 +10,7 @@ describe("command helpers", () => {
     expect(createdPaneId({ root_pane: { pane_id: "root" } })).toBe("root");
     expect(createdPaneId({ pane: { pane_id: "pane" } })).toBe("pane");
     expect(createdPaneId({ agent: { pane_id: "agent" } })).toBe("agent");
+    expect(createdPaneId({ move_result: { pane: { pane_id: "moved" } } })).toBe("moved");
     expect(createdPaneId({})).toBeNull();
   });
 
@@ -28,5 +29,13 @@ describe("command helpers", () => {
     );
 
     await expect(probeSplitSupported()).resolves.toBe(false);
+  });
+
+  it("reads pane move support from bridge capabilities", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ commands: ["pane.move"] }), { status: 200 }),
+    );
+
+    await expect(probePaneMoveSupported()).resolves.toBe(true);
   });
 });

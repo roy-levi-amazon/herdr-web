@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { commands, createdPaneId, probeSplitSupported } from "./commands";
+import { commands, createdPaneId, probePaneMoveSupported, probeSplitSupported } from "./commands";
 import type { LaunchSpec } from "./commands";
 import { LaunchDialog } from "./LaunchDialog";
 import { resolveLaunchSpec } from "./launch";
@@ -183,6 +183,7 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [splitSupported, setSplitSupported] = useState(false);
+  const [paneMoveSupported, setPaneMoveSupported] = useState(false);
   const [refitToken, setRefitToken] = useState(0);
   const isNarrow = useIsNarrow();
   const snapshotRef = useRef<Snapshot | null>(null);
@@ -333,6 +334,18 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    void probePaneMoveSupported().then((ok) => {
+      if (!cancelled) {
+        setPaneMoveSupported(ok);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     const onPopState = (event: PopStateEvent) => {
       if (!isNarrowRef.current) {
         return;
@@ -368,6 +381,17 @@ export function App() {
     () => snapshot?.panes.find((pane) => pane.pane_id === resolvedPaneId) ?? null,
     [snapshot, resolvedPaneId],
   );
+  const selectedPaneMenuPress = useLongPress((x, y) => {
+    if (selectedPane) {
+      setMenu({
+        kind: "pane",
+        id: selectedPane.pane_id,
+        label: paneTitle(selectedPane),
+        x,
+        y,
+      });
+    }
+  });
 
   useEffect(() => {
     if (isNarrow) {
@@ -558,6 +582,15 @@ export function App() {
     } else if (key === "newtab") {
       setActiveSpaceId(id);
       setLaunchTarget({ mode: "tab", workspaceId: id });
+    } else if (key === "move_new_tab" && kind === "pane") {
+      const pane = snapshotRef.current?.panes.find((item) => item.pane_id === id);
+      if (!pane) {
+        setError("Pane not found");
+        return;
+      }
+      void exec(() => commands.movePaneToNewTab(id, pane.workspace_id, label), true);
+    } else if (key === "move_new_space" && kind === "pane") {
+      void exec(() => commands.movePaneToNewWorkspace(id, label), true);
     }
   };
 
@@ -698,7 +731,7 @@ export function App() {
           >
             {isNarrow ? <ChevronLeft size={20} /> : <PanelLeft size={18} />}
           </button>
-          <div className="stage-id">
+          <div className="stage-id" {...selectedPaneMenuPress}>
             <span className="stage-title">{selectedPane ? paneTitle(selectedPane) : "herdr-web"}</span>
             <span className="stage-sub mono">
               {stageBreadcrumb(snapshot, selectedPane, loadState)}
@@ -770,7 +803,7 @@ export function App() {
           x={menu.x}
           y={menu.y}
           title={menu.label}
-          items={menuItems(menu.kind)}
+          items={menuItems(menu.kind, paneMoveSupported)}
           onPick={onMenuPick}
           onClose={() => setMenu(null)}
         />
@@ -1514,7 +1547,7 @@ function SplitGlyph() {
   );
 }
 
-function menuItems(kind: MenuKind): MenuItem[] {
+function menuItems(kind: MenuKind, paneMoveSupported: boolean): MenuItem[] {
   if (kind === "space") {
     return [
       { key: "rename", label: "Rename" },
@@ -1528,10 +1561,17 @@ function menuItems(kind: MenuKind): MenuItem[] {
       { key: "close", label: "Close tab", danger: true },
     ];
   }
-  return [
+  const paneItems: MenuItem[] = [
     { key: "rename", label: "Rename" },
-    { key: "close", label: "Close pane", danger: true },
   ];
+  if (paneMoveSupported) {
+    paneItems.push(
+      { key: "move_new_tab", label: "Move to new tab" },
+      { key: "move_new_space", label: "Move to new space" },
+    );
+  }
+  paneItems.push({ key: "close", label: "Close pane", danger: true });
+  return paneItems;
 }
 
 function closeCopy(kind: MenuKind) {

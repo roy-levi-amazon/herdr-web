@@ -26,8 +26,8 @@ use tracing::{debug, info, warn};
 use crate::api::client::{ApiClient, ApiClientError};
 use crate::api::schema::{
     EmptyParams, EventsSubscribeParams, Method, PaneInfo, PaneLayoutParams, PaneLayoutSnapshot,
-    PaneListParams, Request, ResponseResult, SplitDirection, Subscription, TabInfo, TabListParams,
-    WorkspaceInfo,
+    PaneListParams, PaneMoveDestination, Request, ResponseResult, SplitDirection, Subscription,
+    TabInfo, TabListParams, WorkspaceInfo,
 };
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode,
@@ -524,6 +524,8 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "pane.send_input",
     // Layout-mutating: the web client builds splits directly.
     "pane.split",
+    // Narrow live pane moves: new tab or new workspace destinations only.
+    "pane.move",
     // Agent creation: exposes Herdr's native agent.start placement and argv path.
     "agent.start",
 ];
@@ -729,6 +731,41 @@ fn validate_web_command(method: &Method) -> Result<(), BridgeError> {
                 ));
             }
         }
+        Method::PaneMove(params) => {
+            if params.pane_id.trim().is_empty() {
+                return Err(BridgeError::BadRequest("pane_id is required".to_string()));
+            }
+            if !params.focus {
+                return Err(BridgeError::BadRequest(
+                    "pane.move must focus the moved pane through herdr-web".to_string(),
+                ));
+            }
+            match &params.destination {
+                PaneMoveDestination::NewTab {
+                    workspace_id,
+                    label,
+                } => {
+                    if workspace_id
+                        .as_deref()
+                        .is_none_or(|workspace_id| workspace_id.trim().is_empty())
+                    {
+                        return Err(BridgeError::BadRequest(
+                            "pane.move new_tab requires workspace_id through herdr-web".to_string(),
+                        ));
+                    }
+                    validate_optional_label(label, "pane.move new_tab label")?;
+                }
+                PaneMoveDestination::NewWorkspace { label, tab_label } => {
+                    validate_optional_label(label, "pane.move new_workspace label")?;
+                    validate_optional_label(tab_label, "pane.move new_workspace tab_label")?;
+                }
+                PaneMoveDestination::Tab { .. } => {
+                    return Err(BridgeError::BadRequest(
+                        "pane.move to existing tabs is not exposed through herdr-web".to_string(),
+                    ));
+                }
+            }
+        }
         Method::AgentStart(params) => {
             if params.name.trim().is_empty() || params.name.len() > 120 {
                 return Err(BridgeError::BadRequest(
@@ -756,6 +793,18 @@ fn validate_web_command(method: &Method) -> Result<(), BridgeError> {
             }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+fn validate_optional_label(label: &Option<String>, field: &str) -> Result<(), BridgeError> {
+    if label
+        .as_deref()
+        .is_some_and(|label| label.trim().is_empty() || label.len() > 120)
+    {
+        return Err(BridgeError::BadRequest(format!(
+            "{field} must be non-empty and up to 120 bytes"
+        )));
     }
     Ok(())
 }
@@ -1615,6 +1664,7 @@ mod tests {
         assert!(ALLOWED_COMMANDS.contains(&"pane.send_input"));
         // pane.split is intentionally allowed so the web client can create splits.
         assert!(ALLOWED_COMMANDS.contains(&"pane.split"));
+        assert!(ALLOWED_COMMANDS.contains(&"pane.move"));
         assert!(ALLOWED_COMMANDS.contains(&"agent.start"));
     }
 
@@ -1845,6 +1895,73 @@ mod tests {
                 "direction": "down",
                 "cwd": "/tmp",
                 "env": { "X": "1" }
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_err());
+    }
+
+    #[test]
+    fn validates_narrow_pane_moves() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "pane.move",
+            "params": {
+                "pane_id": "w1:p1",
+                "destination": {
+                    "type": "new_tab",
+                    "workspace_id": "w1",
+                    "label": "Moved"
+                },
+                "focus": true
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_ok());
+
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "pane.move",
+            "params": {
+                "pane_id": "w1:p1",
+                "destination": {
+                    "type": "new_workspace",
+                    "label": "Moved",
+                    "tab_label": "Pane"
+                },
+                "focus": true
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_ok());
+
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "pane.move",
+            "params": {
+                "pane_id": "w1:p1",
+                "destination": {
+                    "type": "tab",
+                    "tab_id": "w1:t2",
+                    "target_pane_id": "w1:p2",
+                    "split": "right"
+                },
+                "focus": true
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_err());
+
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "pane.move",
+            "params": {
+                "pane_id": "w1:p1",
+                "destination": {
+                    "type": "new_tab",
+                    "workspace_id": "w1"
+                },
+                "focus": false
             }
         }))
         .unwrap();
