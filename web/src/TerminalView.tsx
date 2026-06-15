@@ -1,10 +1,11 @@
 import { Keyboard, Paperclip, Send } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, DragEvent } from "react";
-import type { PaneInfo } from "./types";
+import { ConfirmDialog } from "./overlays";
+import { shellQuote } from "./shell";
 import { GhosttyRenderer } from "./terminalRenderer";
 import type { TerminalRenderer, TerminalSize } from "./terminalRenderer";
-import { shellQuote } from "./shell";
+import type { PaneInfo } from "./types";
 
 type Props = {
   pane: PaneInfo | null;
@@ -29,6 +30,11 @@ type UploadedFile = {
   size: number;
   mime?: string | null;
 };
+type UploadConflictState = {
+  name: string;
+  path: string;
+  resolve: (replace: boolean) => void;
+};
 
 export function TerminalView({
   pane,
@@ -47,10 +53,12 @@ export function TerminalView({
   const inputFlushTimerRef = useRef<number | null>(null);
   const uploadStatusTimerRef = useRef<number | null>(null);
   const uploadInFlightRef = useRef(false);
+  const uploadConflictRef = useRef<UploadConflictState | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [closeReason, setCloseReason] = useState<string | null>(null);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadConflict, setUploadConflict] = useState<UploadConflictState | null>(null);
   // Read at attach time without re-running the effect (which would re-attach the socket).
   const autoFocusRef = useRef(autoFocus);
   autoFocusRef.current = autoFocus;
@@ -242,6 +250,7 @@ export function TerminalView({
         window.clearTimeout(uploadStatusTimerRef.current);
         uploadStatusTimerRef.current = null;
       }
+      resolveUploadConflict(false, false);
     };
   }, []);
 
@@ -303,6 +312,22 @@ export function TerminalView({
     }
   };
 
+  const confirmUploadReplace = (error: UploadConflictError) =>
+    new Promise<boolean>((resolve) => {
+      const next = { name: error.name, path: error.path, resolve };
+      uploadConflictRef.current = next;
+      setUploadConflict(next);
+    });
+
+  function resolveUploadConflict(replace: boolean, updateState = true) {
+    const pending = uploadConflictRef.current;
+    uploadConflictRef.current = null;
+    if (updateState) {
+      setUploadConflict(null);
+    }
+    pending?.resolve(replace);
+  }
+
   const uploadAndInsert = async (files: UploadCandidate[]) => {
     if (files.length === 0 || !pane) {
       if (files.length > 0) {
@@ -320,7 +345,7 @@ export function TerminalView({
     try {
       const uploaded: UploadedFile[] = [];
       for (const file of files.slice(0, 8)) {
-        uploaded.push(await uploadWithOverwritePrompt(file));
+        uploaded.push(await uploadWithOverwritePrompt(file, confirmUploadReplace));
       }
       if (uploaded.length > 0) {
         enqueueTerminalInput([uploaded.map((file) => shellQuote(file.path)).join(" ")]);
@@ -449,6 +474,15 @@ export function TerminalView({
           onInput={sendTerminalInput}
           onUpload={openFilePicker}
           onSubmitCommand={(command) => enqueueTerminalInput([command, "\r"])}
+        />
+      ) : null}
+      {uploadConflict ? (
+        <ConfirmDialog
+          title="Replace uploaded file?"
+          message={uploadConflictMessage(uploadConflict)}
+          confirmLabel="Replace"
+          onCancel={() => resolveUploadConflict(false)}
+          onConfirm={() => resolveUploadConflict(true)}
         />
       ) : null}
     </section>
@@ -694,19 +728,28 @@ function uploadCandidatesFromClipboard(data: DataTransfer): UploadCandidate[] {
   return files;
 }
 
-async function uploadWithOverwritePrompt(file: UploadCandidate): Promise<UploadedFile> {
+async function uploadWithOverwritePrompt(
+  file: UploadCandidate,
+  confirmReplace: (error: UploadConflictError) => Promise<boolean>,
+): Promise<UploadedFile> {
   try {
     return await uploadFile(file, false);
   } catch (error) {
     if (!(error instanceof UploadConflictError)) {
       throw error;
     }
-    const replace = window.confirm(`${error.name} already exists. Replace it?`);
+    const replace = await confirmReplace(error);
     if (!replace) {
       throw new Error("Upload canceled");
     }
     return uploadFile(file, true);
   }
+}
+
+function uploadConflictMessage(conflict: UploadConflictState) {
+  return conflict.path
+    ? `${conflict.name} already exists at ${conflict.path}.`
+    : `${conflict.name} already exists.`;
 }
 
 async function uploadFile(file: UploadCandidate, overwrite: boolean): Promise<UploadedFile> {
