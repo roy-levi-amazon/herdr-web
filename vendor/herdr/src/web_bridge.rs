@@ -71,11 +71,25 @@ struct RequestPolicy {
 
 #[derive(Debug, Serialize)]
 struct Snapshot {
-    workspaces: Vec<WorkspaceInfo>,
-    tabs: Vec<TabInfo>,
+    workspaces: Vec<SnapshotWorkspaceInfo>,
+    tabs: Vec<SnapshotTabInfo>,
     panes: Vec<PaneInfo>,
     layouts: Vec<PaneLayoutSnapshot>,
     selected_pane_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotWorkspaceInfo {
+    #[serde(flatten)]
+    info: WorkspaceInfo,
+    can_clear_name: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotTabInfo {
+    #[serde(flatten)]
+    info: TabInfo,
+    can_clear_name: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -931,15 +945,23 @@ fn default_tab_label(api: &ApiClient, tab_id: &str) -> Result<String, BridgeErro
 }
 
 fn default_workspace_label(api: &ApiClient, workspace_id: &str) -> Result<String, BridgeError> {
-    let label = current_panes(api)?
-        .into_iter()
+    Ok(default_workspace_label_from_panes(
+        workspace_id,
+        current_panes(api)?.iter(),
+    ))
+}
+
+fn default_workspace_label_from_panes<'a>(
+    workspace_id: &str,
+    panes: impl Iterator<Item = &'a PaneInfo>,
+) -> String {
+    panes
         .filter(|pane| pane.workspace_id == workspace_id)
-        .filter_map(|pane| pane.foreground_cwd.or(pane.cwd))
+        .filter_map(|pane| pane.foreground_cwd.as_ref().or(pane.cwd.as_ref()))
         .min()
-        .map(|cwd| crate::workspace::derive_label_from_cwd(Path::new(&cwd)))
+        .map(|cwd| crate::workspace::derive_label_from_cwd(Path::new(cwd)))
         .filter(|label| !label.trim().is_empty())
-        .unwrap_or_else(|| "workspace".to_string());
-    Ok(label)
+        .unwrap_or_else(|| "workspace".to_string())
 }
 
 async fn selection_handler(
@@ -1106,6 +1128,27 @@ async fn snapshot_handler(
     let panes = current_panes(&state.api)?;
     let layouts = collect_tab_layouts(&state.api, &tabs, &panes);
     let selected_pane_id = shared_selected_pane(&state, &panes)?;
+    let workspaces = workspaces
+        .into_iter()
+        .map(|workspace| {
+            let can_clear_name = workspace.label
+                != default_workspace_label_from_panes(&workspace.workspace_id, panes.iter());
+            SnapshotWorkspaceInfo {
+                info: workspace,
+                can_clear_name,
+            }
+        })
+        .collect();
+    let tabs = tabs
+        .into_iter()
+        .map(|tab| {
+            let can_clear_name = !is_default_tab_label(&tab.label);
+            SnapshotTabInfo {
+                info: tab,
+                can_clear_name,
+            }
+        })
+        .collect();
 
     Ok(Json(Snapshot {
         workspaces,
@@ -1114,6 +1157,11 @@ async fn snapshot_handler(
         layouts,
         selected_pane_id,
     }))
+}
+
+fn is_default_tab_label(label: &str) -> bool {
+    let label = label.trim();
+    !label.is_empty() && label.chars().all(|ch| ch.is_ascii_digit())
 }
 
 async fn capabilities_handler(

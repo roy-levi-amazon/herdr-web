@@ -53,10 +53,16 @@ export function paneTitle(pane: PaneInfo) {
 }
 
 export function canClearTabName(tab: TabInfo) {
+  if (typeof tab.can_clear_name === "boolean") {
+    return tab.can_clear_name;
+  }
   return !isDefaultTabLabel(tab);
 }
 
 export function canClearWorkspaceName(workspace: WorkspaceInfo, panes: readonly PaneInfo[]) {
+  if (typeof workspace.can_clear_name === "boolean") {
+    return workspace.can_clear_name;
+  }
   return workspace.label !== inferredWorkspaceDefaultLabel(workspace, panes);
 }
 

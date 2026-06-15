@@ -2,8 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   commands,
   createdPaneId,
-  probePaneMoveSupported,
-  probeSplitSupported,
   probeSupportedCommands,
 } from "./commands";
 
@@ -20,31 +18,6 @@ describe("command helpers", () => {
     expect(createdPaneId({})).toBeNull();
   });
 
-  it("reads split support from bridge capabilities", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ commands: ["pane.split"] }), { status: 200 }),
-    );
-
-    await expect(probeSplitSupported()).resolves.toBe(true);
-    expect(fetch).toHaveBeenCalledWith("/api/capabilities");
-  });
-
-  it("treats missing split capability as unsupported", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ commands: ["tab.create"] }), { status: 200 }),
-    );
-
-    await expect(probeSplitSupported()).resolves.toBe(false);
-  });
-
-  it("reads pane move support from bridge capabilities", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ commands: ["pane.move"] }), { status: 200 }),
-    );
-
-    await expect(probePaneMoveSupported()).resolves.toBe(true);
-  });
-
   it("returns supported command names from bridge capabilities", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ commands: ["pane.split", "pane.move", 42] }), {
@@ -53,6 +26,7 @@ describe("command helpers", () => {
     );
 
     await expect(probeSupportedCommands()).resolves.toEqual(new Set(["pane.split", "pane.move"]));
+    expect(fetch).toHaveBeenCalledWith("/api/capabilities");
   });
 
   it("creates launch tabs without a tab label and renames the root pane", async () => {

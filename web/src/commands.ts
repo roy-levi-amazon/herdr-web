@@ -135,13 +135,3 @@ export async function probeSupportedCommands(): Promise<Set<string>> {
     return new Set();
   }
 }
-
-/** Best-effort probe: is `pane.split` permitted by the bridge allow-list? */
-export async function probeSplitSupported(): Promise<boolean> {
-  return (await probeSupportedCommands()).has("pane.split");
-}
-
-/** Best-effort probe: is `pane.move` permitted by the bridge allow-list? */
-export async function probePaneMoveSupported(): Promise<boolean> {
-  return (await probeSupportedCommands()).has("pane.move");
-}

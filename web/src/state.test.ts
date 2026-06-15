@@ -158,10 +158,22 @@ describe("rename clear heuristics", () => {
     expect(canClearTabName(tab("review"))).toBe(true);
   });
 
+  it("uses bridge-provided tab clearability when available", () => {
+    expect(canClearTabName({ ...tab("review"), can_clear_name: false })).toBe(false);
+  });
+
   it("treats cwd-derived workspace labels as already default", () => {
     const panes = [{ ...pane("1-1"), cwd: "/home/kevin/worktrees/herdr-web" }];
 
     expect(canClearWorkspaceName(workspace("herdr-web"), panes)).toBe(false);
     expect(canClearWorkspaceName(workspace("Herdr Web"), panes)).toBe(true);
+  });
+
+  it("uses bridge-provided workspace clearability when cwd heuristics would differ", () => {
+    const panes = [{ ...pane("1-1"), cwd: "/home/kevin/worktrees/herdr-web/web/src" }];
+
+    expect(canClearWorkspaceName({ ...workspace("herdr-web"), can_clear_name: false }, panes)).toBe(
+      false,
+    );
   });
 });
