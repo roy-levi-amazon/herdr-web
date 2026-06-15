@@ -4,6 +4,7 @@ import type { ChangeEvent, ClipboardEvent, DragEvent } from "react";
 import type { PaneInfo } from "./types";
 import { GhosttyRenderer } from "./terminalRenderer";
 import type { TerminalRenderer, TerminalSize } from "./terminalRenderer";
+import { shellQuote } from "./shell";
 
 type Props = {
   pane: PaneInfo | null;
@@ -44,6 +45,8 @@ export function TerminalView({
   const sendResizeRef = useRef<(size: TerminalSize) => void>(() => {});
   const inputQueueRef = useRef<string[]>([]);
   const inputFlushTimerRef = useRef<number | null>(null);
+  const uploadStatusTimerRef = useRef<number | null>(null);
+  const uploadInFlightRef = useRef(false);
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [closeReason, setCloseReason] = useState<string | null>(null);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
@@ -234,6 +237,15 @@ export function TerminalView({
   }, [pane?.terminal_id]);
 
   useEffect(() => {
+    return () => {
+      if (uploadStatusTimerRef.current !== null) {
+        window.clearTimeout(uploadStatusTimerRef.current);
+        uploadStatusTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     if (refitToken === 0) {
       return;
     }
@@ -271,16 +283,40 @@ export function TerminalView({
   };
   const uploadDisabled = !pane || uploading;
 
+  const showUploadStatus = (message: string | null, timeoutMs?: number) => {
+    if (uploadStatusTimerRef.current !== null) {
+      window.clearTimeout(uploadStatusTimerRef.current);
+      uploadStatusTimerRef.current = null;
+    }
+    setUploadStatus(message);
+    if (message && timeoutMs) {
+      uploadStatusTimerRef.current = window.setTimeout(() => {
+        uploadStatusTimerRef.current = null;
+        setUploadStatus(null);
+      }, timeoutMs);
+    }
+  };
+
+  const openFilePicker = () => {
+    if (!uploadDisabled) {
+      fileInputRef.current?.click();
+    }
+  };
+
   const uploadAndInsert = async (files: UploadCandidate[]) => {
     if (files.length === 0 || !pane) {
       if (files.length > 0) {
-        setUploadStatus("No pane selected");
-        window.setTimeout(() => setUploadStatus(null), 3000);
+        showUploadStatus("No pane selected", 3000);
       }
       return;
     }
+    if (uploadInFlightRef.current) {
+      showUploadStatus("Upload already in progress", 2500);
+      return;
+    }
+    uploadInFlightRef.current = true;
     setUploading(true);
-    setUploadStatus(`Uploading ${files.length} file${files.length === 1 ? "" : "s"}`);
+    showUploadStatus(`Uploading ${files.length} file${files.length === 1 ? "" : "s"}`);
     try {
       const uploaded: UploadedFile[] = [];
       for (const file of files.slice(0, 8)) {
@@ -288,16 +324,18 @@ export function TerminalView({
       }
       if (uploaded.length > 0) {
         enqueueTerminalInput([uploaded.map((file) => shellQuote(file.path)).join(" ")]);
-        setUploadStatus(`Uploaded ${uploaded.length} file${uploaded.length === 1 ? "" : "s"}`);
-        window.setTimeout(() => setUploadStatus(null), 2500);
+        showUploadStatus(
+          `Uploaded ${uploaded.length} file${uploaded.length === 1 ? "" : "s"}`,
+          2500,
+        );
       } else {
-        setUploadStatus(null);
+        showUploadStatus(null);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Upload failed";
-      setUploadStatus(message);
-      window.setTimeout(() => setUploadStatus(null), 4500);
+      showUploadStatus(message, 4500);
     } finally {
+      uploadInFlightRef.current = false;
       setUploading(false);
     }
   };
@@ -326,11 +364,10 @@ export function TerminalView({
     const files = uploadCandidatesFromFileList(event.target.files);
     event.target.value = "";
     if (files.length === 0) {
-      setUploadStatus("No file selected");
-      window.setTimeout(() => setUploadStatus(null), 2000);
+      showUploadStatus("No file selected", 2000);
       return;
     }
-    setUploadStatus(`Selected ${files.length} file${files.length === 1 ? "" : "s"}`);
+    showUploadStatus(`Selected ${files.length} file${files.length === 1 ? "" : "s"}`);
     void uploadAndInsert(files);
   };
 
@@ -388,24 +425,29 @@ export function TerminalView({
       {pane && connectionState !== "attached" ? (
         <div className="terminal-overlay">{connectionCopy(connectionState, closeReason)}</div>
       ) : null}
-      {uploadStatus ? <div className="terminal-upload-status">{uploadStatus}</div> : null}
+      {uploadStatus ? (
+        <div className="terminal-upload-status" role="status" aria-live="polite">
+          {uploadStatus}
+        </div>
+      ) : null}
       {!mobileControls ? (
-        <label
+        <button
           className="terminal-upload-fab"
+          type="button"
           aria-label="Upload file"
           title="Upload file"
-          aria-disabled={uploadDisabled ? "true" : "false"}
-          htmlFor={uploadInputId}
+          disabled={uploadDisabled}
+          onClick={openFilePicker}
         >
           <Paperclip size={16} />
-        </label>
+        </button>
       ) : null}
       {mobileControls ? (
         <MobileTerminalControls
           disabled={!pane || connectionState !== "attached"}
           uploadDisabled={uploadDisabled}
-          uploadInputId={uploadInputId}
           onInput={sendTerminalInput}
+          onUpload={openFilePicker}
           onSubmitCommand={(command) => enqueueTerminalInput([command, "\r"])}
         />
       ) : null}
@@ -416,14 +458,14 @@ export function TerminalView({
 function MobileTerminalControls({
   disabled,
   uploadDisabled,
-  uploadInputId,
   onInput,
+  onUpload,
   onSubmitCommand,
 }: {
   disabled: boolean;
   uploadDisabled: boolean;
-  uploadInputId: string;
   onInput: (data: string) => void;
+  onUpload: () => void;
   onSubmitCommand: (command: string) => void;
 }) {
   const [value, setValue] = useState("");
@@ -452,15 +494,16 @@ function MobileTerminalControls({
         >
           <Keyboard size={15} />
         </button>
-        <label
+        <button
           className="term-key term-key-icon"
+          type="button"
           aria-label="Upload file"
           title="Upload"
-          aria-disabled={uploadDisabled ? "true" : "false"}
-          htmlFor={uploadInputId}
+          disabled={uploadDisabled}
+          onClick={onUpload}
         >
           <Paperclip size={15} />
-        </label>
+        </button>
         <button
           className="term-key"
           type="button"
@@ -704,11 +747,4 @@ class UploadConflictError extends Error {
   ) {
     super(`file exists: ${path || name}`);
   }
-}
-
-function shellQuote(path: string) {
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(path)) {
-    return path;
-  }
-  return `'${path.replaceAll("'", "'\\''")}'`;
 }

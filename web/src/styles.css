@@ -950,7 +950,7 @@ button {
   opacity: 1;
 }
 
-.terminal-upload-fab[aria-disabled="true"] {
+.terminal-upload-fab:disabled {
   cursor: default;
   opacity: 0.42;
 }
@@ -1048,8 +1048,7 @@ button {
 .term-key:disabled,
 .term-send:disabled,
 .term-native-input:disabled,
-.terminal-upload-fab[aria-disabled="true"],
-.term-key[aria-disabled="true"] {
+.terminal-upload-fab:disabled {
   cursor: default;
   opacity: 0.48;
 }

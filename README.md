@@ -28,6 +28,7 @@ vendor/herdr/        vendored Herdr source with the web bridge overlay
 scripts/run-bridge.sh
 scripts/check-vendor.sh
 docs/vendoring.md
+docs/release.md
 ```
 
 The bridge is currently compiled as the vendored Herdr binary and run with:
@@ -109,7 +110,15 @@ For LAN/mobile testing:
 HOST=0.0.0.0 PORT=4000 scripts/run-bridge.sh
 ```
 
-The bridge has no browser authentication yet. Bind to `0.0.0.0` only on trusted networks.
+Uploads are saved under `HERDR_WEB_UPLOAD_DIR`, `XDG_DATA_HOME/herdr-web/uploads`, or
+`~/.local/share/herdr-web/uploads` by default. Override the bridge upload directory with:
+
+```bash
+UPLOAD_DIR=/tmp/herdr-web-uploads scripts/run-bridge.sh
+```
+
+The bridge rejects cross-origin browser requests, but it has no full browser authentication yet.
+Bind to `0.0.0.0` only on trusted networks.
 
 ## Runtime Model
 
@@ -118,6 +127,7 @@ The bridge exposes:
 - `GET /api/snapshot`: workspaces, tabs, panes, layouts, and shared web selection
 - `POST /api/command`: allow-listed workspace/tab/pane commands
 - `POST /api/selection`: bridge-owned selected pane for syncing browser clients
+- `POST /api/uploads`: save uploaded files into the configured upload directory
 - `GET /ws/events`: Herdr structural events
 - `GET /ws/ui-events`: bridge-local UI events such as selection changes
 - `GET /ws/terminal`: terminal attach stream
@@ -129,6 +139,9 @@ clients viewing that terminal.
 Input, scroll, and resize from any browser are forwarded through the shared attach. Sizing is
 currently last resize wins. The header's refit button forces the current browser to send a fresh
 fit/resize frame.
+
+Browser-originated API and WebSocket requests must be same-origin with the bridge, with loopback
+development proxy origins allowed for Vite. This is a CSRF guard, not user authentication.
 
 Pane selection is bridge-owned. Selecting a pane in one browser updates `/api/selection`, broadcasts
 over `/ws/ui-events`, and other browsers switch to the same pane.
@@ -149,6 +162,9 @@ This lets `herdr-web` ship now without asking users to patch their installed Her
 cost is that the bridge must be kept compatible with Herdr protocol changes.
 
 See [docs/vendoring.md](docs/vendoring.md) for the refresh process.
+
+See [docs/release.md](docs/release.md) for release validation, browser smoke testing, tagging, and
+GitHub release creation.
 
 ## Long-Term Direction
 

@@ -31,6 +31,7 @@ The app expects these bridge routes:
 - `/api/snapshot`
 - `/api/command`
 - `/api/selection`
+- `/api/uploads`
 - `/ws/events`
 - `/ws/ui-events`
 - `/ws/terminal`

@@ -1,17 +1,18 @@
 import {
   ChevronLeft,
-  Bot,
   PanelLeft,
   Plus,
   RefreshCw,
   SplitSquareHorizontal,
   SplitSquareVertical,
-  Terminal,
 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, FormEvent } from "react";
+import type { CSSProperties } from "react";
 import { commands, createdPaneId, probeSplitSupported } from "./commands";
-import type { LaunchKind, LaunchSpec, SplitDirection } from "./commands";
+import type { LaunchSpec } from "./commands";
+import { LaunchDialog } from "./LaunchDialog";
+import { resolveLaunchSpec } from "./launch";
+import type { LaunchTarget } from "./launch";
 import { ActionMenu, ConfirmDialog, RenameDialog, useLongPress } from "./overlays";
 import type { MenuItem } from "./overlays";
 import { TerminalView } from "./TerminalView";
@@ -40,9 +41,6 @@ type AgentGroup = "none" | "workspace";
 type MenuKind = "space" | "tab" | "pane";
 type MenuState = { kind: MenuKind; id: string; label: string; x: number; y: number };
 type DialogState = { mode: "rename" | "close"; kind: MenuKind; id: string; label: string };
-type LaunchTarget =
-  | { mode: "tab"; workspaceId: string }
-  | { mode: "split"; pane: PaneInfo; direction: SplitDirection };
 type DisplayPrefs = {
   scope: Scope;
   sidebarView: SidebarView;
@@ -61,13 +59,6 @@ const MOBILE_DETAIL_HISTORY_KEY = "herdrWebMobileDetail";
 const DEFAULT_SIDEBAR_WIDTH = 320;
 const MIN_SIDEBAR_WIDTH = 260;
 const MAX_SIDEBAR_WIDTH = 560;
-const LAUNCH_OPTIONS: { kind: LaunchKind; label: string }[] = [
-  { kind: "shell", label: "Shell" },
-  { kind: "codex", label: "Codex" },
-  { kind: "claude", label: "Claude" },
-  { kind: "pi", label: "pi" },
-];
-
 function readDisplayPrefs(): DisplayPrefs {
   const fallback: DisplayPrefs = {
     scope: "space",
@@ -391,12 +382,12 @@ export function App() {
       return null;
     }
     return (
+      (activeSpaceId &&
+        snapshot.workspaces.find((workspace) => workspace.workspace_id === activeSpaceId)) ||
       (selectedPane &&
         snapshot.workspaces.find(
           (workspace) => workspace.workspace_id === selectedPane.workspace_id,
         )) ||
-      (activeSpaceId &&
-        snapshot.workspaces.find((workspace) => workspace.workspace_id === activeSpaceId)) ||
       snapshot.workspaces.find((workspace) => workspace.focused) ||
       snapshot.workspaces[0] ||
       null
@@ -497,6 +488,7 @@ export function App() {
         pushFocus(pane?.tab_id, workspaceId);
         return;
       }
+      setSelectedPaneId(null);
     }
     pushFocus(undefined, workspaceId);
   };
@@ -564,6 +556,7 @@ export function App() {
     } else if (key === "close") {
       setDialog({ mode: "close", kind, id, label });
     } else if (key === "newtab") {
+      setActiveSpaceId(id);
       setLaunchTarget({ mode: "tab", workspaceId: id });
     }
   };
@@ -600,15 +593,16 @@ export function App() {
     if (!launchTarget) {
       return;
     }
+    const resolvedSpec = resolveLaunchSpec(spec, snapshot?.panes ?? []);
     const action =
       launchTarget.mode === "tab"
-        ? () => commands.createLaunchTab(launchTarget.workspaceId, spec)
+        ? () => commands.createLaunchTab(launchTarget.workspaceId, resolvedSpec)
         : () =>
             commands.splitLaunchPane(
               launchTarget.pane.pane_id,
               launchTarget.pane.tab_id,
               launchTarget.direction,
-              spec,
+              resolvedSpec,
             );
     void exec(action, true).then((ok) => ok && setLaunchTarget(null));
   };
@@ -818,92 +812,6 @@ export function App() {
           {error}
         </div>
       ) : null}
-    </div>
-  );
-}
-
-function LaunchDialog({
-  target,
-  busy,
-  onCancel,
-  onSubmit,
-}: {
-  target: LaunchTarget;
-  busy?: boolean;
-  onCancel: () => void;
-  onSubmit: (spec: LaunchSpec) => void;
-}) {
-  const [kind, setKind] = useState<LaunchKind>("shell");
-  const [title, setTitle] = useState(() => launchLabel("shell"));
-  const inputRef = useRef<HTMLInputElement | null>(null);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-    inputRef.current?.select();
-  }, []);
-
-  const chooseKind = (nextKind: LaunchKind) => {
-    setKind(nextKind);
-    setTitle(launchLabel(nextKind));
-  };
-
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    const trimmed = title.trim();
-    if (trimmed) {
-      onSubmit({ kind, title: trimmed });
-    }
-  };
-
-  return (
-    <div className="overlay-root">
-      <button className="overlay-scrim" type="button" aria-label="Cancel" onClick={onCancel} />
-      <form className="modal launch-modal" onSubmit={submit}>
-        <div className="modal-title">
-          {target.mode === "tab" ? "New tab" : target.direction === "right" ? "Split right" : "Split down"}
-        </div>
-        <div className="launch-grid" role="radiogroup" aria-label="Launch type">
-          {LAUNCH_OPTIONS.map((option) => (
-            <button
-              key={option.kind}
-              type="button"
-              className="launch-option"
-              role="radio"
-              aria-checked={kind === option.kind}
-              data-active={kind === option.kind}
-              onClick={() => chooseKind(option.kind)}
-            >
-              {option.kind === "shell" ? <Terminal size={15} /> : <Bot size={15} />}
-              <span>{option.label}</span>
-            </button>
-          ))}
-        </div>
-        <label className="field-label">
-          <span>title</span>
-          <input
-            ref={inputRef}
-            className="field"
-            value={title}
-            placeholder={launchLabel(kind)}
-            spellCheck={false}
-            autoComplete="off"
-            onChange={(event) => setTitle(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") {
-                onCancel();
-              }
-            }}
-          />
-        </label>
-        <div className="modal-actions">
-          <button type="button" className="btn" onClick={onCancel}>
-            Cancel
-          </button>
-          <button type="submit" className="btn btn-primary" disabled={busy || !title.trim()}>
-            Create
-          </button>
-        </div>
-      </form>
     </div>
   );
 }
@@ -1121,10 +1029,11 @@ function Switcher({
         </button>
       </header>
 
-      <div className="sidebar-mode" role="tablist" aria-label="Sidebar view">
+      <div className="sidebar-mode" role="group" aria-label="Sidebar view">
         <button
           type="button"
           data-on={sidebarView === "agents"}
+          aria-pressed={sidebarView === "agents"}
           onClick={() => onSidebarView("agents")}
         >
           Agents
@@ -1132,16 +1041,27 @@ function Switcher({
         <button
           type="button"
           data-on={sidebarView === "tabs"}
+          aria-pressed={sidebarView === "tabs"}
           onClick={() => onSidebarView("tabs")}
         >
           Tabs
         </button>
       </div>
-      <div className="sidebar-scope" role="tablist" aria-label="Sidebar scope">
-        <button type="button" data-on={scope === "space"} onClick={() => onScope("space")}>
+      <div className="sidebar-scope" role="group" aria-label="Sidebar scope">
+        <button
+          type="button"
+          data-on={scope === "space"}
+          aria-pressed={scope === "space"}
+          onClick={() => onScope("space")}
+        >
           space
         </button>
-        <button type="button" data-on={scope === "all"} onClick={() => onScope("all")}>
+        <button
+          type="button"
+          data-on={scope === "all"}
+          aria-pressed={scope === "all"}
+          onClick={() => onScope("all")}
+        >
           all
         </button>
       </div>
@@ -1575,10 +1495,6 @@ function basename(path?: string) {
     return "";
   }
   return trimmed.split("/").pop() ?? "";
-}
-
-function launchLabel(kind: LaunchKind) {
-  return LAUNCH_OPTIONS.find((option) => option.kind === kind)?.label ?? "Shell";
 }
 
 function SplitGlyph() {

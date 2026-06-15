@@ -1,19 +1,11 @@
 // Mutating commands proxied through the bridge's allow-listed /api/command.
 
+import { agentArgv } from "./launch";
+import type { LaunchSpec, SplitDirection } from "./launch";
+import { shellCommand } from "./shell";
+
 export type CommandResult = { type?: string; [key: string]: unknown };
-export type SplitDirection = "right" | "down";
-export type LaunchKind = "shell" | "codex" | "claude" | "pi";
-
-export type LaunchSpec = {
-  kind: LaunchKind;
-  title: string;
-};
-
-const AGENT_ARGV: Record<Exclude<LaunchKind, "shell">, string[]> = {
-  codex: ["codex"],
-  claude: ["claude"],
-  pi: ["pi"],
-};
+export type { LaunchSpec, SplitDirection };
 
 async function runCommand(
   method: string,
@@ -109,21 +101,6 @@ export const commands = {
     return result;
   },
 };
-
-function agentArgv(kind: LaunchKind): string[] {
-  if (kind === "shell") {
-    throw new Error("shell does not have an agent argv");
-  }
-  return AGENT_ARGV[kind];
-}
-
-function shellCommand(argv: string[]) {
-  return argv.map(shellQuote).join(" ");
-}
-
-function shellQuote(value: string) {
-  return /^[A-Za-z0-9_/:=.,@%+-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
-}
 
 /** Best-effort probe: is `pane.split` permitted by the bridge allow-list? */
 export async function probeSplitSupported(): Promise<boolean> {

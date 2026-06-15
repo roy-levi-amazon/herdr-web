@@ -10,6 +10,7 @@ use std::thread;
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Query, State};
+use axum::http::header::{HOST, ORIGIN};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -22,7 +23,8 @@ use tower_http::services::ServeDir;
 use crate::api::client::{ApiClient, ApiClientError};
 use crate::api::schema::{
     EmptyParams, EventsSubscribeParams, Method, PaneInfo, PaneLayoutParams, PaneLayoutSnapshot,
-    PaneListParams, Request, ResponseResult, Subscription, TabInfo, TabListParams, WorkspaceInfo,
+    PaneListParams, Request, ResponseResult, SplitDirection, Subscription, TabInfo, TabListParams,
+    WorkspaceInfo,
 };
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode,
@@ -124,6 +126,8 @@ struct SharedTerminalSession {
 enum BridgeError {
     Api(ApiClientError),
     Io(io::Error),
+    BadRequest(String),
+    Forbidden(String),
     Protocol(String),
 }
 
@@ -131,6 +135,7 @@ enum BridgeError {
 enum UploadError {
     BadRequest(String),
     Conflict { name: String, path: String },
+    Forbidden(String),
     TooLarge,
     Io(io::Error),
 }
@@ -140,6 +145,8 @@ impl fmt::Display for BridgeError {
         match self {
             Self::Api(err) => write!(f, "{err}"),
             Self::Io(err) => write!(f, "{err}"),
+            Self::BadRequest(message) => write!(f, "{message}"),
+            Self::Forbidden(message) => write!(f, "{message}"),
             Self::Protocol(message) => write!(f, "{message}"),
         }
     }
@@ -148,6 +155,8 @@ impl fmt::Display for BridgeError {
 impl IntoResponse for BridgeError {
     fn into_response(self) -> Response {
         let status = match self {
+            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Api(_) | Self::Io(_) | Self::Protocol(_) => StatusCode::BAD_GATEWAY,
         };
         let body = Json(serde_json::json!({
@@ -183,6 +192,10 @@ impl IntoResponse for UploadError {
                     "name": name,
                     "path": path,
                 }),
+            ),
+            Self::Forbidden(message) => (
+                StatusCode::FORBIDDEN,
+                serde_json::json!({ "error": message }),
             ),
             Self::TooLarge => (
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -463,6 +476,141 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "agent.start",
 ];
 
+fn ensure_allowed_origin(headers: &HeaderMap) -> Result<(), BridgeError> {
+    if request_origin_allowed(headers) {
+        return Ok(());
+    }
+    Err(BridgeError::Forbidden(
+        "cross-origin requests are not allowed".to_string(),
+    ))
+}
+
+fn request_origin_allowed(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(ORIGIN) else {
+        return true;
+    };
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    let Some(origin_authority) = origin_authority(origin) else {
+        return false;
+    };
+    let Some(host) = headers.get(HOST).and_then(|host| host.to_str().ok()) else {
+        return false;
+    };
+
+    same_authority(origin_authority, host)
+        || (is_loopback_authority(origin_authority) && is_loopback_authority(host))
+}
+
+fn origin_authority(origin: &str) -> Option<&str> {
+    let rest = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))?;
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    Some(rest)
+}
+
+fn same_authority(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+fn is_loopback_authority(authority: &str) -> bool {
+    let host = host_part(authority);
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host.starts_with("127.")
+        || host == "::1"
+}
+
+fn host_part(authority: &str) -> &str {
+    if let Some(rest) = authority.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            return &rest[..end];
+        }
+    }
+    authority.split(':').next().unwrap_or(authority)
+}
+
+fn validate_web_command(method: &Method) -> Result<(), BridgeError> {
+    match method {
+        Method::PaneSendInput(params) => {
+            if params.pane_id.trim().is_empty() {
+                return Err(BridgeError::BadRequest("pane_id is required".to_string()));
+            }
+            if params.keys.len() != 1 || params.keys[0] != "Enter" {
+                return Err(BridgeError::BadRequest(
+                    "pane.send_input is limited to Enter-submitted launch commands".to_string(),
+                ));
+            }
+            if !is_allowed_agent_command(&params.text) {
+                return Err(BridgeError::BadRequest(
+                    "pane.send_input launch command is not allowed".to_string(),
+                ));
+            }
+        }
+        Method::PaneSplit(params) => {
+            if params
+                .target_pane_id
+                .as_deref()
+                .is_none_or(|pane_id| pane_id.trim().is_empty())
+            {
+                return Err(BridgeError::BadRequest(
+                    "pane.split requires target_pane_id".to_string(),
+                ));
+            }
+            if params.workspace_id.is_some()
+                || params.ratio.is_some()
+                || params.cwd.is_some()
+                || !params.env.is_empty()
+            {
+                return Err(BridgeError::BadRequest(
+                    "pane.split supports only target pane, direction, and focus through herdr-web"
+                        .to_string(),
+                ));
+            }
+        }
+        Method::AgentStart(params) => {
+            if params.name.trim().is_empty() || params.name.len() > 120 {
+                return Err(BridgeError::BadRequest(
+                    "agent.start requires a non-empty launch name up to 120 bytes".to_string(),
+                ));
+            }
+            if params
+                .tab_id
+                .as_deref()
+                .is_none_or(|tab_id| tab_id.trim().is_empty())
+                || params.workspace_id.is_some()
+                || params.cwd.is_some()
+                || !params.env.is_empty()
+                || !params.focus
+                || !matches!(
+                    params.split.as_ref(),
+                    Some(SplitDirection::Right) | Some(SplitDirection::Down)
+                )
+                || !is_allowed_agent_argv(&params.argv)
+            {
+                return Err(BridgeError::BadRequest(
+                    "agent.start is limited to focused Codex, Claude, or pi splits in an existing tab"
+                        .to_string(),
+                ));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn is_allowed_agent_command(text: &str) -> bool {
+    matches!(text, "codex" | "claude" | "pi")
+}
+
+fn is_allowed_agent_argv(argv: &[String]) -> bool {
+    matches!(argv, [command] if is_allowed_agent_command(command))
+}
+
 #[derive(Debug, Deserialize)]
 struct CommandRequest {
     method: String,
@@ -497,10 +645,12 @@ struct UploadResponse {
 
 async fn command_handler(
     State(state): State<BridgeState>,
+    headers: HeaderMap,
     Json(body): Json<CommandRequest>,
 ) -> Result<Json<serde_json::Value>, BridgeError> {
+    ensure_allowed_origin(&headers)?;
     if !ALLOWED_COMMANDS.contains(&body.method.as_str()) {
-        return Err(BridgeError::Protocol(format!(
+        return Err(BridgeError::Forbidden(format!(
             "command not allowed: {}",
             body.method
         )));
@@ -517,7 +667,8 @@ async fn command_handler(
         "params": params,
     });
     let request: Request = serde_json::from_value(request_value)
-        .map_err(|err| BridgeError::Protocol(format!("invalid command: {err}")))?;
+        .map_err(|err| BridgeError::BadRequest(format!("invalid command: {err}")))?;
+    validate_web_command(&request.method)?;
 
     let api = state.api.clone();
     let response = tokio::task::spawn_blocking(move || api.request(request))
@@ -530,11 +681,13 @@ async fn command_handler(
 
 async fn selection_handler(
     State(state): State<BridgeState>,
+    headers: HeaderMap,
     Json(body): Json<SelectionRequest>,
 ) -> Result<Json<serde_json::Value>, BridgeError> {
+    ensure_allowed_origin(&headers)?;
     let pane_id = body.pane_id.trim();
     if pane_id.is_empty() {
-        return Err(BridgeError::Protocol("missing pane_id".to_string()));
+        return Err(BridgeError::BadRequest("missing pane_id".to_string()));
     }
     let panes = current_panes(&state.api)?;
     if !panes.iter().any(|pane| pane.pane_id == pane_id) {
@@ -563,6 +716,7 @@ async fn upload_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<UploadResponse>, UploadError> {
+    ensure_allowed_origin(&headers).map_err(|err| UploadError::Forbidden(err.to_string()))?;
     if body.len() > MAX_UPLOAD_BYTES {
         return Err(UploadError::TooLarge);
     }
@@ -761,22 +915,37 @@ async fn terminal_ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<BridgeState>,
     Query(query): Query<TerminalQuery>,
-) -> impl IntoResponse {
+    headers: HeaderMap,
+) -> Response {
+    if let Err(err) = ensure_allowed_origin(&headers) {
+        return err.into_response();
+    }
     ws.on_upgrade(move |socket| handle_terminal_socket(socket, state, query))
+        .into_response()
 }
 
 async fn events_ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<BridgeState>,
-) -> impl IntoResponse {
+    headers: HeaderMap,
+) -> Response {
+    if let Err(err) = ensure_allowed_origin(&headers) {
+        return err.into_response();
+    }
     ws.on_upgrade(move |socket| handle_events_socket(socket, state))
+        .into_response()
 }
 
 async fn ui_events_ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<BridgeState>,
-) -> impl IntoResponse {
+    headers: HeaderMap,
+) -> Response {
+    if let Err(err) = ensure_allowed_origin(&headers) {
+        return err.into_response();
+    }
     ws.on_upgrade(move |socket| handle_ui_events_socket(socket, state))
+        .into_response()
 }
 
 async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
@@ -1279,6 +1448,125 @@ mod tests {
     }
 
     #[test]
+    fn origin_gate_allows_same_origin_and_loopback_dev_proxy() {
+        assert!(request_origin_allowed(&origin_headers(
+            "127.0.0.1:8787",
+            None
+        )));
+        assert!(request_origin_allowed(&origin_headers(
+            "127.0.0.1:8787",
+            Some("http://127.0.0.1:8787")
+        )));
+        assert!(request_origin_allowed(&origin_headers(
+            "127.0.0.1:8787",
+            Some("http://127.0.0.1:5173")
+        )));
+    }
+
+    #[test]
+    fn origin_gate_rejects_cross_site_browser_origins() {
+        assert!(!request_origin_allowed(&origin_headers(
+            "127.0.0.1:8787",
+            Some("https://example.com")
+        )));
+        assert!(!request_origin_allowed(&origin_headers(
+            "192.168.1.10:8787",
+            Some("http://127.0.0.1:5173")
+        )));
+        assert!(!request_origin_allowed(&origin_headers(
+            "127.0.0.1:8787",
+            Some("null")
+        )));
+    }
+
+    #[test]
+    fn validates_narrow_agent_start_commands() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "agent.start",
+            "params": {
+                "name": "Codex 2",
+                "tab_id": "1-1",
+                "split": "right",
+                "focus": true,
+                "argv": ["codex"]
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_ok());
+
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "agent.start",
+            "params": {
+                "name": "server",
+                "tab_id": "1-1",
+                "split": "right",
+                "focus": true,
+                "argv": ["sh", "-c", "date"],
+                "env": { "X": "1" }
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_err());
+    }
+
+    #[test]
+    fn validates_narrow_pane_launch_commands() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "pane.send_input",
+            "params": {
+                "pane_id": "1-1",
+                "text": "claude",
+                "keys": ["Enter"]
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_ok());
+
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "pane.send_input",
+            "params": {
+                "pane_id": "1-1",
+                "text": "rm -rf /tmp/nope",
+                "keys": ["Enter"]
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_err());
+    }
+
+    #[test]
+    fn validates_narrow_pane_splits() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "pane.split",
+            "params": {
+                "target_pane_id": "1-1",
+                "direction": "down",
+                "focus": true
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_ok());
+
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "pane.split",
+            "params": {
+                "target_pane_id": "1-1",
+                "direction": "down",
+                "cwd": "/tmp",
+                "env": { "X": "1" }
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_err());
+    }
+
+    #[test]
     fn command_request_parses_into_wire_request() {
         let body: CommandRequest = serde_json::from_str(
             r#"{"method":"workspace.rename","params":{"workspace_id":"w1","label":"api"}}"#,
@@ -1341,5 +1629,14 @@ mod tests {
         let parent = PathBuf::from("/tmp/herdr-web/uploads");
         assert!(is_direct_child(&parent, &parent.join("file.png")));
         assert!(!is_direct_child(&parent, &parent.join("nested/file.png")));
+    }
+
+    fn origin_headers(host: &str, origin: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, host.parse().unwrap());
+        if let Some(origin) = origin {
+            headers.insert(ORIGIN, origin.parse().unwrap());
+        }
+        headers
     }
 }
