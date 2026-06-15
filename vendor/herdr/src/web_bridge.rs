@@ -695,6 +695,20 @@ fn validate_web_command(method: &Method) -> Result<(), BridgeError> {
                 ));
             }
         }
+        Method::WorkspaceRename(params) => {
+            if params.workspace_id.trim().is_empty() {
+                return Err(BridgeError::BadRequest(
+                    "workspace_id is required".to_string(),
+                ));
+            }
+            validate_optional_label(&params.label, "workspace.rename label")?;
+        }
+        Method::TabRename(params) => {
+            if params.tab_id.trim().is_empty() {
+                return Err(BridgeError::BadRequest("tab_id is required".to_string()));
+            }
+            validate_optional_label(&params.label, "tab.rename label")?;
+        }
         Method::PaneSendInput(params) => {
             if params.pane_id.trim().is_empty() {
                 return Err(BridgeError::BadRequest("pane_id is required".to_string()));
@@ -1840,6 +1854,42 @@ mod tests {
                 "focus": true,
                 "cwd": "/tmp",
                 "env": { "X": "1" }
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_err());
+    }
+
+    #[test]
+    fn validates_narrow_workspace_and_tab_rename_commands() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "workspace.rename",
+            "params": {
+                "workspace_id": "w1",
+                "label": null
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_ok());
+
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "tab.rename",
+            "params": {
+                "tab_id": "w1:t1",
+                "label": "Review"
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_ok());
+
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "tab.rename",
+            "params": {
+                "tab_id": "w1:t1",
+                "label": "   "
             }
         }))
         .unwrap();

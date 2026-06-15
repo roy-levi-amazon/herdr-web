@@ -75,4 +75,20 @@ describe("command helpers", () => {
       { method: "pane.rename", params: { pane_id: "pane-1", label: "Review" } },
     ]);
   });
+
+  it("clears workspace and tab names with null labels", async () => {
+    const requests: unknown[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      requests.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ type: "ok" }), { status: 200 });
+    });
+
+    await commands.renameWorkspace("space-1", null);
+    await commands.renameTab("tab-1", null);
+
+    expect(requests).toEqual([
+      { method: "workspace.rename", params: { workspace_id: "space-1", label: null } },
+      { method: "tab.rename", params: { tab_id: "tab-1", label: null } },
+    ]);
+  });
 });

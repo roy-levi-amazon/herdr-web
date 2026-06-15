@@ -145,6 +145,7 @@ export function RenameDialog({
   busy,
   onCancel,
   onSubmit,
+  onClear,
 }: {
   title: string;
   initial: string;
@@ -152,6 +153,7 @@ export function RenameDialog({
   busy?: boolean;
   onCancel: () => void;
   onSubmit: (value: string) => void;
+  onClear?: () => void;
 }) {
   const [value, setValue] = useState(initial);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -189,6 +191,11 @@ export function RenameDialog({
           }}
         />
         <div className="modal-actions">
+          {onClear ? (
+            <button type="button" className="btn btn-clear" disabled={busy} onClick={onClear}>
+              Clear name
+            </button>
+          ) : null}
           <button type="button" className="btn" onClick={onCancel}>
             Cancel
           </button>

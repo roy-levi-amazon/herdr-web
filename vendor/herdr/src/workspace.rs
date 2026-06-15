@@ -1027,6 +1027,10 @@ impl Workspace {
         self.custom_name = Some(name);
     }
 
+    pub fn clear_custom_name(&mut self) {
+        self.custom_name = None;
+    }
+
     pub fn resolved_identity_cwd(&self) -> Option<PathBuf> {
         Some(self.identity_cwd.clone())
     }

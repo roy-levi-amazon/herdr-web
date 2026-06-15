@@ -152,7 +152,7 @@ fn workspace_rename(args: &[String]) -> std::io::Result<i32> {
         id: "cli:workspace:rename".into(),
         method: Method::WorkspaceRename(WorkspaceRenameParams {
             workspace_id: super::normalize_workspace_id(&args[0]),
-            label: args[1..].join(" "),
+            label: Some(args[1..].join(" ")),
         }),
     })?)
 }

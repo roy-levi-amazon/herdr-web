@@ -193,6 +193,10 @@ impl Tab {
         self.custom_name = Some(name);
     }
 
+    pub fn clear_custom_name(&mut self) {
+        self.custom_name = None;
+    }
+
     pub fn split_focused(
         &mut self,
         direction: Direction,

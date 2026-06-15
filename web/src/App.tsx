@@ -597,6 +597,18 @@ export function App() {
     void exec(action).then((ok) => ok && setDialog(null));
   };
 
+  const clearRename = () => {
+    if (!dialog || dialog.kind === "pane") {
+      return;
+    }
+    const { kind, id } = dialog;
+    const action =
+      kind === "space"
+        ? () => commands.renameWorkspace(id, null)
+        : () => commands.renameTab(id, null);
+    void exec(action).then((ok) => ok && setDialog(null));
+  };
+
   const confirmClose = () => {
     if (!dialog) {
       return;
@@ -806,6 +818,7 @@ export function App() {
           busy={busy}
           onCancel={() => setDialog(null)}
           onSubmit={submitRename}
+          onClear={dialog.kind === "pane" ? undefined : clearRename}
         />
       ) : null}
 

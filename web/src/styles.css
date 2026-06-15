@@ -1437,6 +1437,10 @@ button {
   opacity: 0.5;
 }
 
+.btn-clear {
+  margin-right: auto;
+}
+
 .btn-primary {
   border-color: transparent;
   color: var(--crust);

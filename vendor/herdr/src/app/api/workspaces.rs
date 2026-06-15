@@ -121,17 +121,24 @@ impl App {
         let Some(index) = self.parse_workspace_id(&params.workspace_id) else {
             return workspace_not_found(id, &params.workspace_id);
         };
-        let Some(ws) = self.state.workspaces.get_mut(index) else {
-            return workspace_not_found(id, &params.workspace_id);
-        };
-        ws.set_custom_name(params.label.clone());
-        crate::logging::workspace_renamed(&ws.id);
+        {
+            let Some(ws) = self.state.workspaces.get_mut(index) else {
+                return workspace_not_found(id, &params.workspace_id);
+            };
+            if let Some(label) = params.label {
+                ws.set_custom_name(label);
+            } else {
+                ws.clear_custom_name();
+            }
+            crate::logging::workspace_renamed(&ws.id);
+        }
+        let label = self.workspace_info(index).label;
         self.schedule_session_save();
         self.emit_event(EventEnvelope {
             event: EventKind::WorkspaceRenamed,
             data: EventData::WorkspaceRenamed {
                 workspace_id: self.public_workspace_id(index),
-                label: params.label,
+                label,
             },
         });
 

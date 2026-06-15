@@ -42,7 +42,7 @@ export function createdPaneId(result: CommandResult): string | null {
 
 export const commands = {
   createWorkspace: () => runCommand("workspace.create", { focus: true }),
-  renameWorkspace: (workspaceId: string, label: string) =>
+  renameWorkspace: (workspaceId: string, label: string | null) =>
     runCommand("workspace.rename", { workspace_id: workspaceId, label }),
   closeWorkspace: (workspaceId: string) =>
     runCommand("workspace.close", { workspace_id: workspaceId }),
@@ -51,7 +51,8 @@ export const commands = {
 
   createTab: (workspaceId: string, label?: string) =>
     runCommand("tab.create", { workspace_id: workspaceId, focus: true, label }),
-  renameTab: (tabId: string, label: string) => runCommand("tab.rename", { tab_id: tabId, label }),
+  renameTab: (tabId: string, label: string | null) =>
+    runCommand("tab.rename", { tab_id: tabId, label }),
   closeTab: (tabId: string) => runCommand("tab.close", { tab_id: tabId }),
   focusTab: (tabId: string) => runCommand("tab.focus", { tab_id: tabId }),
 
