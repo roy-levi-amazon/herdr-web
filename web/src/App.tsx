@@ -3,14 +3,21 @@ import {
   PanelLeft,
   Plus,
   RefreshCw,
+  Settings,
   SplitSquareHorizontal,
   SplitSquareVertical,
 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { AgentIcon, agentIconKind } from "./AgentIcon";
-import { commands, createdPaneId, probeSupportedCommands } from "./commands";
+import { BackendSettingsDialog } from "./BackendSettingsDialog";
+import { useBridge } from "./bridge";
+import { createCommands, createdPaneId } from "./commands";
 import type { LaunchSpec, PaneFocusDirection, SplitDirection } from "./commands";
+import {
+  currentConnectionSnapshot,
+  isConnectionResultCurrent,
+} from "./connectionState";
 import { LaunchDialog } from "./LaunchDialog";
 import { resolveLaunchSpec } from "./launch";
 import type { LaunchTarget } from "./launch";
@@ -77,6 +84,7 @@ const MOBILE_DETAIL_HISTORY_KEY = "herdrWebMobileDetail";
 const DEFAULT_SIDEBAR_WIDTH = 320;
 const MIN_SIDEBAR_WIDTH = 260;
 const MAX_SIDEBAR_WIDTH = 560;
+
 function readDisplayPrefs(): DisplayPrefs {
   const fallback: DisplayPrefs = {
     scope: "space",
@@ -182,8 +190,11 @@ function stripMobileHistoryState(value: unknown) {
 }
 
 export function App() {
+  const bridge = useBridge();
+  const commands = useMemo(() => createCommands(bridge.httpUrl), [bridge.httpUrl]);
   const initialPrefs = useMemo(readDisplayPrefs, []);
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [snapshotState, setSnapshot] = useState<Snapshot | null>(null);
+  const [snapshotConnectionKey, setSnapshotConnectionKey] = useState(bridge.connectionKey);
   const [selectedPaneId, setSelectedPaneId] = useState<string | null>(initialPrefs.selectedPaneId);
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(initialPrefs.activeSpaceId);
   const [scope, setScope] = useState<Scope>(initialPrefs.scope);
@@ -197,12 +208,10 @@ export function App() {
   const [showDetail, setShowDetail] = useState(false);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [backendSettingsOpen, setBackendSettingsOpen] = useState(false);
   const [launchTarget, setLaunchTarget] = useState<LaunchTarget | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [splitSupported, setSplitSupported] = useState(false);
-  const [paneFocusSupported, setPaneFocusSupported] = useState(false);
-  const [paneMoveSupported, setPaneMoveSupported] = useState(false);
   const [refitToken, setRefitToken] = useState(0);
   const [terminalFocusToken, setTerminalFocusToken] = useState(0);
   const isCompactLayout = useIsCompactLayout();
@@ -210,6 +219,7 @@ export function App() {
   const snapshotRef = useRef<Snapshot | null>(null);
   const isCompactLayoutRef = useRef(isCompactLayout);
   const showDetailRef = useRef(showDetail);
+  const connectionKeyRef = useRef(bridge.connectionKey);
   const mobileSidebarHistoryRef = useRef(false);
   const mobileDetailHistoryRef = useRef(false);
   const sidebarResizePressRef = useRef<{
@@ -220,7 +230,16 @@ export function App() {
     target: HTMLDivElement;
   } | null>(null);
 
+  const snapshot = currentConnectionSnapshot(
+    snapshotState,
+    snapshotConnectionKey,
+    bridge.connectionKey,
+  );
   const resolvedPaneId = chooseSelectedPane(snapshot, selectedPaneId);
+  const supportedCommands = bridge.capabilities?.commands ?? [];
+  const splitSupported = supportedCommands.includes("pane.split");
+  const paneFocusSupported = supportedCommands.includes("pane.focus_direction");
+  const paneMoveSupported = supportedCommands.includes("pane.move");
 
   const ensureMobileSidebarHistory = () => {
     if (!isCompactLayoutRef.current || isMobileDetailHistoryState(window.history.state)) {
@@ -343,11 +362,37 @@ export function App() {
 
   useEffect(() => {
     let disposed = false;
-    const refresh = () => refreshSnapshot(setSnapshot, setLoadState, () => disposed);
+    if (connectionKeyRef.current !== bridge.connectionKey) {
+      connectionKeyRef.current = bridge.connectionKey;
+      setSnapshot(null);
+      setSnapshotConnectionKey(bridge.connectionKey);
+      setSelectedPaneId(null);
+      setActiveSpaceId(null);
+    }
+    if (!bridge.canConnect) {
+      setSnapshot(null);
+      setSnapshotConnectionKey(bridge.connectionKey);
+      setSelectedPaneId(null);
+      setActiveSpaceId(null);
+      setLoadState("ready");
+      return () => {
+        disposed = true;
+      };
+    }
+    const refresh = () =>
+      refreshSnapshot(
+        bridge.httpUrl,
+        (next) => {
+          setSnapshot(next);
+          setSnapshotConnectionKey(bridge.connectionKey);
+        },
+        setLoadState,
+        () => disposed,
+      );
     void refresh();
     const interval = window.setInterval(refresh, 10000);
-    const events = openEventsSocket("/ws/events", () => void refresh());
-    const uiEvents = openEventsSocket("/ws/ui-events", (event) => {
+    const events = openEventsSocket(bridge.wsUrl, "/ws/events", () => void refresh());
+    const uiEvents = openEventsSocket(bridge.wsUrl, "/ws/ui-events", (event) => {
       const paneId = selectionPaneId(event);
       if (paneId) {
         setSelectedPaneId(paneId);
@@ -364,7 +409,7 @@ export function App() {
       uiEvents?.close();
       window.clearInterval(interval);
     };
-  }, []);
+  }, [bridge.canConnect, bridge.connectionKey, bridge.httpUrl, bridge.wsUrl]);
 
   useEffect(() => {
     if (!error) {
@@ -373,21 +418,6 @@ export function App() {
     const timer = window.setTimeout(() => setError(null), 4500);
     return () => window.clearTimeout(timer);
   }, [error]);
-
-  // Feature-detect bridge-gated commands so controls only appear when they work.
-  useEffect(() => {
-    let cancelled = false;
-    void probeSupportedCommands().then((supportedCommands) => {
-      if (!cancelled) {
-        setSplitSupported(supportedCommands.has("pane.split"));
-        setPaneFocusSupported(supportedCommands.has("pane.focus_direction"));
-        setPaneMoveSupported(supportedCommands.has("pane.move"));
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     const onPopState = (event: PopStateEvent) => {
@@ -538,7 +568,7 @@ export function App() {
   const openPane = (pane: PaneInfo) => {
     setSelectedPaneId(pane.pane_id);
     setActiveSpaceId(pane.workspace_id);
-    void syncSelectedPane(pane.pane_id).catch(() => {});
+    void syncSelectedPane(bridge.httpUrl, pane.pane_id).catch(() => {});
     pushFocus(pane.tab_id, pane.workspace_id);
     if (isCompactLayout) {
       openMobileDetail();
@@ -554,7 +584,7 @@ export function App() {
       if (paneId) {
         setSelectedPaneId(paneId);
         const pane = snapshot.panes.find((item) => item.pane_id === paneId);
-        void syncSelectedPane(paneId).catch(() => {});
+        void syncSelectedPane(bridge.httpUrl, paneId).catch(() => {});
         pushFocus(pane?.tab_id, workspaceId);
         return;
       }
@@ -759,21 +789,39 @@ export function App() {
   ]);
 
   const refreshNow = () => {
+    if (!bridge.canConnect) {
+      setBackendSettingsOpen(true);
+      return;
+    }
+    const requestConnectionKey = bridge.connectionKey;
     setLoadState("loading");
-    void fetchSnapshot()
+    void fetchSnapshot(bridge.httpUrl)
       .then((next) => {
+        if (!isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
+          return;
+        }
         setSnapshot(next);
+        setSnapshotConnectionKey(requestConnectionKey);
         setLoadState("ready");
       })
-      .catch(() => setLoadState("error"));
+      .catch(() => {
+        if (connectionKeyRef.current === requestConnectionKey) {
+          setLoadState("error");
+        }
+      });
   };
 
   async function exec(action: () => Promise<{ [key: string]: unknown }>, selectCreated = false) {
+    const requestConnectionKey = bridge.connectionKey;
     setBusy(true);
     try {
       const result = await action();
-      const next = await fetchSnapshot();
+      const next = await fetchSnapshot(bridge.httpUrl);
+      if (!isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
+        return false;
+      }
       setSnapshot(next);
+      setSnapshotConnectionKey(requestConnectionKey);
       setLoadState("ready");
       if (selectCreated) {
         const paneId = createdPaneId(result);
@@ -781,7 +829,7 @@ export function App() {
         if (created) {
           setSelectedPaneId(created.pane_id);
           setActiveSpaceId(created.workspace_id);
-          void syncSelectedPane(created.pane_id).catch(() => {});
+          void syncSelectedPane(bridge.httpUrl, created.pane_id).catch(() => {});
           if (isCompactLayout) {
             openMobileDetail();
           }
@@ -898,6 +946,11 @@ export function App() {
         <Switcher
           snapshot={snapshot}
           loadState={loadState}
+          bridgeCanConnect={bridge.canConnect}
+          bridgeError={bridge.capabilityError}
+          bridgeLabel={bridge.activeBackend?.name ?? "same-origin"}
+          bridgeMode={bridge.mode}
+          capabilityState={bridge.capabilityState}
           scope={scope}
           sidebarView={sidebarView}
           agentSort={agentSort}
@@ -912,6 +965,7 @@ export function App() {
           onSelectTab={selectTab}
           onSelectPane={openPane}
           onRefresh={refreshNow}
+          onBackendSettings={() => setBackendSettingsOpen(true)}
           onCreateSpace={() => void exec(() => commands.createWorkspace(), true)}
           onCreateTab={(workspaceId) => setLaunchTarget({ mode: "tab", workspaceId })}
           onMenu={(kind, id, label, x, y, clearable) =>
@@ -1008,7 +1062,7 @@ export function App() {
           <div className="stage-id" {...selectedPaneMenuPress}>
             <span className="stage-title">{selectedPane ? paneTitle(selectedPane) : "herdr-web"}</span>
             <span className="stage-sub mono">
-              {stageBreadcrumb(snapshot, selectedPane, loadState)}
+              {stageBreadcrumb(snapshot, selectedPane, loadState, bridge.canConnect)}
             </span>
           </div>
           {splitSupported && selectedPane && !isCompactLayout ? (
@@ -1065,10 +1119,16 @@ export function App() {
             refitToken={refitToken}
             focusToken={terminalFocusToken}
             touchInput={isTouchInput}
+            connectionKey={bridge.connectionKey}
+            httpUrl={bridge.httpUrl}
+            wsUrl={bridge.wsUrl}
           />
         ) : renderTerminal ? (
           <TerminalView
             pane={selectedPane}
+            connectionKey={bridge.connectionKey}
+            httpUrl={bridge.httpUrl}
+            wsUrl={bridge.wsUrl}
             autoFocus={!isTouchInput}
             scrollSensitivity={isTouchInput ? 2 : 0.4}
             mobileControls={isTouchInput}
@@ -1121,6 +1181,10 @@ export function App() {
           onCancel={() => setLaunchTarget(null)}
           onSubmit={submitLaunch}
         />
+      ) : null}
+
+      {backendSettingsOpen ? (
+        <BackendSettingsDialog onClose={() => setBackendSettingsOpen(false)} />
       ) : null}
 
       {error ? (
@@ -1274,6 +1338,9 @@ function SplitGrid({
   refitToken,
   focusToken,
   touchInput,
+  connectionKey,
+  httpUrl,
+  wsUrl,
 }: {
   cells: { pane: PaneInfo; style: CSSProperties }[];
   selectedPaneId: string | null;
@@ -1281,6 +1348,9 @@ function SplitGrid({
   refitToken: number;
   focusToken: number;
   touchInput: boolean;
+  connectionKey: string;
+  httpUrl: (path: string, query?: URLSearchParams) => string;
+  wsUrl: (path: string, query?: URLSearchParams) => string;
 }) {
   return (
     <div className="pane-grid" aria-label="Split panes">
@@ -1296,6 +1366,9 @@ function SplitGrid({
           >
             <TerminalView
               pane={pane}
+              connectionKey={connectionKey}
+              httpUrl={httpUrl}
+              wsUrl={wsUrl}
               autoFocus={selected && !touchInput}
               scrollSensitivity={touchInput ? 2 : 0.4}
               mobileControls={selected && touchInput}
@@ -1381,6 +1454,11 @@ function TabBar({
 function Switcher({
   snapshot,
   loadState,
+  bridgeCanConnect,
+  bridgeError,
+  bridgeLabel,
+  bridgeMode,
+  capabilityState,
   scope,
   sidebarView,
   agentSort,
@@ -1395,12 +1473,18 @@ function Switcher({
   onSelectTab,
   onSelectPane,
   onRefresh,
+  onBackendSettings,
   onCreateSpace,
   onCreateTab,
   onMenu,
 }: {
   snapshot: Snapshot | null;
   loadState: LoadState;
+  bridgeCanConnect: boolean;
+  bridgeError: string | null;
+  bridgeLabel: string;
+  bridgeMode: "same-origin" | "configured" | "disconnected";
+  capabilityState: "idle" | "probing" | "ready" | "error";
   scope: Scope;
   sidebarView: SidebarView;
   agentSort: AgentSort;
@@ -1415,6 +1499,7 @@ function Switcher({
   onSelectTab: (tabId: string) => void;
   onSelectPane: (pane: PaneInfo) => void;
   onRefresh: () => void;
+  onBackendSettings: () => void;
   onCreateSpace: () => void;
   onCreateTab: (workspaceId: string) => void;
   onMenu: (
@@ -1429,6 +1514,7 @@ function Switcher({
   const panes = snapshot?.panes ?? [];
   const roll = aggregateStatus(panes);
   const headerSummary = summary(panes);
+  const bridgeBlocked = !bridgeCanConnect;
 
   const agentPanes = useMemo(() => {
     if (!snapshot) {
@@ -1492,8 +1578,20 @@ function Switcher({
             <span className="brand-sub">
               <b>{headerSummary}</b>
             </span>
+          ) : bridgeMode === "configured" ? (
+            <span className="brand-sub">{bridgeLabel}</span>
           ) : null}
         </div>
+        <button
+          className="icon-btn"
+          type="button"
+          aria-label="Bridge settings"
+          title={`Bridge: ${bridgeLabel}`}
+          data-spin={capabilityState === "probing" ? "" : undefined}
+          onClick={onBackendSettings}
+        >
+          <Settings size={16} />
+        </button>
         <button
           className="icon-btn"
           type="button"
@@ -1546,8 +1644,25 @@ function Switcher({
       <div className="list">
         {!snapshot ? (
           <div className="empty">
-            <strong>{loadState === "error" ? "Bridge unavailable" : "Connecting…"}</strong>
-            <span>{loadState === "error" ? "Could not reach the herdr bridge." : ""}</span>
+            <strong>
+              {bridgeBlocked
+                ? "Bridge disconnected"
+                : loadState === "error"
+                  ? "Bridge unavailable"
+                  : "Connecting…"}
+            </strong>
+            <span>
+              {bridgeBlocked
+                ? bridgeError || "Choose a usable bridge backend."
+                : loadState === "error"
+                  ? "Could not reach the herdr bridge."
+                  : ""}
+            </span>
+            {bridgeBlocked ? (
+              <button type="button" className="btn" onClick={onBackendSettings}>
+                Bridge settings
+              </button>
+            ) : null}
           </div>
         ) : (
           <>
@@ -2128,8 +2243,16 @@ function summary(panes: PaneInfo[]) {
         : null;
 }
 
-function stageBreadcrumb(snapshot: Snapshot | null, pane: PaneInfo | null, loadState: LoadState) {
+function stageBreadcrumb(
+  snapshot: Snapshot | null,
+  pane: PaneInfo | null,
+  loadState: LoadState,
+  bridgeCanConnect: boolean,
+) {
   if (!pane) {
+    if (!bridgeCanConnect) {
+      return "bridge disconnected";
+    }
     if (loadState === "error") {
       return "bridge unavailable";
     }
@@ -2141,16 +2264,19 @@ function stageBreadcrumb(snapshot: Snapshot | null, pane: PaneInfo | null, loadS
   return [workspace?.label, tabLabel].filter(Boolean).join(" · ") || pane.pane_id;
 }
 
-async function fetchSnapshot() {
-  const response = await fetch("/api/snapshot");
+async function fetchSnapshot(httpUrl: (path: string, query?: URLSearchParams) => string) {
+  const response = await fetch(httpUrl("/api/snapshot"));
   if (!response.ok) {
     throw new Error(`snapshot failed: ${response.status}`);
   }
   return (await response.json()) as Snapshot;
 }
 
-async function syncSelectedPane(paneId: string) {
-  const response = await fetch("/api/selection", {
+async function syncSelectedPane(
+  httpUrl: (path: string, query?: URLSearchParams) => string,
+  paneId: string,
+) {
+  const response = await fetch(httpUrl("/api/selection"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ pane_id: paneId }),
@@ -2161,12 +2287,13 @@ async function syncSelectedPane(paneId: string) {
 }
 
 async function refreshSnapshot(
+  httpUrl: (path: string, query?: URLSearchParams) => string,
   setSnapshot: (snapshot: Snapshot) => void,
   setLoadState: (state: LoadState) => void,
   isDisposed: () => boolean,
 ) {
   try {
-    const next = await fetchSnapshot();
+    const next = await fetchSnapshot(httpUrl);
     if (!isDisposed()) {
       setSnapshot(next);
       setLoadState("ready");
@@ -2192,9 +2319,12 @@ function selectionPaneId(event: MessageEvent) {
   }
 }
 
-function openEventsSocket(path: string, onEvent: (event: MessageEvent) => void) {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const url = `${protocol}//${window.location.host}${path}`;
+function openEventsSocket(
+  wsUrl: (path: string, query?: URLSearchParams) => string,
+  path: string,
+  onEvent: (event: MessageEvent) => void,
+) {
+  const url = wsUrl(path);
   let socket: WebSocket | null = null;
   let closed = false;
   let reconnectTimer: number | null = null;

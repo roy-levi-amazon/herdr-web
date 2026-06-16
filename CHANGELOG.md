@@ -6,6 +6,7 @@
 
 ### Added
 
+- Added named bridge backend profiles and a settings dialog for switching the active backend.
 - Added a bridge capabilities endpoint so the web app can discover supported commands without
   sending probe commands to Herdr.
 - Added pane context-menu actions to move a pane into a new tab or a new workspace when the bridge

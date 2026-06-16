@@ -7,12 +7,19 @@ import { shellCommand } from "./shell";
 export type CommandResult = { type?: string; [key: string]: unknown };
 export type PaneFocusDirection = "left" | "right" | "up" | "down";
 export type { LaunchSpec, SplitDirection };
+export type BridgeHttpUrl = (path: string, query?: URLSearchParams) => string;
+
+const sameOriginHttpUrl: BridgeHttpUrl = (path, query) => {
+  const suffix = query && query.toString() ? `?${query.toString()}` : "";
+  return `${path}${suffix}`;
+};
 
 async function runCommand(
+  httpUrl: BridgeHttpUrl,
   method: string,
   params: Record<string, unknown>,
 ): Promise<CommandResult> {
-  const response = await fetch("/api/command", {
+  const response = await fetch(httpUrl("/api/command"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ method, params }),
@@ -49,91 +56,98 @@ export function createdPaneId(result: CommandResult): string | null {
   );
 }
 
-export const commands = {
-  createWorkspace: () => runCommand("workspace.create", { focus: true }),
-  renameWorkspace: (workspaceId: string, label: string | null) =>
-    runCommand("workspace.rename", { workspace_id: workspaceId, label }),
-  closeWorkspace: (workspaceId: string) =>
-    runCommand("workspace.close", { workspace_id: workspaceId }),
-  focusWorkspace: (workspaceId: string) =>
-    runCommand("workspace.focus", { workspace_id: workspaceId }),
+export function createCommands(httpUrl: BridgeHttpUrl = sameOriginHttpUrl) {
+  const api = {
+    createWorkspace: () => runCommand(httpUrl, "workspace.create", { focus: true }),
+    renameWorkspace: (workspaceId: string, label: string | null) =>
+      runCommand(httpUrl, "workspace.rename", { workspace_id: workspaceId, label }),
+    closeWorkspace: (workspaceId: string) =>
+      runCommand(httpUrl, "workspace.close", { workspace_id: workspaceId }),
+    focusWorkspace: (workspaceId: string) =>
+      runCommand(httpUrl, "workspace.focus", { workspace_id: workspaceId }),
 
-  createTab: (workspaceId: string, label?: string) =>
-    runCommand("tab.create", { workspace_id: workspaceId, focus: true, label }),
-  renameTab: (tabId: string, label: string | null) =>
-    runCommand("tab.rename", { tab_id: tabId, label }),
-  closeTab: (tabId: string) => runCommand("tab.close", { tab_id: tabId }),
-  focusTab: (tabId: string) => runCommand("tab.focus", { tab_id: tabId }),
+    createTab: (workspaceId: string, label?: string) =>
+      runCommand(httpUrl, "tab.create", { workspace_id: workspaceId, focus: true, label }),
+    renameTab: (tabId: string, label: string | null) =>
+      runCommand(httpUrl, "tab.rename", { tab_id: tabId, label }),
+    closeTab: (tabId: string) => runCommand(httpUrl, "tab.close", { tab_id: tabId }),
+    focusTab: (tabId: string) => runCommand(httpUrl, "tab.focus", { tab_id: tabId }),
 
-  renamePane: (paneId: string, label: string) =>
-    runCommand("pane.rename", { pane_id: paneId, label }),
-  closePane: (paneId: string) => runCommand("pane.close", { pane_id: paneId }),
-  runPaneCommand: (paneId: string, command: string) =>
-    runCommand("pane.send_input", { pane_id: paneId, text: command, keys: ["Enter"] }),
-  // Layout-mutating: requires the bridge allow-list to include `pane.split`.
-  splitPane: (targetPaneId: string, direction: SplitDirection) =>
-    runCommand("pane.split", { target_pane_id: targetPaneId, direction, focus: true }),
-  focusPaneDirection: (paneId: string, direction: PaneFocusDirection) =>
-    runCommand("pane.focus_direction", { pane_id: paneId, direction }),
-  movePaneToNewTab: (paneId: string, workspaceId: string, label?: string) =>
-    runCommand("pane.move", {
-      pane_id: paneId,
-      destination: { type: "new_tab", workspace_id: workspaceId, label },
-      focus: true,
-    }),
-  movePaneToNewWorkspace: (paneId: string, label?: string) =>
-    runCommand("pane.move", {
-      pane_id: paneId,
-      destination: { type: "new_workspace", label },
-      focus: true,
-    }),
+    renamePane: (paneId: string, label: string) =>
+      runCommand(httpUrl, "pane.rename", { pane_id: paneId, label }),
+    closePane: (paneId: string) => runCommand(httpUrl, "pane.close", { pane_id: paneId }),
+    runPaneCommand: (paneId: string, command: string) =>
+      runCommand(httpUrl, "pane.send_input", { pane_id: paneId, text: command, keys: ["Enter"] }),
+    // Layout-mutating: requires the bridge allow-list to include `pane.split`.
+    splitPane: (targetPaneId: string, direction: SplitDirection) =>
+      runCommand(httpUrl, "pane.split", { target_pane_id: targetPaneId, direction, focus: true }),
+    focusPaneDirection: (paneId: string, direction: PaneFocusDirection) =>
+      runCommand(httpUrl, "pane.focus_direction", { pane_id: paneId, direction }),
+    movePaneToNewTab: (paneId: string, workspaceId: string, label?: string) =>
+      runCommand(httpUrl, "pane.move", {
+        pane_id: paneId,
+        destination: { type: "new_tab", workspace_id: workspaceId, label },
+        focus: true,
+      }),
+    movePaneToNewWorkspace: (paneId: string, label?: string) =>
+      runCommand(httpUrl, "pane.move", {
+        pane_id: paneId,
+        destination: { type: "new_workspace", label },
+        focus: true,
+      }),
 
-  startAgentSplit: (tabId: string, direction: SplitDirection, spec: LaunchSpec) =>
-    runCommand("agent.start", {
-      name: spec.title,
-      tab_id: tabId,
-      split: direction,
-      focus: true,
-      argv: agentArgv(spec.kind),
-    }),
+    startAgentSplit: (tabId: string, direction: SplitDirection, spec: LaunchSpec) =>
+      runCommand(httpUrl, "agent.start", {
+        name: spec.title,
+        tab_id: tabId,
+        split: direction,
+        focus: true,
+        argv: agentArgv(spec.kind),
+      }),
 
-  createLaunchTab: async (workspaceId: string, spec: LaunchSpec) => {
-    const result = await commands.createTab(workspaceId);
-    const paneId = createdPaneId(result);
-    if (!paneId) {
-      throw new Error("new tab did not return a root pane");
-    }
-    const title = spec.title.trim();
-    if (title) {
-      await commands.renamePane(paneId, title);
-    }
-    if (spec.kind !== "shell") {
-      await commands.runPaneCommand(paneId, shellCommand(agentArgv(spec.kind)));
-    }
-    return result;
-  },
+    createLaunchTab: async (workspaceId: string, spec: LaunchSpec) => {
+      const result = await api.createTab(workspaceId);
+      const paneId = createdPaneId(result);
+      if (!paneId) {
+        throw new Error("new tab did not return a root pane");
+      }
+      const title = spec.title.trim();
+      if (title) {
+        await api.renamePane(paneId, title);
+      }
+      if (spec.kind !== "shell") {
+        await api.runPaneCommand(paneId, shellCommand(agentArgv(spec.kind)));
+      }
+      return result;
+    },
 
-  splitLaunchPane: async (
-    targetPaneId: string,
-    tabId: string,
-    direction: SplitDirection,
-    spec: LaunchSpec,
-  ) => {
-    if (spec.kind !== "shell") {
-      return commands.startAgentSplit(tabId, direction, spec);
-    }
-    const result = await commands.splitPane(targetPaneId, direction);
-    const paneId = createdPaneId(result);
-    if (paneId && spec.title.trim()) {
-      await commands.renamePane(paneId, spec.title.trim());
-    }
-    return result;
-  },
-};
+    splitLaunchPane: async (
+      targetPaneId: string,
+      tabId: string,
+      direction: SplitDirection,
+      spec: LaunchSpec,
+    ) => {
+      if (spec.kind !== "shell") {
+        return api.startAgentSplit(tabId, direction, spec);
+      }
+      const result = await api.splitPane(targetPaneId, direction);
+      const paneId = createdPaneId(result);
+      if (paneId && spec.title.trim()) {
+        await api.renamePane(paneId, spec.title.trim());
+      }
+      return result;
+    },
+  };
+  return api;
+}
 
-export async function probeSupportedCommands(): Promise<Set<string>> {
+export const commands = createCommands();
+
+export async function probeSupportedCommands(
+  httpUrl: BridgeHttpUrl = sameOriginHttpUrl,
+): Promise<Set<string>> {
   try {
-    const response = await fetch("/api/capabilities");
+    const response = await fetch(httpUrl("/api/capabilities"));
     if (!response.ok) {
       return new Set();
     }
