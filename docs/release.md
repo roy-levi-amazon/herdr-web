@@ -64,11 +64,10 @@ To stage the current debug APK under the release asset name for private testing:
 
 ```bash
 mkdir -p dist-packages
-cp android/app/build/outputs/apk/debug/app-debug.apk dist-packages/herdr-web-vX.Y.Z-android.apk
+cp android/app/build/outputs/apk/debug/app-debug.apk dist-packages/herdr-web-vX.Y.Z-android-debug.apk
 ```
 
-For a public release, build a signed release APK instead and place it at the same release asset
-path:
+For a public release, build a signed release APK instead and use the non-debug release asset name:
 
 ```text
 dist-packages/herdr-web-vX.Y.Z-android.apk
@@ -151,10 +150,10 @@ gh release upload vX.Y.Z \
   dist-packages/herdr-web-vX.Y.Z-macos-arm64.tar.gz.sha256
 ```
 
-Upload the Android APK after it has the final release asset name:
+Upload the Android debug APK after it has the final debug asset name:
 
 ```bash
-gh release upload vX.Y.Z dist-packages/herdr-web-vX.Y.Z-android.apk
+gh release upload vX.Y.Z dist-packages/herdr-web-vX.Y.Z-android-debug.apk
 ```
 
 If every artifact has been copied to one machine, the same paths can be uploaded in one
