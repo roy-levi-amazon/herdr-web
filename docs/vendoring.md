@@ -31,7 +31,7 @@ The browser app is not vendored into Herdr. It lives at `web/`, and `herdr-web-b
 
 ## Current Reference
 
-- Upstream checkout: `/home/kevin/worktrees/herdr`
+- Upstream checkout: a clean Herdr source checkout outside this repository
 - Upstream release baseline: `v0.7.0`
 
 Use the upstream checkout as an external reference for audits and refreshes. It is not required to
@@ -65,8 +65,8 @@ Use a clean Herdr checkout as the source reference. Do not refresh from an exper
 may contain unrelated local drift.
 
 ```bash
-HERDR_SRC=/home/kevin/worktrees/herdr
-HERDR_WEB=/home/kevin/worktrees/herdr-web
+HERDR_SRC=/path/to/herdr
+HERDR_WEB=/path/to/herdr-web
 ```
 
 1. Verify the source checkout is clean:
