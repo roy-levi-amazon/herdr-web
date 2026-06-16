@@ -16,7 +16,7 @@ export type TerminalRenderer = {
   write(data: string | Uint8Array): void;
   onInput(callback: (data: string) => void): () => void;
   onScroll(callback: (lines: number) => void): () => void;
-  setTapFocusHandler(callback: (() => boolean) | null): void;
+  setTapFocusHandler(callback: (() => boolean | "terminal") | null): void;
   fit(): TerminalSize;
   refreshMetrics(): TerminalSize;
   focus(): void;
@@ -33,7 +33,7 @@ export class GhosttyRenderer implements TerminalRenderer {
   #scrollCallback: ((lines: number) => void) | null = null;
   #touchCleanup: (() => void) | null = null;
   #mobileInputCleanup: (() => void) | null = null;
-  #tapFocusHandler: (() => boolean) | null = null;
+  #tapFocusHandler: (() => boolean | "terminal") | null = null;
   #textInputTapGraceUntil = 0;
 
   async mount(container: HTMLElement) {
@@ -115,7 +115,7 @@ export class GhosttyRenderer implements TerminalRenderer {
     };
   }
 
-  setTapFocusHandler(callback: (() => boolean) | null) {
+  setTapFocusHandler(callback: (() => boolean | "terminal") | null) {
     this.#tapFocusHandler = callback;
   }
 
@@ -217,7 +217,8 @@ export class GhosttyRenderer implements TerminalRenderer {
       ) {
         return false;
       }
-      if (!this.#tapFocusHandler?.()) {
+      const tapFocusResult = this.#tapFocusHandler?.();
+      if (!tapFocusResult) {
         return false;
       }
       event.preventDefault();
@@ -225,7 +226,9 @@ export class GhosttyRenderer implements TerminalRenderer {
       if (typeof event.stopImmediatePropagation === "function") {
         event.stopImmediatePropagation();
       }
-      terminal.textarea?.blur();
+      if (tapFocusResult !== "terminal") {
+        terminal.textarea?.blur();
+      }
       return true;
     };
     const onTouchStart = (event: TouchEvent) => {

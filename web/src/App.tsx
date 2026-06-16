@@ -1713,7 +1713,7 @@ function Switcher({
             </span>
             {bridgeBlocked ? (
               <button type="button" className="btn" onClick={onBackendSettings}>
-                Bridge settings
+                Settings
               </button>
             ) : null}
           </div>

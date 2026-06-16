@@ -104,7 +104,16 @@ export function TerminalView({
     return true;
   }, []);
 
+  const focusTerminalKeyboardInput = useCallback(() => {
+    rendererRef.current?.focusTextInput();
+    return "terminal" as const;
+  }, []);
+
   const focusPreferredInput = useCallback(() => {
+    if (mobileControlsRef.current && mobileTapTargetRef.current === "terminal") {
+      rendererRef.current?.focusTextInput();
+      return;
+    }
     if (!focusMobileCommandInput()) {
       rendererRef.current?.focusTextInput();
     }
@@ -168,9 +177,11 @@ export function TerminalView({
 
         renderer.setScrollSensitivity(scrollSensitivityRef.current);
         renderer.setTapFocusHandler(
-          mobileControlsRef.current && mobileTapTargetRef.current === "command-input"
-            ? focusMobileCommandInput
-            : null,
+          !mobileControlsRef.current
+            ? null
+            : mobileTapTargetRef.current === "command-input"
+              ? focusMobileCommandInput
+              : focusTerminalKeyboardInput,
         );
 
         disposeInput = renderer.onInput((data) => {
@@ -349,9 +360,13 @@ export function TerminalView({
 
   useEffect(() => {
     rendererRef.current?.setTapFocusHandler(
-      mobileControls && mobileTapTarget === "command-input" ? focusMobileCommandInput : null,
+      !mobileControls
+        ? null
+        : mobileTapTarget === "command-input"
+          ? focusMobileCommandInput
+          : focusTerminalKeyboardInput,
     );
-  }, [focusMobileCommandInput, mobileControls, mobileTapTarget]);
+  }, [focusMobileCommandInput, focusTerminalKeyboardInput, mobileControls, mobileTapTarget]);
 
   useEffect(() => {
     return () => {
