@@ -24,12 +24,16 @@
 - Added a clear-name action for workspace and tab rename dialogs so custom names can return to
   their default labels.
 - Added release-process documentation and a GitHub Release script.
+- Added a desktop tarball packaging script for bridge/web release artifacts.
+- Added packaging documentation for Linux/macOS tarballs, Android APK artifacts, and manual GitHub
+  release uploads.
 - Added top-level agent onboarding guidance for web app, bridge, vendoring, testing, and release work.
 
 ### Changed
 
 - Changed bridge build, test, and run scripts to use the repo-owned `herdr-web-bridge` executable
   instead of invoking `herdr web-bridge` from the vendored Herdr package.
+- Split README setup guidance into release quick-start and source development sections.
 - Updated the vendoring strategy so only a minimal `vendor/herdr-compat` crate is checked in
   instead of the full upstream Herdr source tree.
 - Removed bridge build-time path imports from `vendor/herdr/src` and moved copied compatibility

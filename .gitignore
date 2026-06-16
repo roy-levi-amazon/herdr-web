@@ -6,6 +6,7 @@
 /web/tsconfig.tsbuildinfo
 /bridge/target/
 /vendor/herdr-compat/target/
+/dist-packages/
 .specs/
 *.log
 .DS_Store

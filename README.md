@@ -40,6 +40,7 @@ scripts/run-bridge.sh
 scripts/check-vendor.sh
 docs/android.md
 docs/vendoring.md
+docs/packaging.md
 docs/release.md
 ```
 
@@ -53,6 +54,13 @@ The top-level scripts hide that detail.
 
 ## Requirements
 
+For release tarball users:
+
+- A running Herdr daemon/session
+- A supported Linux or macOS host for the downloaded bridge tarball
+
+For source development:
+
 - Node.js 22 or newer
 - npm
 - Rust stable
@@ -60,14 +68,44 @@ The top-level scripts hide that detail.
 
 Android development also needs a JDK and Android SDK. See [docs/android.md](docs/android.md).
 
-## Install
+## Quick Start From Release
+
+Download the matching desktop tarball from the GitHub release, unpack it, and run the bundled
+wrapper:
+
+```bash
+tar -xzf herdr-web-vX.Y.Z-linux-x86_64.tar.gz
+cd herdr-web-vX.Y.Z-linux-x86_64
+bin/herdr-web
+```
+
+Open:
+
+```text
+http://127.0.0.1:8787
+```
+
+The desktop tarball includes the web assets and `herdr-web-bridge`; it does not include Herdr.
+Start or attach Herdr separately before running the bridge.
+
+For Android, install the APK from the same release and add the bridge URL in Bridges settings. LAN
+bridges must allow Android's app origin:
+
+```bash
+bin/herdr-web --host 0.0.0.0 --port 4000 --allow-origin http://localhost
+```
+
+See [docs/packaging.md](docs/packaging.md) for release artifact layout and
+[docs/android.md](docs/android.md) for Android behavior.
+
+## Development Setup
 
 ```bash
 npm install
 npm install --prefix web
 ```
 
-## Build And Test
+## Development Build And Test
 
 ```bash
 npm run lint
@@ -86,6 +124,7 @@ npm run bridge:test
 npm run bridge:build
 npm run android:sync
 npm run android:build:debug
+scripts/package-tarball.sh vX.Y.Z linux-x86_64
 scripts/check-vendor.sh
 ```
 
@@ -215,8 +254,10 @@ The cost is that `vendor/herdr-compat` must be kept compatible with Herdr protoc
 
 See [docs/vendoring.md](docs/vendoring.md) for the refresh process.
 
-See [docs/release.md](docs/release.md) for release validation, browser smoke testing, tagging, and
-GitHub release creation.
+See [docs/packaging.md](docs/packaging.md) for desktop tarball and APK artifact packaging.
+
+See [docs/release.md](docs/release.md) for release validation, browser smoke testing, tagging,
+GitHub release creation, and manual artifact upload.
 
 ## Long-Term Direction
 

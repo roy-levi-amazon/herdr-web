@@ -29,6 +29,37 @@ npm run check
 
 Do not cut a release without bridge test/build coverage.
 
+## Package Artifacts
+
+Build platform artifacts before or immediately after cutting the GitHub release.
+
+Linux desktop tarball:
+
+```bash
+npm ci
+npm ci --prefix web
+scripts/package-tarball.sh vX.Y.Z linux-x86_64
+```
+
+macOS ARM desktop tarball, run on an Apple Silicon Mac:
+
+```bash
+npm ci
+npm ci --prefix web
+scripts/package-tarball.sh vX.Y.Z macos-arm64
+```
+
+Android debug APK:
+
+```bash
+npm ci
+npm ci --prefix web
+npm run android:build:debug
+```
+
+The desktop tarballs are written to `dist-packages/`. The debug APK is written to
+`android/app/build/outputs/apk/debug/app-debug.apk`.
+
 ## Browser Smoke
 
 Start or attach a Herdr session:
@@ -74,19 +105,35 @@ The script:
 - creates a GitHub release with notes extracted from `CHANGELOG.md`
 - opens the next `## [Unreleased]` changelog section and pushes it
 
-Release artifact upload is intentionally not part of the process yet. Add that checklist later once
-the build and packaging output is settled.
+The release script does not upload binary artifacts. Upload tarballs and APKs manually after the
+release exists.
 
 ## Android Validation
 
-The Android shell is not part of release artifact upload yet. Before distributing Android builds,
-follow [docs/android.md](android.md): run `npm run android:sync`, build a debug APK with
+Before distributing Android builds, follow [docs/android.md](android.md): run
 `npm run android:build:debug`, and smoke test bridge configuration on a device or emulator with a
 bridge started using `--allow-origin http://localhost`. Revisit the Android backup policy before
 adding any pairing token or other secret storage.
 
+## Upload Artifacts
+
+Upload release artifacts manually with GitHub CLI after `node scripts/release.mjs vX.Y.Z` creates
+the release:
+
+```bash
+gh release upload vX.Y.Z \
+  dist-packages/herdr-web-vX.Y.Z-linux-x86_64.tar.gz \
+  dist-packages/herdr-web-vX.Y.Z-linux-x86_64.tar.gz.sha256 \
+  dist-packages/herdr-web-vX.Y.Z-macos-arm64.tar.gz \
+  dist-packages/herdr-web-vX.Y.Z-macos-arm64.tar.gz.sha256 \
+  android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+For a public release, replace the debug APK with a signed release APK and upload it with the final
+asset name, such as `herdr-web-vX.Y.Z-android.apk`.
+
 ## After
 
 - Confirm the GitHub release exists and points at the expected tag.
+- Confirm release assets and checksum files are attached.
 - Confirm `CHANGELOG.md` on `main` has a fresh empty `## [Unreleased]` section.
-- Do not upload artifacts until the release build/packaging process is defined.
