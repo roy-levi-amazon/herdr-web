@@ -4,9 +4,12 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type { ReactNode } from "react";
+import { Capacitor } from "@capacitor/core";
+import { Preferences } from "@capacitor/preferences";
 
 export type BridgeBackendProfile = {
   id: string;
@@ -41,6 +44,7 @@ export type BridgeRuntime = {
   capabilityState: CapabilityState;
   capabilityError: string | null;
   canConnect: boolean;
+  sameOriginAvailable: boolean;
   httpUrl: (path: string, query?: URLSearchParams) => string;
   wsUrl: (path: string, query?: URLSearchParams) => string;
   addBackend: (input: BackendInput, activate?: boolean) => Promise<BridgeBackendProfile>;
@@ -68,24 +72,45 @@ const fallbackStore: BridgeBackendStore = {
 const BridgeContext = createContext<BridgeRuntime | null>(null);
 
 export function BridgeProvider({ children }: { children: ReactNode }) {
-  const [store, setStore] = useState<BridgeBackendStore>(readBackendStore);
+  const [store, setStore] = useState<BridgeBackendStore>(fallbackStore);
+  const [storeLoaded, setStoreLoaded] = useState(false);
   const [capabilities, setCapabilities] = useState<BridgeCapabilities | null>(null);
   const [capabilityState, setCapabilityState] = useState<CapabilityState>("idle");
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
   const [connectionBlocked, setConnectionBlocked] = useState(false);
   const [capabilityRetry, setCapabilityRetry] = useState(0);
+  const storeEditedRef = useRef(false);
 
   const activeBackend = store.activeBackendId
     ? (store.backends.find((backend) => backend.id === store.activeBackendId) ?? null)
     : null;
-  const mode: BridgeMode = activeBackend ? "configured" : defaultBridgeMode();
-  const connectionKey = activeBackend ? `configured:${activeBackend.id}:${activeBackend.baseUrl}` : "same-origin";
+  const defaultMode = defaultBridgeMode();
+  const sameOriginAvailable = defaultMode === "same-origin";
+  const mode: BridgeMode = activeBackend ? "configured" : defaultMode;
+  const connectionKey = activeBackend
+    ? `configured:${activeBackend.id}:${activeBackend.baseUrl}`
+    : mode;
   const canProbe = mode !== "disconnected";
   const canConnect = canProbe && !connectionBlocked;
 
   useEffect(() => {
-    writeBackendStore(store);
-  }, [store]);
+    let cancelled = false;
+    void loadBackendStore().then((next) => {
+      if (!cancelled) {
+        setStore((current) => (storeEditedRef.current ? current : next));
+        setStoreLoaded(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (storeLoaded) {
+      void writeBackendStore(store);
+    }
+  }, [store, storeLoaded]);
 
   const httpUrl = useCallback(
     (path: string, query?: URLSearchParams) => buildHttpUrl(activeBackend?.baseUrl ?? null, path, query),
@@ -157,6 +182,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
       lastConnectedAt: activate ? new Date().toISOString() : undefined,
     };
     const nextProfile = { ...profile };
+    storeEditedRef.current = true;
     setStore((current) => ({
       version: STORE_VERSION,
       activeBackendId: activate ? nextProfile.id : current.activeBackendId,
@@ -179,6 +205,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
       lastConnectedAt:
         store.activeBackendId === id ? new Date().toISOString() : existing.lastConnectedAt,
     };
+    storeEditedRef.current = true;
     setStore((current) => ({
       version: STORE_VERSION,
       activeBackendId: current.activeBackendId,
@@ -188,6 +215,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
   }, [store.activeBackendId, store.backends]);
 
   const deleteBackend = useCallback((id: string) => {
+    storeEditedRef.current = true;
     setStore((current) => ({
       version: STORE_VERSION,
       activeBackendId: current.activeBackendId === id ? null : current.activeBackendId,
@@ -196,6 +224,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setActiveBackend = useCallback((id: string) => {
+    storeEditedRef.current = true;
     setStore((current) => {
       if (!current.backends.some((backend) => backend.id === id)) {
         return current;
@@ -211,6 +240,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const clearActiveBackend = useCallback(() => {
+    storeEditedRef.current = true;
     setStore((current) => ({ ...current, activeBackendId: null }));
   }, []);
 
@@ -224,6 +254,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
       capabilityState,
       capabilityError,
       canConnect,
+      sameOriginAvailable,
       httpUrl,
       wsUrl,
       addBackend,
@@ -247,6 +278,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
       mode,
       probeBackend,
       setActiveBackend,
+      sameOriginAvailable,
       store,
       updateBackend,
       wsUrl,
@@ -264,9 +296,28 @@ export function useBridge() {
   return value;
 }
 
+export async function loadBackendStore(): Promise<BridgeBackendStore> {
+  if (isNativeApp()) {
+    try {
+      const { value } = await Preferences.get({ key: STORE_KEY });
+      if (value) {
+        return parseBackendStore(JSON.parse(value));
+      }
+      const localStore = readBackendStore();
+      if (localStore.backends.length > 0 || localStore.activeBackendId) {
+        await Preferences.set({ key: STORE_KEY, value: JSON.stringify(localStore) });
+      }
+      return localStore;
+    } catch {
+      return readBackendStore();
+    }
+  }
+  return readBackendStore();
+}
+
 export function readBackendStore(): BridgeBackendStore {
   try {
-    const raw = window.localStorage.getItem(STORE_KEY);
+    const raw = globalThis.localStorage?.getItem(STORE_KEY);
     if (!raw) {
       return fallbackStore;
     }
@@ -276,9 +327,18 @@ export function readBackendStore(): BridgeBackendStore {
   }
 }
 
-export function writeBackendStore(store: BridgeBackendStore) {
+export async function writeBackendStore(store: BridgeBackendStore) {
+  const value = JSON.stringify(store);
+  if (isNativeApp()) {
+    try {
+      await Preferences.set({ key: STORE_KEY, value });
+      return;
+    } catch {
+      // Fall through so browser storage remains a best-effort backup.
+    }
+  }
   try {
-    window.localStorage.setItem(STORE_KEY, JSON.stringify(store));
+    globalThis.localStorage?.setItem(STORE_KEY, value);
   } catch {
     // Storage can be unavailable in private or locked-down browser contexts.
   }
@@ -324,7 +384,11 @@ function parseBackendProfile(value: unknown): BridgeBackendProfile | null {
 }
 
 function defaultBridgeMode(): BridgeMode {
-  return "same-origin";
+  return isNativeApp() ? "disconnected" : "same-origin";
+}
+
+function isNativeApp() {
+  return Capacitor.isNativePlatform();
 }
 
 export function normalizeBridgeBaseUrl(input: string): string {

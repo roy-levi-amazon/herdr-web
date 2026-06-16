@@ -21,6 +21,7 @@ import {
 import { LaunchDialog } from "./LaunchDialog";
 import { resolveLaunchSpec } from "./launch";
 import type { LaunchTarget } from "./launch";
+import { addNativeBackHandler } from "./native";
 import { ActionMenu, ConfirmDialog, RenameDialog, useLongPress } from "./overlays";
 import type { MenuItem } from "./overlays";
 import { TerminalView } from "./TerminalView";
@@ -229,6 +230,28 @@ export function App() {
     y: number;
     target: HTMLDivElement;
   } | null>(null);
+
+  useEffect(() => {
+    return addNativeBackHandler(() => {
+      if (backendSettingsOpen) {
+        setBackendSettingsOpen(false);
+        return true;
+      }
+      if (launchTarget) {
+        setLaunchTarget(null);
+        return true;
+      }
+      if (dialog) {
+        setDialog(null);
+        return true;
+      }
+      if (menu) {
+        setMenu(null);
+        return true;
+      }
+      return false;
+    });
+  }, [backendSettingsOpen, dialog, launchTarget, menu]);
 
   const snapshot = currentConnectionSnapshot(
     snapshotState,

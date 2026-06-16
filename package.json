@@ -12,9 +12,22 @@
     "bridge:fmt": "cargo fmt --manifest-path vendor/herdr/Cargo.toml --check",
     "bridge:build": "cargo build --manifest-path vendor/herdr/Cargo.toml --bin herdr",
     "bridge:test": "cargo test --manifest-path vendor/herdr/Cargo.toml --bin herdr web_bridge",
+    "android:sync": "npm run build:web && cap sync android",
+    "android:build:debug": "npm run android:sync && cd android && ./gradlew assembleDebug",
+    "android:open": "cap open android",
     "build": "npm run build:web && npm run bridge:build",
     "test": "npm run test:web && npm run bridge:test",
     "lint": "npm run lint:web && npm run bridge:fmt",
     "check": "npm run vendor:check && npm run lint && npm run test && npm run build"
+  },
+  "devDependencies": {
+    "@capacitor/android": "^8.4.0",
+    "@capacitor/cli": "^8.4.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@capacitor/app": "^8.1.0",
+    "@capacitor/core": "^8.4.0",
+    "@capacitor/preferences": "^8.0.1"
   }
 }

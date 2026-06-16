@@ -3,7 +3,10 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { BridgeProvider } from "./bridge";
+import { startNativeControls } from "./native";
 import "./styles.css";
+
+startNativeControls();
 
 const root = document.getElementById("root");
 

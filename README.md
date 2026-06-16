@@ -33,9 +33,11 @@ navigation, multi-client viewing, mobile input controls, and synchronized pane s
 
 ```text
 web/                 React + Vite browser app
+android/             Capacitor Android shell for the bundled web app
 vendor/herdr/        vendored Herdr source with the web bridge overlay
 scripts/run-bridge.sh
 scripts/check-vendor.sh
+docs/android.md
 docs/vendoring.md
 docs/release.md
 ```
@@ -56,6 +58,8 @@ The top-level scripts hide that detail.
 - Zig, needed by Herdr's vendored `libghostty-vt` build
 - A running Herdr daemon/session
 
+Android development also needs a JDK and Android SDK. See [docs/android.md](docs/android.md).
+
 If Zig is not on `PATH`, set `ZIG`:
 
 ```bash
@@ -65,6 +69,7 @@ export ZIG=/home/kevin/.local/zig/zig
 ## Install
 
 ```bash
+npm install
 npm install --prefix web
 ```
 
@@ -85,8 +90,15 @@ npm run build:web
 npm run bridge:fmt
 npm run bridge:test
 npm run bridge:build
+npm run android:sync
+npm run android:build:debug
 scripts/check-vendor.sh
 ```
+
+The Android app is a Capacitor shell around the bundled `web/dist` assets. It starts disconnected
+and uses the same Bridges settings UI to save one or more Herdr bridge URLs. Browser-served builds
+still default to the same-origin bridge that served the page. See [docs/android.md](docs/android.md)
+for HTTP/cleartext behavior, Android SDK setup, and APK verification notes.
 
 ## Run Locally
 
@@ -126,7 +138,7 @@ http://127.0.0.1:8787
 For LAN/mobile testing:
 
 ```bash
-HOST=0.0.0.0 PORT=4000 scripts/run-bridge.sh
+HOST=0.0.0.0 PORT=4000 scripts/run-bridge.sh --allow-origin http://localhost
 ```
 
 Uploads are saved under `HERDR_WEB_UPLOAD_DIR`, `XDG_DATA_HOME/herdr-web/uploads`, or
@@ -136,8 +148,9 @@ Uploads are saved under `HERDR_WEB_UPLOAD_DIR`, `XDG_DATA_HOME/herdr-web/uploads
 UPLOAD_DIR=/tmp/herdr-web-uploads scripts/run-bridge.sh
 ```
 
-The bridge rejects cross-origin browser requests, but it has no full browser authentication yet.
-Bind to `0.0.0.0` only on trusted networks.
+The bridge rejects cross-origin browser requests unless the request origin is explicitly allowed.
+The bundled Android app uses `http://localhost`, so LAN Android testing needs
+`--allow-origin http://localhost`. Bind to `0.0.0.0` only on trusted networks.
 
 ## Keyboard Shortcuts
 
@@ -179,8 +192,10 @@ currently last resize wins. The header's refit button forces the current browser
 fit/resize frame.
 
 API and WebSocket requests must use an allowed bridge `Host` header. Browser-originated requests
-must also be same-origin with the bridge, with loopback development proxy origins allowed for Vite.
-This is a DNS-rebinding/CSRF guard, not user authentication.
+must also be same-origin with the bridge, an explicitly allowed origin such as Android's
+`http://localhost`, or a loopback development proxy origin allowed for Vite. Hostname backends must
+be explicitly allowed with `--allow-host HOSTNAME`. This is a DNS-rebinding/CSRF guard, not user
+authentication.
 
 Pane selection is bridge-owned. Selecting a pane in one browser updates `/api/selection`, broadcasts
 over `/ws/ui-events`, and other browsers switch to the same pane.

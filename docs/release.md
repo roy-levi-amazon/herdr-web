@@ -9,6 +9,7 @@ They do not publish npm packages, and the package versions are not release versi
 - Node.js 22 or newer.
 - Rust stable.
 - Zig on `PATH` or exported through `ZIG`, because vendored Herdr builds `libghostty-vt`.
+- JDK 21 and Android SDK when validating the Android shell.
 - GitHub CLI authenticated as a user that can create releases.
 - A local Herdr session for browser smoke testing.
 
@@ -77,6 +78,13 @@ The script:
 
 Release artifact upload is intentionally not part of the process yet. Add that checklist later once
 the build and packaging output is settled.
+
+## Android Validation
+
+The Android shell is not part of release artifact upload yet. Before distributing Android builds,
+follow [docs/android.md](android.md): run `npm run android:sync`, build a debug APK with
+`npm run android:build:debug`, and smoke test bridge configuration on a device or emulator with a
+bridge started using `--allow-origin http://localhost`.
 
 ## After
 

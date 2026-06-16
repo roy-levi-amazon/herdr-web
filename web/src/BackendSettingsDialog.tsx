@@ -32,7 +32,7 @@ export function BackendSettingsDialog({ onClose }: Props) {
   const nameInputRef = useRef<HTMLInputElement | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm);
   const [selectionMode, setSelectionMode] = useState<SelectionMode>(
-    bridge.activeBackend ? "backend" : "same-origin",
+    initialSelectionMode(bridge.activeBackend, bridge.sameOriginAvailable),
   );
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -164,6 +164,7 @@ export function BackendSettingsDialog({ onClose }: Props) {
   const canDelete = Boolean(form.id && bridge.activeBackend?.id !== form.id);
   const editingBackend = selectionMode !== "same-origin";
   const sameOriginUrl = sameOriginDisplayUrl();
+  const showSameOrigin = bridge.sameOriginAvailable;
 
   return (
     <div className="overlay-root">
@@ -201,18 +202,20 @@ export function BackendSettingsDialog({ onClose }: Props) {
         <div id={titleId} className="modal-title">Bridges</div>
         <div className="backend-layout">
           <div className="backend-list" role="list" aria-label="Saved bridges">
-            <button
-              className="backend-row"
-              type="button"
-              data-active={selectionMode === "same-origin" ? "true" : undefined}
-              onClick={selectSameOrigin}
-            >
-              {!bridge.store.activeBackendId ? <Check size={14} /> : <span />}
-              <span>
-                <strong>Same origin</strong>
-                <small>{sameOriginUrl}</small>
-              </span>
-            </button>
+            {showSameOrigin ? (
+              <button
+                className="backend-row"
+                type="button"
+                data-active={selectionMode === "same-origin" ? "true" : undefined}
+                onClick={selectSameOrigin}
+              >
+                {!bridge.store.activeBackendId ? <Check size={14} /> : <span />}
+                <span>
+                  <strong>Same origin</strong>
+                  <small>{sameOriginUrl}</small>
+                </span>
+              </button>
+            ) : null}
             {bridge.store.backends.map((backend) => (
               <button
                 key={backend.id}
@@ -329,6 +332,16 @@ function sameOriginDisplayUrl() {
     return "same-origin";
   }
   return location.origin;
+}
+
+function initialSelectionMode(
+  activeBackend: BridgeBackendProfile | null,
+  sameOriginAvailable: boolean,
+): SelectionMode {
+  if (activeBackend) {
+    return "backend";
+  }
+  return sameOriginAvailable ? "same-origin" : "new";
 }
 
 function formatDate(value: string) {

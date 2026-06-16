@@ -11,7 +11,10 @@ use std::thread;
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Query, State};
-use axum::http::header::{HOST, ORIGIN};
+use axum::http::header::{
+    ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
+    ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS, HOST, ORIGIN, VARY,
+};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -50,6 +53,8 @@ struct BridgeOptions {
     port: u16,
     static_dir: PathBuf,
     upload_dir: PathBuf,
+    allowed_hosts: Vec<String>,
+    allowed_origins: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -67,6 +72,8 @@ struct BridgeState {
 struct RequestPolicy {
     bind_host: String,
     bind_port: u16,
+    allowed_hosts: Vec<String>,
+    allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -251,7 +258,9 @@ pub(crate) fn run_command(args: &[String]) -> io::Result<i32> {
         Ok(None) => return Ok(0),
         Err(message) => {
             eprintln!("{message}");
-            eprintln!("usage: herdr web-bridge [--host HOST] [--port PORT] [--static-dir DIR]");
+            eprintln!(
+                "usage: herdr web-bridge [--host HOST] [--port PORT] [--static-dir DIR] [--allow-origin ORIGIN] [--allow-host HOSTNAME]"
+            );
             return Ok(2);
         }
     };
@@ -271,6 +280,8 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
     let mut port = DEFAULT_PORT;
     let mut static_dir = PathBuf::from(DEFAULT_STATIC_DIR);
     let mut upload_dir = default_upload_dir();
+    let mut allowed_hosts = Vec::new();
+    let mut allowed_origins = Vec::new();
     let mut index = 0;
 
     while index < args.len() {
@@ -309,6 +320,20 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
                 upload_dir = expand_home(value);
                 index += 2;
             }
+            "--allow-host" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --allow-host".into());
+                };
+                allowed_hosts.push(normalize_allowed_host(value)?);
+                index += 2;
+            }
+            "--allow-origin" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --allow-origin".into());
+                };
+                allowed_origins.push(normalize_allowed_origin(value)?);
+                index += 2;
+            }
             arg => return Err(format!("unknown herdr-web option: {arg}")),
         }
     }
@@ -318,6 +343,8 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
         port,
         static_dir,
         upload_dir,
+        allowed_hosts,
+        allowed_origins,
     }))
 }
 
@@ -325,12 +352,14 @@ fn print_help() {
     println!("herdr web-bridge");
     println!();
     println!(
-        "Usage: herdr web-bridge [--host HOST] [--port PORT] [--static-dir DIR] [--upload-dir DIR]"
+        "Usage: herdr web-bridge [--host HOST] [--port PORT] [--static-dir DIR] [--upload-dir DIR] [--allow-origin ORIGIN] [--allow-host HOSTNAME]"
     );
     println!();
     println!("Runs the local HTTP/WebSocket bridge for herdr-web.");
     println!("Defaults to the active Herdr daemon sockets and 127.0.0.1:8787.");
     println!("Use --host 0.0.0.0 to listen on non-loopback interfaces.");
+    println!("Use --allow-origin http://localhost for bundled Android app access.");
+    println!("Use --allow-host HOSTNAME to accept that exact DNS hostname in Host headers.");
     println!("Uploads default to HERDR_WEB_UPLOAD_DIR, XDG_DATA_HOME/herdr-web/uploads, or ~/.local/share/herdr-web/uploads.");
 }
 
@@ -346,27 +375,47 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
     let request_policy = RequestPolicy {
         bind_host: options.host.clone(),
         bind_port: options.port,
+        allowed_hosts: options.allowed_hosts.clone(),
+        allowed_origins: options.allowed_origins.clone(),
     };
     let state = BridgeState {
         api: ApiClient::local(),
         client_socket_path: crate::server::socket_paths::client_socket_path(),
-        request_policy,
+        request_policy: request_policy.clone(),
         terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
         selected_pane_id: Arc::new(Mutex::new(None)),
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
         upload_dir: options.upload_dir.clone(),
     };
     let app = Router::new()
-        .route("/api/snapshot", get(snapshot_handler))
-        .route("/api/capabilities", get(capabilities_handler))
-        .route("/api/command", post(command_handler))
-        .route("/api/selection", post(selection_handler))
-        .route("/api/uploads", post(upload_handler))
+        .route(
+            "/api/snapshot",
+            get(snapshot_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/capabilities",
+            get(capabilities_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/command",
+            post(command_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/selection",
+            post(selection_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/uploads",
+            post(upload_handler).options(preflight_handler),
+        )
         .route("/ws/events", get(events_ws_handler))
         .route("/ws/ui-events", get(ui_events_ws_handler))
         .route("/ws/terminal", get(terminal_ws_handler))
         .fallback_service(ServeDir::new(options.static_dir))
-        .layer(middleware::from_fn(add_security_headers))
+        .layer(middleware::from_fn_with_state(
+            request_policy.clone(),
+            add_security_headers,
+        ))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .with_state(state);
     let bind = format!("{}:{}", options.host, options.port);
@@ -375,7 +424,12 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
     axum::serve(listener, app).await
 }
 
-async fn add_security_headers(request: AxumRequest, next: Next) -> Response {
+async fn add_security_headers(
+    State(policy): State<RequestPolicy>,
+    request: AxumRequest,
+    next: Next,
+) -> Response {
+    let cors_origin = cors_origin_header(request.headers(), &policy);
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert(
@@ -391,7 +445,53 @@ async fn add_security_headers(request: AxumRequest, next: Next) -> Response {
              frame-ancestors 'none'",
         ),
     );
+    if let Some(origin) = cors_origin {
+        insert_cors_headers(headers, origin);
+    }
     response
+}
+
+async fn preflight_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Result<Response, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let Some(origin) = cors_origin_header(&headers, &state.request_policy) else {
+        return Err(BridgeError::Forbidden(
+            "cross-origin requests are not allowed".to_string(),
+        ));
+    };
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    insert_cors_headers(response.headers_mut(), origin);
+    if let Some(request_headers) = headers.get(ACCESS_CONTROL_REQUEST_HEADERS) {
+        response
+            .headers_mut()
+            .insert(ACCESS_CONTROL_ALLOW_HEADERS, request_headers.clone());
+    }
+    Ok(response)
+}
+
+fn cors_origin_header(headers: &HeaderMap, policy: &RequestPolicy) -> Option<HeaderValue> {
+    let origin = headers.get(ORIGIN)?;
+    if request_allowed(headers, policy) {
+        Some(origin.clone())
+    } else {
+        None
+    }
+}
+
+fn insert_cors_headers(headers: &mut HeaderMap, origin: HeaderValue) {
+    headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    headers.insert(
+        ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST, OPTIONS"),
+    );
+    headers.insert(
+        ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("content-type"),
+    );
+    headers.insert(ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
+    headers.insert(VARY, HeaderValue::from_static("Origin"));
 }
 
 fn is_loopback_bind_host(host: &str) -> bool {
@@ -556,7 +656,7 @@ fn ensure_allowed_request(headers: &HeaderMap, policy: &RequestPolicy) -> Result
 }
 
 fn request_allowed(headers: &HeaderMap, policy: &RequestPolicy) -> bool {
-    request_host_allowed(headers, policy) && request_origin_allowed(headers)
+    request_host_allowed(headers, policy) && request_origin_allowed(headers, policy)
 }
 
 fn request_host_allowed(headers: &HeaderMap, policy: &RequestPolicy) -> bool {
@@ -580,6 +680,14 @@ fn host_authority_allowed(authority: &str, policy: &RequestPolicy) -> bool {
         return false;
     }
 
+    if policy
+        .allowed_hosts
+        .iter()
+        .any(|allowed| host.eq_ignore_ascii_case(allowed))
+    {
+        return true;
+    }
+
     if is_unspecified_bind_host(&policy.bind_host) {
         return host.parse::<IpAddr>().is_ok();
     }
@@ -587,7 +695,7 @@ fn host_authority_allowed(authority: &str, policy: &RequestPolicy) -> bool {
     host.eq_ignore_ascii_case(&policy.bind_host)
 }
 
-fn request_origin_allowed(headers: &HeaderMap) -> bool {
+fn request_origin_allowed(headers: &HeaderMap, policy: &RequestPolicy) -> bool {
     let Some(origin) = headers.get(ORIGIN) else {
         return true;
     };
@@ -603,6 +711,10 @@ fn request_origin_allowed(headers: &HeaderMap) -> bool {
 
     same_authority(origin_authority, host)
         || (is_loopback_authority(origin_authority) && is_loopback_authority(host))
+        || policy
+            .allowed_origins
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(origin))
 }
 
 fn origin_authority(origin: &str) -> Option<&str> {
@@ -613,6 +725,46 @@ fn origin_authority(origin: &str) -> Option<&str> {
         return None;
     }
     Some(rest)
+}
+
+fn normalize_allowed_origin(origin: &str) -> Result<String, String> {
+    let origin = origin.trim();
+    let Some(authority) = origin_authority(origin) else {
+        return Err("allowed origin must be an http or https origin without a path".into());
+    };
+    if authority.is_empty() {
+        return Err("allowed origin must include a host".into());
+    }
+    Ok(origin.to_ascii_lowercase())
+}
+
+fn normalize_allowed_host(host: &str) -> Result<String, String> {
+    let host = host.trim().trim_matches('.');
+    if host.is_empty() {
+        return Err("allowed host must not be empty".into());
+    }
+    if host.contains(':') || host.contains('/') || host.contains('\\') {
+        return Err("allowed host must be a hostname without scheme, port, or path".into());
+    }
+    if !is_valid_dns_hostname(host) {
+        return Err("allowed host is not a valid hostname".into());
+    }
+    Ok(host.to_ascii_lowercase())
+}
+
+fn is_valid_dns_hostname(host: &str) -> bool {
+    if host.len() > 253 {
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
 }
 
 fn same_authority(left: &str, right: &str) -> bool {
@@ -1911,35 +2063,55 @@ mod tests {
     }
 
     #[test]
+    fn request_gate_allows_configured_android_origin() {
+        let policy = RequestPolicy {
+            bind_host: "0.0.0.0".to_string(),
+            bind_port: 4000,
+            allowed_hosts: Vec::new(),
+            allowed_origins: vec!["http://localhost".to_string()],
+        };
+        assert!(request_allowed(
+            &origin_headers("192.168.1.10:4000", Some("http://localhost")),
+            &policy
+        ));
+        assert!(!request_allowed(
+            &origin_headers("192.168.1.10:4000", Some("https://example.com")),
+            &policy
+        ));
+    }
+
+    #[test]
     fn origin_gate_allows_same_origin_and_loopback_dev_proxy() {
-        assert!(request_origin_allowed(&origin_headers(
-            "127.0.0.1:8787",
-            None
-        )));
-        assert!(request_origin_allowed(&origin_headers(
-            "127.0.0.1:8787",
-            Some("http://127.0.0.1:8787")
-        )));
-        assert!(request_origin_allowed(&origin_headers(
-            "127.0.0.1:8787",
-            Some("http://127.0.0.1:5173")
-        )));
+        let policy = test_policy("127.0.0.1", 8787);
+        assert!(request_origin_allowed(
+            &origin_headers("127.0.0.1:8787", None),
+            &policy
+        ));
+        assert!(request_origin_allowed(
+            &origin_headers("127.0.0.1:8787", Some("http://127.0.0.1:8787")),
+            &policy
+        ));
+        assert!(request_origin_allowed(
+            &origin_headers("127.0.0.1:8787", Some("http://127.0.0.1:5173")),
+            &policy
+        ));
     }
 
     #[test]
     fn origin_gate_rejects_cross_site_browser_origins() {
-        assert!(!request_origin_allowed(&origin_headers(
-            "127.0.0.1:8787",
-            Some("https://example.com")
-        )));
-        assert!(!request_origin_allowed(&origin_headers(
-            "192.168.1.10:8787",
-            Some("http://127.0.0.1:5173")
-        )));
-        assert!(!request_origin_allowed(&origin_headers(
-            "127.0.0.1:8787",
-            Some("null")
-        )));
+        let policy = test_policy("127.0.0.1", 8787);
+        assert!(!request_origin_allowed(
+            &origin_headers("127.0.0.1:8787", Some("https://example.com")),
+            &policy
+        ));
+        assert!(!request_origin_allowed(
+            &origin_headers("192.168.1.10:8787", Some("http://127.0.0.1:5173")),
+            &policy
+        ));
+        assert!(!request_origin_allowed(
+            &origin_headers("127.0.0.1:8787", Some("null")),
+            &policy
+        ));
     }
 
     #[test]
@@ -1953,6 +2125,43 @@ mod tests {
         assert!(host_authority_allowed("192.168.1.10:4000", &lan));
         assert!(host_authority_allowed("[::1]:5173", &lan));
         assert!(!host_authority_allowed("evil.example:4000", &lan));
+    }
+
+    #[test]
+    fn host_gate_accepts_configured_hostname_only_on_bridge_port() {
+        let policy = RequestPolicy {
+            bind_host: "0.0.0.0".to_string(),
+            bind_port: 4000,
+            allowed_hosts: vec!["herdr-host.local".to_string()],
+            allowed_origins: Vec::new(),
+        };
+        assert!(host_authority_allowed("herdr-host.local:4000", &policy));
+        assert!(host_authority_allowed("HERDR-HOST.LOCAL:4000", &policy));
+        assert!(!host_authority_allowed("herdr-host.local:8787", &policy));
+        assert!(!host_authority_allowed("evil.example:4000", &policy));
+    }
+
+    #[test]
+    fn cors_headers_reflect_only_allowed_origins() {
+        let policy = RequestPolicy {
+            bind_host: "0.0.0.0".to_string(),
+            bind_port: 4000,
+            allowed_hosts: Vec::new(),
+            allowed_origins: vec!["http://localhost".to_string()],
+        };
+        assert_eq!(
+            cors_origin_header(
+                &origin_headers("192.168.1.10:4000", Some("http://localhost")),
+                &policy
+            )
+            .and_then(|value| value.to_str().ok().map(str::to_string)),
+            Some("http://localhost".to_string())
+        );
+        assert!(cors_origin_header(
+            &origin_headers("192.168.1.10:4000", Some("https://example.com")),
+            &policy
+        )
+        .is_none());
     }
 
     #[test]
@@ -2285,6 +2494,8 @@ mod tests {
         RequestPolicy {
             bind_host: bind_host.to_string(),
             bind_port,
+            allowed_hosts: Vec::new(),
+            allowed_origins: Vec::new(),
         }
     }
 }

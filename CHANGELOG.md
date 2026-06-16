@@ -6,6 +6,11 @@
 
 ### Added
 
+- Added a Capacitor Android shell that bundles the web app, stores bridge profiles with native
+  Preferences, starts disconnected until a bridge is selected, and supports debug APK builds.
+- Added bridge `--allow-origin` and `--allow-host` options with CORS preflight support for bundled
+  Android bridge access and explicit hostname backends.
+- Added Android build, sync, HTTP/cleartext, and smoke-test documentation.
 - Added named bridge backend profiles and a settings dialog for switching the active backend.
 - Added a bridge capabilities endpoint so the web app can discover supported commands without
   sending probe commands to Herdr.
@@ -23,6 +28,8 @@
 - Narrowed web bridge validation for workspace and tab creation parameters.
 - Narrowed web bridge command validation for browser-launched pane input, splits, and agent starts.
 - Added same-origin browser request checks to bridge API and WebSocket routes.
+- Changed the Android shell origin to `http://localhost` with cleartext enabled for trusted-LAN
+  HTTP bridge URLs.
 - Included Rust formatting checks for the vendored bridge overlay in the root lint command.
 - Changed mobile terminal taps to focus the command input by default, with raw terminal focus behind
   a keyboard-row button.
