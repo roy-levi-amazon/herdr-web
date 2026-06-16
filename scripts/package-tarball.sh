@@ -39,8 +39,7 @@ mkdir -p "$STAGE/bin" "$STAGE/share/herdr-web/web"
 
 cp "$ROOT/bridge/target/release/herdr-web-bridge" "$STAGE/bin/herdr-web-bridge"
 cp -R "$ROOT/web/dist/." "$STAGE/share/herdr-web/web/"
-cp "$ROOT/README.md" "$STAGE/README.md"
-cp "$ROOT/docs/packaging.md" "$STAGE/PACKAGING.md"
+cp "$ROOT/docs/tarball-readme.md" "$STAGE/README.md"
 
 cat > "$STAGE/bin/herdr-web" <<'WRAPPER'
 #!/usr/bin/env bash
@@ -55,7 +54,7 @@ chmod +x "$STAGE/bin/herdr-web" "$STAGE/bin/herdr-web-bridge"
 
 (
   cd "$PKG_ROOT"
-  tar -czf "$ARCHIVE" "$NAME"
+  COPYFILE_DISABLE=1 tar -czf "$ARCHIVE" "$NAME"
   if command -v sha256sum >/dev/null; then
     sha256sum "$(basename "$ARCHIVE")" > "$ARCHIVE.sha256"
   elif command -v shasum >/dev/null; then

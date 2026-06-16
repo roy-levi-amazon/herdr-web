@@ -28,7 +28,6 @@ herdr-web-vX.Y.Z-PLATFORM/
   bin/herdr-web-bridge
   share/herdr-web/web/
   README.md
-  PACKAGING.md
 ```
 
 `bin/herdr-web` is a small wrapper that runs `herdr-web-bridge` with `--static-dir` pointed at the
@@ -37,6 +36,11 @@ bundled web assets.
 ## Build A Desktop Tarball
 
 Install dependencies first:
+
+- Node.js 22 or newer
+- npm
+- Rust stable
+- a platform C toolchain usable by Cargo
 
 ```bash
 npm ci
@@ -78,7 +82,11 @@ The debug build artifact is:
 android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-For a public release, replace this with a signed release APK before publishing.
+For a public release, build a signed release APK before publishing and name the release asset:
+
+```text
+dist-packages/herdr-web-vX.Y.Z-android.apk
+```
 
 ## User Quick Start From Tarball
 
@@ -121,16 +129,30 @@ Then install the Android APK and add the bridge URL in Bridges settings.
 ## Manual Release Upload
 
 The release script creates the GitHub release from changelog notes. Tarballs and APKs are uploaded
-manually after the release exists:
+manually after the release exists.
+
+Upload the Linux tarball from the Linux build host:
 
 ```bash
 gh release upload vX.Y.Z \
   dist-packages/herdr-web-vX.Y.Z-linux-x86_64.tar.gz \
-  dist-packages/herdr-web-vX.Y.Z-linux-x86_64.tar.gz.sha256 \
-  dist-packages/herdr-web-vX.Y.Z-macos-arm64.tar.gz \
-  dist-packages/herdr-web-vX.Y.Z-macos-arm64.tar.gz.sha256 \
-  android/app/build/outputs/apk/debug/app-debug.apk
+  dist-packages/herdr-web-vX.Y.Z-linux-x86_64.tar.gz.sha256
 ```
 
-Rename the APK to the release asset name before uploading if publishing it as
-`herdr-web-vX.Y.Z-android.apk`.
+Upload the macOS ARM tarball from the Apple Silicon Mac build host, or copy it to the release
+operator machine first:
+
+```bash
+gh release upload vX.Y.Z \
+  dist-packages/herdr-web-vX.Y.Z-macos-arm64.tar.gz \
+  dist-packages/herdr-web-vX.Y.Z-macos-arm64.tar.gz.sha256
+```
+
+Upload the Android APK after it has the final release asset name:
+
+```bash
+gh release upload vX.Y.Z dist-packages/herdr-web-vX.Y.Z-android.apk
+```
+
+If every artifact has been copied to one machine, the same paths can be uploaded in one
+`gh release upload` invocation.

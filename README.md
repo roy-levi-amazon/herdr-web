@@ -57,7 +57,8 @@ The top-level scripts hide that detail.
 For release tarball users:
 
 - A running Herdr daemon/session
-- A supported Linux or macOS host for the downloaded bridge tarball
+- A supported host for the downloaded bridge tarball. Current planned desktop release artifacts are
+  Linux x86_64 and macOS ARM64.
 
 For source development:
 

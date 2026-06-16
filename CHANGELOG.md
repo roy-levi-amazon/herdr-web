@@ -27,6 +27,7 @@
 - Added a desktop tarball packaging script for bridge/web release artifacts.
 - Added packaging documentation for Linux/macOS tarballs, Android APK artifacts, and manual GitHub
   release uploads.
+- Added a run-focused README for desktop tarball distributions.
 - Added top-level agent onboarding guidance for web app, bridge, vendoring, testing, and release work.
 
 ### Changed

@@ -60,6 +60,12 @@ npm run android:build:debug
 The desktop tarballs are written to `dist-packages/`. The debug APK is written to
 `android/app/build/outputs/apk/debug/app-debug.apk`.
 
+For a public release, replace the debug APK with a signed release APK named:
+
+```text
+dist-packages/herdr-web-vX.Y.Z-android.apk
+```
+
 ## Browser Smoke
 
 Start or attach a Herdr session:
@@ -118,19 +124,33 @@ adding any pairing token or other secret storage.
 ## Upload Artifacts
 
 Upload release artifacts manually with GitHub CLI after `node scripts/release.mjs vX.Y.Z` creates
-the release:
+the release.
+
+Upload the Linux tarball from the Linux build host:
 
 ```bash
 gh release upload vX.Y.Z \
   dist-packages/herdr-web-vX.Y.Z-linux-x86_64.tar.gz \
-  dist-packages/herdr-web-vX.Y.Z-linux-x86_64.tar.gz.sha256 \
-  dist-packages/herdr-web-vX.Y.Z-macos-arm64.tar.gz \
-  dist-packages/herdr-web-vX.Y.Z-macos-arm64.tar.gz.sha256 \
-  android/app/build/outputs/apk/debug/app-debug.apk
+  dist-packages/herdr-web-vX.Y.Z-linux-x86_64.tar.gz.sha256
 ```
 
-For a public release, replace the debug APK with a signed release APK and upload it with the final
-asset name, such as `herdr-web-vX.Y.Z-android.apk`.
+Upload the macOS ARM tarball from the Apple Silicon Mac build host, or copy it to the release
+operator machine first:
+
+```bash
+gh release upload vX.Y.Z \
+  dist-packages/herdr-web-vX.Y.Z-macos-arm64.tar.gz \
+  dist-packages/herdr-web-vX.Y.Z-macos-arm64.tar.gz.sha256
+```
+
+Upload the Android APK after it has the final release asset name:
+
+```bash
+gh release upload vX.Y.Z dist-packages/herdr-web-vX.Y.Z-android.apk
+```
+
+If every artifact has been copied to one machine, the same paths can be uploaded in one
+`gh release upload` invocation.
 
 ## After
 
