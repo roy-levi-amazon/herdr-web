@@ -14,6 +14,10 @@ import { BackendSettingsDialog } from "./BackendSettingsDialog";
 import { useBridge } from "./bridge";
 import { createCommands, createdPaneId } from "./commands";
 import type { LaunchSpec, PaneFocusDirection, SplitDirection } from "./commands";
+import {
+  currentConnectionSnapshot,
+  isConnectionResultCurrent,
+} from "./connectionState";
 import { LaunchDialog } from "./LaunchDialog";
 import { resolveLaunchSpec } from "./launch";
 import type { LaunchTarget } from "./launch";
@@ -80,6 +84,7 @@ const MOBILE_DETAIL_HISTORY_KEY = "herdrWebMobileDetail";
 const DEFAULT_SIDEBAR_WIDTH = 320;
 const MIN_SIDEBAR_WIDTH = 260;
 const MAX_SIDEBAR_WIDTH = 560;
+
 function readDisplayPrefs(): DisplayPrefs {
   const fallback: DisplayPrefs = {
     scope: "space",
@@ -225,7 +230,11 @@ export function App() {
     target: HTMLDivElement;
   } | null>(null);
 
-  const snapshot = snapshotConnectionKey === bridge.connectionKey ? snapshotState : null;
+  const snapshot = currentConnectionSnapshot(
+    snapshotState,
+    snapshotConnectionKey,
+    bridge.connectionKey,
+  );
   const resolvedPaneId = chooseSelectedPane(snapshot, selectedPaneId);
   const supportedCommands = bridge.capabilities?.commands ?? [];
   const splitSupported = supportedCommands.includes("pane.split");
@@ -361,6 +370,10 @@ export function App() {
       setActiveSpaceId(null);
     }
     if (!bridge.canConnect) {
+      setSnapshot(null);
+      setSnapshotConnectionKey(bridge.connectionKey);
+      setSelectedPaneId(null);
+      setActiveSpaceId(null);
       setLoadState("ready");
       return () => {
         disposed = true;
@@ -784,7 +797,7 @@ export function App() {
     setLoadState("loading");
     void fetchSnapshot(bridge.httpUrl)
       .then((next) => {
-        if (connectionKeyRef.current !== requestConnectionKey) {
+        if (!isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
           return;
         }
         setSnapshot(next);
@@ -804,7 +817,7 @@ export function App() {
     try {
       const result = await action();
       const next = await fetchSnapshot(bridge.httpUrl);
-      if (connectionKeyRef.current !== requestConnectionKey) {
+      if (!isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
         return false;
       }
       setSnapshot(next);
@@ -933,6 +946,8 @@ export function App() {
         <Switcher
           snapshot={snapshot}
           loadState={loadState}
+          bridgeCanConnect={bridge.canConnect}
+          bridgeError={bridge.capabilityError}
           bridgeLabel={bridge.activeBackend?.name ?? "same-origin"}
           bridgeMode={bridge.mode}
           capabilityState={bridge.capabilityState}
@@ -1047,7 +1062,7 @@ export function App() {
           <div className="stage-id" {...selectedPaneMenuPress}>
             <span className="stage-title">{selectedPane ? paneTitle(selectedPane) : "herdr-web"}</span>
             <span className="stage-sub mono">
-              {stageBreadcrumb(snapshot, selectedPane, loadState)}
+              {stageBreadcrumb(snapshot, selectedPane, loadState, bridge.canConnect)}
             </span>
           </div>
           {splitSupported && selectedPane && !isCompactLayout ? (
@@ -1439,6 +1454,8 @@ function TabBar({
 function Switcher({
   snapshot,
   loadState,
+  bridgeCanConnect,
+  bridgeError,
   bridgeLabel,
   bridgeMode,
   capabilityState,
@@ -1463,6 +1480,8 @@ function Switcher({
 }: {
   snapshot: Snapshot | null;
   loadState: LoadState;
+  bridgeCanConnect: boolean;
+  bridgeError: string | null;
   bridgeLabel: string;
   bridgeMode: "same-origin" | "configured" | "disconnected";
   capabilityState: "idle" | "probing" | "ready" | "error";
@@ -1495,6 +1514,7 @@ function Switcher({
   const panes = snapshot?.panes ?? [];
   const roll = aggregateStatus(panes);
   const headerSummary = summary(panes);
+  const bridgeBlocked = !bridgeCanConnect;
 
   const agentPanes = useMemo(() => {
     if (!snapshot) {
@@ -1624,8 +1644,25 @@ function Switcher({
       <div className="list">
         {!snapshot ? (
           <div className="empty">
-            <strong>{loadState === "error" ? "Bridge unavailable" : "Connecting…"}</strong>
-            <span>{loadState === "error" ? "Could not reach the herdr bridge." : ""}</span>
+            <strong>
+              {bridgeBlocked
+                ? "Bridge disconnected"
+                : loadState === "error"
+                  ? "Bridge unavailable"
+                  : "Connecting…"}
+            </strong>
+            <span>
+              {bridgeBlocked
+                ? bridgeError || "Choose a usable bridge backend."
+                : loadState === "error"
+                  ? "Could not reach the herdr bridge."
+                  : ""}
+            </span>
+            {bridgeBlocked ? (
+              <button type="button" className="btn" onClick={onBackendSettings}>
+                Bridge settings
+              </button>
+            ) : null}
           </div>
         ) : (
           <>
@@ -2206,8 +2243,16 @@ function summary(panes: PaneInfo[]) {
         : null;
 }
 
-function stageBreadcrumb(snapshot: Snapshot | null, pane: PaneInfo | null, loadState: LoadState) {
+function stageBreadcrumb(
+  snapshot: Snapshot | null,
+  pane: PaneInfo | null,
+  loadState: LoadState,
+  bridgeCanConnect: boolean,
+) {
   if (!pane) {
+    if (!bridgeCanConnect) {
+      return "bridge disconnected";
+    }
     if (loadState === "error") {
       return "bridge unavailable";
     }

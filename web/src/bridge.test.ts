@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildHttpUrl,
   buildWsUrl,
+  capabilityProbeFailure,
+  capabilityProbeSuccess,
+  capabilityRetryDelayMs,
   duplicateBackend,
   normalizeBridgeBaseUrl,
   parseBackendStore,
@@ -15,6 +18,10 @@ describe("bridge URL normalization", () => {
     expect(normalizeBridgeBaseUrl(" http://herdr-host.local:4000/ ")).toBe(
       "http://herdr-host.local:4000",
     );
+    expect(normalizeBridgeBaseUrl("https://herdr-host.local:443")).toBe(
+      "https://herdr-host.local",
+    );
+    expect(normalizeBridgeBaseUrl("http://192.168.1.20:80")).toBe("http://192.168.1.20");
     expect(normalizeBridgeBaseUrl("http://[fd00::1234]:4000")).toBe(
       "http://[fd00::1234]:4000",
     );
@@ -28,7 +35,6 @@ describe("bridge URL normalization", () => {
     expect(() => normalizeBridgeBaseUrl("http://192.168.1.20:4000/api")).toThrow(
       /path/iu,
     );
-    expect(() => normalizeBridgeBaseUrl("http://192.168.1.20")).toThrow(/port/iu);
     expect(() => normalizeBridgeBaseUrl("http://8.8.8.8:4000")).toThrow(/private/iu);
   });
 });
@@ -82,6 +88,37 @@ describe("backend store parsing", () => {
 });
 
 describe("capabilities", () => {
+  it("maps capability probe outcomes to connection blocking state", () => {
+    expect(capabilityProbeSuccess({ commands: ["pane.split"], web_compat: 1 })).toEqual({
+      blocked: false,
+      state: "ready",
+      capabilities: { commands: ["pane.split"], web_compat: 1 },
+      error: null,
+      retry: false,
+    });
+    expect(capabilityProbeSuccess({ commands: [], web_compat: 0 })).toEqual({
+      blocked: true,
+      state: "error",
+      capabilities: null,
+      error: "Bridge is not compatible with this web app",
+      retry: false,
+    });
+    expect(capabilityProbeFailure(new Error("network down"))).toEqual({
+      blocked: false,
+      state: "error",
+      capabilities: null,
+      error: "network down",
+      retry: true,
+    });
+  });
+
+  it("backs off capability retry delays", () => {
+    expect(capabilityRetryDelayMs(0)).toBe(5000);
+    expect(capabilityRetryDelayMs(1)).toBe(10000);
+    expect(capabilityRetryDelayMs(3)).toBe(40000);
+    expect(capabilityRetryDelayMs(10)).toBe(60000);
+  });
+
   it("parses optional compatibility fields", () => {
     expect(
       parseCapabilities({

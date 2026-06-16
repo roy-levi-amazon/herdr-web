@@ -72,6 +72,8 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
   const [capabilities, setCapabilities] = useState<BridgeCapabilities | null>(null);
   const [capabilityState, setCapabilityState] = useState<CapabilityState>("idle");
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
+  const [connectionBlocked, setConnectionBlocked] = useState(false);
+  const [capabilityRetry, setCapabilityRetry] = useState(0);
 
   const activeBackend = store.activeBackendId
     ? (store.backends.find((backend) => backend.id === store.activeBackendId) ?? null)
@@ -79,7 +81,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
   const mode: BridgeMode = activeBackend ? "configured" : defaultBridgeMode();
   const connectionKey = activeBackend ? `configured:${activeBackend.id}:${activeBackend.baseUrl}` : "same-origin";
   const canProbe = mode !== "disconnected";
-  const canConnect = canProbe && capabilityState !== "error";
+  const canConnect = canProbe && !connectionBlocked;
 
   useEffect(() => {
     writeBackendStore(store);
@@ -98,9 +100,15 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
   const probeBackend = useCallback((baseUrl: string) => probeBridgeBaseUrl(baseUrl), []);
 
   useEffect(() => {
+    setCapabilityRetry(0);
+  }, [connectionKey]);
+
+  useEffect(() => {
     let cancelled = false;
+    let retryTimer: number | null = null;
     setCapabilities(null);
     setCapabilityError(null);
+    setConnectionBlocked(false);
     if (!canProbe) {
       setCapabilityState("idle");
       return;
@@ -111,27 +119,34 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
         if (cancelled) {
           return;
         }
-        const error = compatibilityError(next);
-        if (error) {
-          setCapabilityError(error);
-          setCapabilities(null);
-          setCapabilityState("error");
-          return;
-        }
-        setCapabilities(next);
-        setCapabilityState("ready");
+        const outcome = capabilityProbeSuccess(next);
+        setCapabilityError(outcome.error);
+        setCapabilities(outcome.capabilities);
+        setConnectionBlocked(outcome.blocked);
+        setCapabilityState(outcome.state);
       })
       .catch((error: unknown) => {
         if (!cancelled) {
-          setCapabilityError(error instanceof Error ? error.message : "Bridge unavailable");
-          setCapabilities(null);
-          setCapabilityState("error");
+          const outcome = capabilityProbeFailure(error);
+          setCapabilityError(outcome.error);
+          setCapabilities(outcome.capabilities);
+          setConnectionBlocked(outcome.blocked);
+          setCapabilityState(outcome.state);
+          if (outcome.retry) {
+            const retryDelay = capabilityRetryDelayMs(capabilityRetry);
+            retryTimer = window.setTimeout(() => {
+              setCapabilityRetry((current) => current + 1);
+            }, retryDelay);
+          }
         }
       });
     return () => {
       cancelled = true;
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+      }
     };
-  }, [canProbe, connectionKey, httpUrl]);
+  }, [canProbe, capabilityRetry, connectionKey, httpUrl]);
 
   const addBackend = useCallback(async (input: BackendInput, activate = true) => {
     const baseUrl = normalizeBridgeBaseUrl(input.baseUrl);
@@ -333,9 +348,6 @@ export function normalizeBridgeBaseUrl(input: string): string {
   if ((url.pathname && url.pathname !== "/") || url.search || url.hash) {
     throw new Error("Bridge URL must not include a path, query, or fragment");
   }
-  if (!url.port) {
-    throw new Error("Bridge URL must include a port");
-  }
   validateBridgeHost(url.hostname, url.protocol);
   return url.origin;
 }
@@ -426,6 +438,50 @@ export async function probeBridgeBaseUrl(baseUrl: string): Promise<BridgeCapabil
     throw new Error(error);
   }
   return capabilities;
+}
+
+export type CapabilityProbeOutcome = {
+  blocked: boolean;
+  state: CapabilityState;
+  capabilities: BridgeCapabilities | null;
+  error: string | null;
+  retry: boolean;
+};
+
+export function capabilityProbeSuccess(
+  capabilities: BridgeCapabilities,
+): CapabilityProbeOutcome {
+  const error = compatibilityError(capabilities);
+  if (error) {
+    return {
+      blocked: true,
+      state: "error",
+      capabilities: null,
+      error,
+      retry: false,
+    };
+  }
+  return {
+    blocked: false,
+    state: "ready",
+    capabilities,
+    error: null,
+    retry: false,
+  };
+}
+
+export function capabilityProbeFailure(error: unknown): CapabilityProbeOutcome {
+  return {
+    blocked: false,
+    state: "error",
+    capabilities: null,
+    error: error instanceof Error ? error.message : "Bridge unavailable",
+    retry: true,
+  };
+}
+
+export function capabilityRetryDelayMs(attempt: number) {
+  return Math.min(5000 * 2 ** Math.max(0, attempt), 60000);
 }
 
 export function parseCapabilities(value: unknown): BridgeCapabilities {

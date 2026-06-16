@@ -1,5 +1,5 @@
 import { Check, Plus, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   duplicateBackend,
   normalizeBridgeBaseUrl,
@@ -25,6 +25,8 @@ const emptyForm: FormState = {
 
 export function BackendSettingsDialog({ onClose }: Props) {
   const bridge = useBridge();
+  const titleId = useId();
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm);
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -36,6 +38,10 @@ export function BackendSettingsDialog({ onClose }: Props) {
     () => bridge.store.backends.find((backend) => backend.id === form.id) ?? null,
     [bridge.store.backends, form.id],
   );
+
+  useEffect(() => {
+    nameInputRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     if (creating || form.id || bridge.store.backends.length === 0) {
@@ -98,7 +104,15 @@ export function BackendSettingsDialog({ onClose }: Props) {
         setMessage(`This URL is already saved as ${found.name}.`);
         return;
       }
-      await bridge.probeBackend(baseUrl);
+      let probeWarning: string | null = null;
+      try {
+        await bridge.probeBackend(baseUrl);
+      } catch (error) {
+        if (activate) {
+          throw error;
+        }
+        probeWarning = error instanceof Error ? error.message : "Backend could not be reached.";
+      }
       const profile = form.id
         ? await bridge.updateBackend(form.id, { name: form.name, baseUrl })
         : await bridge.addBackend({ name: form.name, baseUrl }, activate);
@@ -107,7 +121,7 @@ export function BackendSettingsDialog({ onClose }: Props) {
       }
       setCreating(false);
       setForm({ id: profile.id, name: profile.name, baseUrl: profile.baseUrl });
-      setMessage("Backend saved.");
+      setMessage(probeWarning ? `Backend saved. ${probeWarning}` : "Backend saved.");
       if (activate) {
         onClose();
       }
@@ -136,12 +150,20 @@ export function BackendSettingsDialog({ onClose }: Props) {
         className="modal backend-modal"
         role="dialog"
         aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onClose();
+          }
+        }}
         onSubmit={(event) => {
           event.preventDefault();
           void saveBackend(true);
         }}
       >
-        <div className="modal-title">Bridge backends</div>
+        <div id={titleId} className="modal-title">Bridge backends</div>
         <div className="backend-layout">
           <div className="backend-list" role="list" aria-label="Saved bridge backends">
             <button
@@ -173,6 +195,7 @@ export function BackendSettingsDialog({ onClose }: Props) {
             <label className="field-label">
               <span>Display name</span>
               <input
+                ref={nameInputRef}
                 className="field"
                 value={form.name}
                 placeholder="Home workstation"
