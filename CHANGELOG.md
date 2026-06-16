@@ -2,8 +2,6 @@
 
 ## [Unreleased]
 
-### Breaking Changes
-
 ### Added
 
 - Added a standalone `herdr-web-bridge` Rust executable so the web bridge builds outside Herdr's
