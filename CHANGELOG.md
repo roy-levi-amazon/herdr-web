@@ -30,7 +30,6 @@
 - Added a run-focused README for desktop tarball distributions.
 - Added top-level agent onboarding guidance for web app, bridge, vendoring, testing, and release work.
 - Added a mobile terminal tap-focus setting and a stage-only text input action.
-- Added a mobile `Alt+Up` quick key after `Tab`.
 
 ### Changed
 
