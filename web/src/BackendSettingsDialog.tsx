@@ -6,8 +6,11 @@ import {
   useBridge,
 } from "./bridge";
 import type { BridgeBackendProfile } from "./bridge";
+import type { MobileTerminalTapTarget } from "./mobileTerminalPrefs";
 
 type Props = {
+  mobileTerminalTapTarget: MobileTerminalTapTarget;
+  onMobileTerminalTapTarget: (target: MobileTerminalTapTarget) => void;
   onClose: () => void;
 };
 
@@ -25,7 +28,11 @@ const emptyForm: FormState = {
   baseUrl: "",
 };
 
-export function BackendSettingsDialog({ onClose }: Props) {
+export function BackendSettingsDialog({
+  mobileTerminalTapTarget,
+  onMobileTerminalTapTarget,
+  onClose,
+}: Props) {
   const bridge = useBridge();
   const titleId = useId();
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -199,7 +206,7 @@ export function BackendSettingsDialog({ onClose }: Props) {
         >
           <X size={15} />
         </button>
-        <div id={titleId} className="modal-title">Bridges</div>
+        <div id={titleId} className="modal-title">Settings</div>
         <div className="backend-layout">
           <div className="backend-list" role="list" aria-label="Saved bridges">
             {showSameOrigin ? (
@@ -289,6 +296,30 @@ export function BackendSettingsDialog({ onClose }: Props) {
               <div className="backend-warning">This URL is already saved as {duplicate.name}.</div>
             ) : null}
             {message ? <div className="modal-message">{message}</div> : null}
+            <div className="settings-section">
+              <div className="settings-label">Mobile terminal</div>
+              <div className="settings-row">
+                <span>Terminal tap</span>
+                <div className="segmented-control" role="group" aria-label="Terminal tap target">
+                  <button
+                    type="button"
+                    data-on={mobileTerminalTapTarget === "command-input"}
+                    aria-pressed={mobileTerminalTapTarget === "command-input"}
+                    onClick={() => onMobileTerminalTapTarget("command-input")}
+                  >
+                    Command input
+                  </button>
+                  <button
+                    type="button"
+                    data-on={mobileTerminalTapTarget === "terminal"}
+                    aria-pressed={mobileTerminalTapTarget === "terminal"}
+                    onClick={() => onMobileTerminalTapTarget("terminal")}
+                  >
+                    Terminal
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
         <div className="modal-actions">

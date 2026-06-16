@@ -29,6 +29,7 @@
   release uploads.
 - Added a run-focused README for desktop tarball distributions.
 - Added top-level agent onboarding guidance for web app, bridge, vendoring, testing, and release work.
+- Added a mobile terminal tap-focus setting and a stage-only command input action.
 
 ### Changed
 

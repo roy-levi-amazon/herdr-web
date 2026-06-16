@@ -17,7 +17,8 @@ navigation, multi-client viewing, mobile input controls, and synchronized pane s
 ## Highlights
 
 - Shared browser terminal viewing with synchronized pane selection across desktop and mobile.
-- Mobile-friendly command input and extended terminal key controls.
+- Mobile-friendly command input with stage/send actions, configurable tap focus, and extended
+  terminal key controls.
 - Agent-focused sidebar with styled icons for detected Codex/OpenAI, Claude, and Pi panes.
 - Image and file uploads from the terminal toolbar, paste, or drag/drop, with uploaded paths inserted
   into the active terminal input.

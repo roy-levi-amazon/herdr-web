@@ -21,6 +21,11 @@ import {
 import { LaunchDialog } from "./LaunchDialog";
 import { resolveLaunchSpec } from "./launch";
 import type { LaunchTarget } from "./launch";
+import {
+  DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
+  parseMobileTerminalTapTarget,
+} from "./mobileTerminalPrefs";
+import type { MobileTerminalTapTarget } from "./mobileTerminalPrefs";
 import { addNativeBackHandler } from "./native";
 import { ActionMenu, ConfirmDialog, RenameDialog, useLongPress } from "./overlays";
 import type { MenuItem } from "./overlays";
@@ -75,6 +80,7 @@ type DisplayPrefs = {
   sidebarOpen: boolean;
   activeSpaceId: string | null;
   selectedPaneId: string | null;
+  mobileTerminalTapTarget: MobileTerminalTapTarget;
 };
 
 const COMPACT_LAYOUT_QUERY = "(max-width: 820px)";
@@ -96,6 +102,7 @@ function readDisplayPrefs(): DisplayPrefs {
     sidebarOpen: true,
     activeSpaceId: null,
     selectedPaneId: null,
+    mobileTerminalTapTarget: DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
   };
   try {
     const raw = window.localStorage.getItem(DISPLAY_PREFS_KEY);
@@ -129,6 +136,7 @@ function readDisplayPrefs(): DisplayPrefs {
         typeof parsed.activeSpaceId === "string" ? parsed.activeSpaceId : fallback.activeSpaceId,
       selectedPaneId:
         typeof parsed.selectedPaneId === "string" ? parsed.selectedPaneId : fallback.selectedPaneId,
+      mobileTerminalTapTarget: parseMobileTerminalTapTarget(parsed.mobileTerminalTapTarget),
     };
   } catch {
     return fallback;
@@ -210,6 +218,9 @@ export function App() {
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [backendSettingsOpen, setBackendSettingsOpen] = useState(false);
+  const [mobileTerminalTapTarget, setMobileTerminalTapTarget] = useState(
+    initialPrefs.mobileTerminalTapTarget,
+  );
   const [launchTarget, setLaunchTarget] = useState<LaunchTarget | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -318,6 +329,7 @@ export function App() {
       sidebarOpen,
       activeSpaceId,
       selectedPaneId,
+      mobileTerminalTapTarget,
     });
   }, [
     scope,
@@ -328,6 +340,7 @@ export function App() {
     sidebarOpen,
     activeSpaceId,
     selectedPaneId,
+    mobileTerminalTapTarget,
   ]);
 
   useEffect(() => {
@@ -1142,6 +1155,7 @@ export function App() {
             refitToken={refitToken}
             focusToken={terminalFocusToken}
             touchInput={isTouchInput}
+            mobileTapTarget={mobileTerminalTapTarget}
             connectionKey={bridge.connectionKey}
             resumeToken={bridge.resumeToken}
             httpUrl={bridge.httpUrl}
@@ -1157,6 +1171,7 @@ export function App() {
             autoFocus={!isTouchInput}
             scrollSensitivity={isTouchInput ? 2 : 0.4}
             mobileControls={isTouchInput}
+            mobileTapTarget={mobileTerminalTapTarget}
             refitToken={refitToken}
             focusToken={terminalFocusToken}
           />
@@ -1209,7 +1224,11 @@ export function App() {
       ) : null}
 
       {backendSettingsOpen ? (
-        <BackendSettingsDialog onClose={() => setBackendSettingsOpen(false)} />
+        <BackendSettingsDialog
+          mobileTerminalTapTarget={mobileTerminalTapTarget}
+          onMobileTerminalTapTarget={setMobileTerminalTapTarget}
+          onClose={() => setBackendSettingsOpen(false)}
+        />
       ) : null}
 
       {error ? (
@@ -1363,6 +1382,7 @@ function SplitGrid({
   refitToken,
   focusToken,
   touchInput,
+  mobileTapTarget,
   connectionKey,
   resumeToken,
   httpUrl,
@@ -1374,6 +1394,7 @@ function SplitGrid({
   refitToken: number;
   focusToken: number;
   touchInput: boolean;
+  mobileTapTarget: MobileTerminalTapTarget;
   connectionKey: string;
   resumeToken: number;
   httpUrl: (path: string, query?: URLSearchParams) => string;
@@ -1400,6 +1421,7 @@ function SplitGrid({
               autoFocus={selected && !touchInput}
               scrollSensitivity={touchInput ? 2 : 0.4}
               mobileControls={selected && touchInput}
+              mobileTapTarget={mobileTapTarget}
               refitToken={selected ? refitToken : 0}
               focusToken={selected ? focusToken : 0}
             />
@@ -1616,8 +1638,8 @@ function Switcher({
         <button
           className="icon-btn"
           type="button"
-          aria-label="Bridge settings"
-          title={`Bridge: ${bridgeLabel}`}
+          aria-label="Settings"
+          title={`Settings; bridge: ${bridgeLabel}`}
           data-spin={capabilityState === "probing" ? "" : undefined}
           onClick={onBackendSettings}
         >

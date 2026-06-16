@@ -1146,6 +1146,11 @@ button {
   color: var(--blue);
 }
 
+.term-stage-command {
+  background: var(--surface0);
+  color: var(--subtext1);
+}
+
 /* --------------------------------------------------------- split grid */
 
 .pane-grid {
@@ -1507,6 +1512,58 @@ button {
   color: var(--peach);
 }
 
+.settings-section {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.settings-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--overlay1);
+  text-transform: uppercase;
+}
+
+.settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  color: var(--subtext0);
+  font-size: 12.5px;
+}
+
+.segmented-control {
+  display: inline-flex;
+  min-width: 0;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--crust);
+}
+
+.segmented-control button {
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: calc(var(--r-sm) - 2px);
+  color: var(--overlay1);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.segmented-control button[data-on="true"] {
+  color: var(--text);
+  background: var(--surface1);
+}
+
 .field-label {
   display: grid;
   gap: 6px;
@@ -1730,6 +1787,10 @@ button {
 
   .backend-list {
     max-height: 190px;
+  }
+
+  .settings-row {
+    grid-template-columns: 1fr;
   }
 }
 

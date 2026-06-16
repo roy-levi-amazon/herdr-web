@@ -1,10 +1,11 @@
-import { Keyboard, Paperclip, Send, SquareTerminal } from "lucide-react";
+import { Keyboard, Paperclip, Send, SquareTerminal, TextCursorInput } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, DragEvent, RefObject } from "react";
 import { ConfirmDialog } from "./overlays";
 import { shellQuote } from "./shell";
 import { GhosttyRenderer } from "./terminalRenderer";
 import type { TerminalRenderer, TerminalSize } from "./terminalRenderer";
+import type { MobileTerminalTapTarget } from "./mobileTerminalPrefs";
 import type { PaneInfo } from "./types";
 
 type Props = {
@@ -19,6 +20,8 @@ type Props = {
   scrollSensitivity?: number;
   /** Supplemental browser-native input controls for narrow touch screens. */
   mobileControls?: boolean;
+  /** Where terminal taps should send focus on mobile. */
+  mobileTapTarget?: MobileTerminalTapTarget;
   /** Incrementing token from the parent that requests an immediate fit+resize. */
   refitToken?: number;
   /** Incrementing token from the parent that requests focus on the preferred terminal input. */
@@ -54,6 +57,7 @@ export function TerminalView({
   autoFocus = true,
   scrollSensitivity = 1,
   mobileControls = false,
+  mobileTapTarget = "command-input",
   refitToken = 0,
   focusToken = 0,
 }: Props) {
@@ -83,6 +87,8 @@ export function TerminalView({
   scrollSensitivityRef.current = scrollSensitivity;
   const mobileControlsRef = useRef(mobileControls);
   mobileControlsRef.current = mobileControls;
+  const mobileTapTargetRef = useRef(mobileTapTarget);
+  mobileTapTargetRef.current = mobileTapTarget;
   connectionKeyRef.current = connectionKey;
   terminalIdRef.current = pane?.terminal_id ?? null;
 
@@ -161,7 +167,11 @@ export function TerminalView({
         }
 
         renderer.setScrollSensitivity(scrollSensitivityRef.current);
-        renderer.setTapFocusHandler(focusMobileCommandInput);
+        renderer.setTapFocusHandler(
+          mobileControlsRef.current && mobileTapTargetRef.current === "command-input"
+            ? focusMobileCommandInput
+            : null,
+        );
 
         disposeInput = renderer.onInput((data) => {
           if (socket?.readyState === WebSocket.OPEN) {
@@ -338,8 +348,10 @@ export function TerminalView({
   }, [connectionKey, pane?.terminal_id, resumeToken, wsUrl]);
 
   useEffect(() => {
-    rendererRef.current?.setTapFocusHandler(mobileControls ? focusMobileCommandInput : null);
-  }, [focusMobileCommandInput, mobileControls]);
+    rendererRef.current?.setTapFocusHandler(
+      mobileControls && mobileTapTarget === "command-input" ? focusMobileCommandInput : null,
+    );
+  }, [focusMobileCommandInput, mobileControls, mobileTapTarget]);
 
   useEffect(() => {
     return () => {
@@ -594,6 +606,7 @@ export function TerminalView({
           onInput={sendTerminalInput}
           onTerminalFocus={() => rendererRef.current?.focusTextInput()}
           onUpload={openFilePicker}
+          onStageCommand={(command) => enqueueTerminalInput([command])}
           onSubmitCommand={(command) => enqueueTerminalInput([command, "\r"])}
         />
       ) : null}
@@ -617,6 +630,7 @@ function MobileTerminalControls({
   onInput,
   onTerminalFocus,
   onUpload,
+  onStageCommand,
   onSubmitCommand,
 }: {
   commandInputRef: RefObject<HTMLInputElement | null>;
@@ -625,6 +639,7 @@ function MobileTerminalControls({
   onInput: (data: string) => void;
   onTerminalFocus: () => void;
   onUpload: () => void;
+  onStageCommand: (command: string) => void;
   onSubmitCommand: (command: string) => void;
 }) {
   const [value, setValue] = useState("");
@@ -632,6 +647,13 @@ function MobileTerminalControls({
   const [ctrlLatch, setCtrlLatch] = useState(false);
   const submit = () => {
     onSubmitCommand(value);
+    setValue("");
+  };
+  const stage = () => {
+    if (value.length === 0) {
+      return;
+    }
+    onStageCommand(value);
     setValue("");
   };
   const sendKey = (key: TerminalKey) => {
@@ -763,6 +785,16 @@ function MobileTerminalControls({
           value={value}
           onChange={(event) => setValue(event.target.value)}
         />
+        <button
+          className="term-send term-stage-command"
+          type="button"
+          disabled={disabled || value.length === 0}
+          aria-label="Stage command in terminal"
+          title="Stage"
+          onClick={stage}
+        >
+          <TextCursorInput size={16} />
+        </button>
         <button
           className="term-send"
           type="submit"
