@@ -1,7 +1,5 @@
-#[path = "../../../vendor/herdr/src/api/client.rs"]
 pub mod client;
 pub mod schema;
-#[path = "../../../vendor/herdr/src/api/status.rs"]
 mod status;
 
 pub use status::RuntimeStatus;

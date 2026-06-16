@@ -30,6 +30,10 @@
   instead of invoking `herdr web-bridge` from the vendored Herdr package.
 - Updated the vendoring strategy so `vendor/herdr/` remains a full protocol/API reference snapshot
   while bridge-owned compatibility code lives under `bridge/`.
+- Removed bridge build-time path imports from `vendor/herdr/src` and narrowed copied compatibility
+  modules for IPC, runtime status, socket path discovery, and bridge file logging.
+- Added vendoring checks that fail when exact mirrored bridge protocol/schema compatibility files
+  drift from the vendored Herdr reference snapshot.
 - Added a bridge `Host` header allow-list and basic static security headers.
 - Narrowed web bridge validation for workspace and tab creation parameters.
 - Narrowed web bridge command validation for browser-launched pane input, splits, and agent starts.
@@ -64,5 +68,7 @@
 - Preserved custom CORS preflight request headers for future bridge auth headers.
 - Re-probed and reconnected active Android bridge sessions promptly after app foreground/resume.
 - Centered the mobile header summary next to the Herdr logo and app title.
+- Added a bounded timeout to the bridge startup daemon protocol check so an accepted but
+  unresponsive Herdr daemon returns actionable restart guidance instead of blocking indefinitely.
 
 ### Removed

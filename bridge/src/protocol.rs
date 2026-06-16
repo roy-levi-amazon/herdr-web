@@ -1,4 +1,3 @@
-#[path = "../../vendor/herdr/src/protocol/wire.rs"]
 mod wire;
 
 pub use wire::*;

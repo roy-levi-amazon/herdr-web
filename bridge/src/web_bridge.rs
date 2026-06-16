@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -45,6 +46,7 @@ const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_STATIC_DIR: &str = "web/dist";
 const MIN_TERMINAL_ATTACH_PROTOCOL: u32 = 13;
 const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
+const DAEMON_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 static UPLOAD_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone)]
@@ -1937,7 +1939,7 @@ fn open_terminal_attach(
 }
 
 fn terminal_attach_protocol(api: &ApiClient) -> Result<u32, BridgeError> {
-    daemon_protocol_from_status(api.status()?)
+    daemon_protocol_from_status(api.status_with_timeout(DAEMON_STATUS_TIMEOUT)?)
 }
 
 fn daemon_protocol_from_status(status: crate::api::RuntimeStatus) -> Result<u32, BridgeError> {

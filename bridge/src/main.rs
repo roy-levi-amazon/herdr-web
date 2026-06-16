@@ -3,9 +3,7 @@ mod api;
 mod build_info;
 mod config;
 mod input;
-#[path = "../../vendor/herdr/src/ipc.rs"]
 mod ipc;
-#[path = "../../vendor/herdr/src/logging.rs"]
 mod logging;
 mod protocol;
 mod raw_input;
