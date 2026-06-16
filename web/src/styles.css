@@ -1456,6 +1456,21 @@ button {
   gap: 12px;
 }
 
+.backend-static {
+  display: grid;
+  gap: 6px;
+  padding-top: 2px;
+  color: var(--subtext0);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.backend-static strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .backend-note,
 .backend-warning {
   font-size: 12px;
