@@ -144,6 +144,7 @@ button {
   height: 100%;
   cursor: col-resize;
   outline: none;
+  touch-action: none;
 }
 
 .sidebar-resizer::before {
@@ -1546,7 +1547,7 @@ button {
 
 /* ------------------------------------------------------- narrow / mobile */
 
-@media (max-width: 1024px), (hover: none) and (pointer: coarse) {
+@media (max-width: 820px) {
   .app {
     position: relative;
     display: block;
@@ -1594,36 +1595,9 @@ button {
   .sidebar-resizer {
     display: none;
   }
-
-  /* roomier touch targets on mobile */
-  .space-row {
-    padding: 11px 12px;
-  }
-
-  .pane-row {
-    padding: 11px 12px;
-  }
-
-  .sb-head,
-  .stage-bar {
-    height: 60px;
-  }
-
-  .terminal-mobile-controls {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .terminal-stage:has(.terminal-mobile-controls) .terminal-overlay {
-    bottom: 120px;
-  }
-
-  .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"]) .terminal-overlay {
-    bottom: 158px;
-  }
 }
 
-.app[data-mobile="true"] {
+.app[data-compact="true"] {
   position: relative;
   display: block;
   width: 100vw;
@@ -1632,12 +1606,12 @@ button {
   transition: none;
 }
 
-.app[data-mobile="true"][data-detail="true"] {
+.app[data-compact="true"][data-detail="true"] {
   transform: none;
 }
 
-.app[data-mobile="true"] .sidebar,
-.app[data-mobile="true"] .stage {
+.app[data-compact="true"] .sidebar,
+.app[data-compact="true"] .stage {
   position: fixed;
   top: 0;
   left: 0;
@@ -1647,60 +1621,65 @@ button {
   transition: transform 260ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.app[data-mobile="true"] .sidebar {
+.app[data-compact="true"] .sidebar {
   transform: translateX(0);
 }
 
-.app[data-mobile="true"] .stage {
+.app[data-compact="true"] .stage {
   transform: translateX(100vw);
 }
 
-.app[data-mobile="true"][data-detail="true"] .sidebar {
+.app[data-compact="true"][data-detail="true"] .sidebar {
   transform: translateX(-100vw);
 }
 
-.app[data-mobile="true"][data-detail="true"] .stage {
+.app[data-compact="true"][data-detail="true"] .stage {
   transform: translateX(0);
 }
 
-.app[data-mobile="true"] .sidebar {
+.app[data-compact="true"] .sidebar {
   border-right: 0;
 }
 
-.app[data-mobile="true"] .sidebar-resizer {
+.app[data-compact="true"] .sidebar-resizer {
   display: none;
 }
 
-.app[data-mobile="true"] .space-row,
-.app[data-mobile="true"] .pane-row {
+.app[data-touch="true"] .sidebar-resizer {
+  right: -12px;
+  width: 24px;
+}
+
+.app[data-touch="true"] .space-row,
+.app[data-touch="true"] .pane-row {
   padding: 11px 12px;
 }
 
-.app[data-mobile="true"] .sb-head,
-.app[data-mobile="true"] .stage-bar {
+.app[data-touch="true"] .sb-head,
+.app[data-touch="true"] .stage-bar {
   height: 60px;
 }
 
-.app[data-mobile="true"] .terminal-mobile-controls {
+.app[data-touch="true"] .terminal-mobile-controls {
   display: flex;
   flex-direction: column;
 }
 
-.app[data-mobile="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-overlay {
+.app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-overlay {
   bottom: 120px;
 }
 
-.app[data-mobile="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-upload-status {
+.app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-upload-status {
   bottom: 122px;
 }
 
-.app[data-mobile="true"]
+.app[data-touch="true"]
   .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"])
   .terminal-overlay {
   bottom: 158px;
 }
 
-.app[data-mobile="true"]
+.app[data-touch="true"]
   .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"])
   .terminal-upload-status {
   bottom: 160px;

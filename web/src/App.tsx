@@ -69,7 +69,8 @@ type DisplayPrefs = {
   selectedPaneId: string | null;
 };
 
-const NARROW_QUERY = "(max-width: 1024px), (hover: none) and (pointer: coarse)";
+const COMPACT_LAYOUT_QUERY = "(max-width: 820px)";
+const TOUCH_INPUT_QUERY = "(hover: none) and (pointer: coarse)";
 const DISPLAY_PREFS_KEY = "herdr.mobileWeb.displayPrefs.v1";
 const MOBILE_SIDEBAR_HISTORY_KEY = "herdrWebMobileSidebar";
 const MOBILE_DETAIL_HISTORY_KEY = "herdrWebMobileDetail";
@@ -204,17 +205,25 @@ export function App() {
   const [paneMoveSupported, setPaneMoveSupported] = useState(false);
   const [refitToken, setRefitToken] = useState(0);
   const [terminalFocusToken, setTerminalFocusToken] = useState(0);
-  const isNarrow = useIsNarrow();
+  const isCompactLayout = useIsCompactLayout();
+  const isTouchInput = useIsTouchInput();
   const snapshotRef = useRef<Snapshot | null>(null);
-  const isNarrowRef = useRef(isNarrow);
+  const isCompactLayoutRef = useRef(isCompactLayout);
   const showDetailRef = useRef(showDetail);
   const mobileSidebarHistoryRef = useRef(false);
   const mobileDetailHistoryRef = useRef(false);
+  const sidebarResizePressRef = useRef<{
+    timer: number;
+    pointerId: number;
+    x: number;
+    y: number;
+    target: HTMLDivElement;
+  } | null>(null);
 
   const resolvedPaneId = chooseSelectedPane(snapshot, selectedPaneId);
 
   const ensureMobileSidebarHistory = () => {
-    if (!isNarrowRef.current || isMobileDetailHistoryState(window.history.state)) {
+    if (!isCompactLayoutRef.current || isMobileDetailHistoryState(window.history.state)) {
       return;
     }
     if (isMobileSidebarHistoryState(window.history.state)) {
@@ -234,8 +243,8 @@ export function App() {
   }, [snapshot]);
 
   useEffect(() => {
-    isNarrowRef.current = isNarrow;
-    if (isNarrow) {
+    isCompactLayoutRef.current = isCompactLayout;
+    if (isCompactLayout) {
       ensureMobileSidebarHistory();
       return;
     }
@@ -247,7 +256,7 @@ export function App() {
     ) {
       window.history.replaceState(stripMobileHistoryState(window.history.state), "", window.location.href);
     }
-  }, [isNarrow]);
+  }, [isCompactLayout]);
 
   useEffect(() => {
     showDetailRef.current = showDetail;
@@ -281,7 +290,19 @@ export function App() {
 
   useEffect(() => {
     setSidebarWidth((width) => clampSidebarWidth(width));
-  }, [isNarrow]);
+  }, [isCompactLayout]);
+
+  const clearSidebarResizePress = () => {
+    const pending = sidebarResizePressRef.current;
+    if (!pending) {
+      return;
+    }
+    window.clearTimeout(pending.timer);
+    if (pending.target.hasPointerCapture(pending.pointerId)) {
+      pending.target.releasePointerCapture(pending.pointerId);
+    }
+    sidebarResizePressRef.current = null;
+  };
 
   useEffect(() => {
     if (!resizingSidebar) {
@@ -304,6 +325,21 @@ export function App() {
       document.body.style.userSelect = "";
     };
   }, [resizingSidebar]);
+
+  useEffect(
+    () => () => {
+      const pending = sidebarResizePressRef.current;
+      if (!pending) {
+        return;
+      }
+      window.clearTimeout(pending.timer);
+      if (pending.target.hasPointerCapture(pending.pointerId)) {
+        pending.target.releasePointerCapture(pending.pointerId);
+      }
+      sidebarResizePressRef.current = null;
+    },
+    [],
+  );
 
   useEffect(() => {
     let disposed = false;
@@ -355,7 +391,7 @@ export function App() {
 
   useEffect(() => {
     const onPopState = (event: PopStateEvent) => {
-      if (!isNarrowRef.current) {
+      if (!isCompactLayoutRef.current) {
         return;
       }
       if (isMobileDetailHistoryState(event.state)) {
@@ -402,12 +438,12 @@ export function App() {
   });
 
   useEffect(() => {
-    if (isNarrow) {
+    if (isCompactLayout) {
       window.scrollTo(0, 0);
       document.documentElement.scrollLeft = 0;
       document.body.scrollLeft = 0;
     }
-  }, [isNarrow, showDetail]);
+  }, [isCompactLayout, showDetail]);
 
   const activeSpace = useMemo(() => {
     if (!snapshot || snapshot.workspaces.length === 0) {
@@ -462,7 +498,7 @@ export function App() {
     return cells.length > 1 ? cells : null;
   }, [snapshot, selectedPane]);
 
-  const showSplit = !isNarrow && splitCells !== null;
+  const showSplit = !isCompactLayout && splitCells !== null;
 
   // Mirror browser navigation to the herdr session so `active_tab_id` tracks
   // what we're viewing here. `tab.focus` also activates the tab's workspace, so
@@ -504,7 +540,7 @@ export function App() {
     setActiveSpaceId(pane.workspace_id);
     void syncSelectedPane(pane.pane_id).catch(() => {});
     pushFocus(pane.tab_id, pane.workspace_id);
-    if (isNarrow) {
+    if (isCompactLayout) {
       openMobileDetail();
     }
   };
@@ -513,7 +549,7 @@ export function App() {
 
   const selectSpace = (workspaceId: string) => {
     setActiveSpaceId(workspaceId);
-    if (!isNarrow && snapshot) {
+    if (!isCompactLayout && snapshot) {
       const paneId = choosePaneForWorkspace(snapshot, workspaceId);
       if (paneId) {
         setSelectedPaneId(paneId);
@@ -702,7 +738,7 @@ export function App() {
     agentSort,
     busy,
     dialog,
-    isNarrow,
+    isCompactLayout,
     launchTarget,
     menu,
     paneFocusSupported,
@@ -736,7 +772,7 @@ export function App() {
           setSelectedPaneId(created.pane_id);
           setActiveSpaceId(created.workspace_id);
           void syncSelectedPane(created.pane_id).catch(() => {});
-          if (isNarrow) {
+          if (isCompactLayout) {
             openMobileDetail();
           }
         }
@@ -834,7 +870,7 @@ export function App() {
     void exec(action, true).then((ok) => ok && setLaunchTarget(null));
   };
 
-  const renderTerminal = !isNarrow || showDetail;
+  const renderTerminal = !isCompactLayout || showDetail;
   const appStyle = { "--sidebar-w": `${sidebarWidth}px` } as CSSProperties &
     Record<"--sidebar-w", string>;
 
@@ -844,8 +880,9 @@ export function App() {
       style={appStyle}
       data-sidebar={sidebarOpen ? "open" : "closed"}
       data-resizing-sidebar={resizingSidebar ? "true" : "false"}
-      data-mobile={isNarrow ? "true" : "false"}
-      data-detail={isNarrow && showDetail ? "true" : "false"}
+      data-compact={isCompactLayout ? "true" : "false"}
+      data-touch={isTouchInput ? "true" : "false"}
+      data-detail={isCompactLayout && showDetail ? "true" : "false"}
     >
       <aside className="sidebar" aria-label="Switcher">
         <Switcher
@@ -881,14 +918,43 @@ export function App() {
           aria-valuenow={sidebarWidth}
           tabIndex={0}
           onPointerDown={(event) => {
-            if (isNarrow || !sidebarOpen) {
+            if (isCompactLayout || !sidebarOpen) {
               return;
             }
             event.preventDefault();
-            setResizingSidebar(true);
+            clearSidebarResizePress();
+            if (event.pointerType === "mouse") {
+              setResizingSidebar(true);
+              return;
+            }
+            const target = event.currentTarget;
+            target.setPointerCapture(event.pointerId);
+            const x = event.clientX;
+            const y = event.clientY;
+            const pointerId = event.pointerId;
+            const timer = window.setTimeout(() => {
+              sidebarResizePressRef.current = null;
+              if (target.hasPointerCapture(pointerId)) {
+                target.releasePointerCapture(pointerId);
+              }
+              setSidebarWidth(clampSidebarWidth(x));
+              setResizingSidebar(true);
+            }, 360);
+            sidebarResizePressRef.current = { timer, pointerId, x, y, target };
           }}
+          onPointerMove={(event) => {
+            const pending = sidebarResizePressRef.current;
+            if (!pending || pending.pointerId !== event.pointerId) {
+              return;
+            }
+            if (Math.hypot(event.clientX - pending.x, event.clientY - pending.y) > 12) {
+              clearSidebarResizePress();
+            }
+          }}
+          onPointerUp={clearSidebarResizePress}
+          onPointerCancel={clearSidebarResizePress}
           onKeyDown={(event) => {
-            if (isNarrow) {
+            if (isCompactLayout) {
               return;
             }
             if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
@@ -923,11 +989,11 @@ export function App() {
           <button
             className="icon-btn"
             type="button"
-            aria-label={isNarrow ? "Back to switcher" : "Toggle sidebar"}
-            title={isNarrow ? "Back" : "Toggle sidebar"}
-            onClick={() => (isNarrow ? closeMobileDetail() : setSidebarOpen((open) => !open))}
+            aria-label={isCompactLayout ? "Back to switcher" : "Toggle sidebar"}
+            title={isCompactLayout ? "Back" : "Toggle sidebar"}
+            onClick={() => (isCompactLayout ? closeMobileDetail() : setSidebarOpen((open) => !open))}
           >
-            {isNarrow ? <ChevronLeft size={20} /> : <PanelLeft size={18} />}
+            {isCompactLayout ? <ChevronLeft size={20} /> : <PanelLeft size={18} />}
           </button>
           <div className="stage-id" {...selectedPaneMenuPress}>
             <span className="stage-title">{selectedPane ? paneTitle(selectedPane) : "herdr-web"}</span>
@@ -935,7 +1001,7 @@ export function App() {
               {stageBreadcrumb(snapshot, selectedPane, loadState)}
             </span>
           </div>
-          {splitSupported && selectedPane && !isNarrow ? (
+          {splitSupported && selectedPane && !isCompactLayout ? (
             <>
               <button
                 className="icon-btn"
@@ -980,16 +1046,22 @@ export function App() {
           <SplitGrid
             cells={splitCells}
             selectedPaneId={selectedPane?.pane_id ?? null}
-            onSelectPane={openPane}
+            onSelectPane={(pane) => {
+              openPane(pane);
+              if (isTouchInput) {
+                requestTerminalFocus();
+              }
+            }}
             refitToken={refitToken}
             focusToken={terminalFocusToken}
+            touchInput={isTouchInput}
           />
         ) : renderTerminal ? (
           <TerminalView
             pane={selectedPane}
-            autoFocus={!isNarrow}
-            scrollSensitivity={isNarrow ? 2 : 0.4}
-            mobileControls={isNarrow}
+            autoFocus={!isTouchInput}
+            scrollSensitivity={isTouchInput ? 2 : 0.4}
+            mobileControls={isTouchInput}
             refitToken={refitToken}
             focusToken={terminalFocusToken}
           />
@@ -1191,32 +1263,38 @@ function SplitGrid({
   onSelectPane,
   refitToken,
   focusToken,
+  touchInput,
 }: {
   cells: { pane: PaneInfo; style: CSSProperties }[];
   selectedPaneId: string | null;
   onSelectPane: (pane: PaneInfo) => void;
   refitToken: number;
   focusToken: number;
+  touchInput: boolean;
 }) {
   return (
     <div className="pane-grid" aria-label="Split panes">
-      {cells.map(({ pane, style }) => (
-        <div
-          key={pane.pane_id}
-          className="pane-cell"
-          data-selected={pane.pane_id === selectedPaneId}
-          style={style}
-          onPointerDown={() => onSelectPane(pane)}
-        >
-          <TerminalView
-            pane={pane}
-            autoFocus={pane.pane_id === selectedPaneId}
-            scrollSensitivity={0.4}
-            refitToken={pane.pane_id === selectedPaneId ? refitToken : 0}
-            focusToken={pane.pane_id === selectedPaneId ? focusToken : 0}
-          />
-        </div>
-      ))}
+      {cells.map(({ pane, style }) => {
+        const selected = pane.pane_id === selectedPaneId;
+        return (
+          <div
+            key={pane.pane_id}
+            className="pane-cell"
+            data-selected={selected}
+            style={style}
+            onPointerDown={() => onSelectPane(pane)}
+          >
+            <TerminalView
+              pane={pane}
+              autoFocus={selected && !touchInput}
+              scrollSensitivity={touchInput ? 2 : 0.4}
+              mobileControls={selected && touchInput}
+              refitToken={selected ? refitToken : 0}
+              focusToken={selected ? focusToken : 0}
+            />
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1975,11 +2053,11 @@ function closeCopy(kind: MenuKind) {
   }
 }
 
-function useIsNarrow() {
-  const [narrow, setNarrow] = useState(() => isMobileLayout());
+function useIsCompactLayout() {
+  const [compact, setCompact] = useState(() => isCompactLayoutViewport());
   useEffect(() => {
-    const mq = window.matchMedia(NARROW_QUERY);
-    const update = () => setNarrow(isMobileLayout());
+    const mq = window.matchMedia(COMPACT_LAYOUT_QUERY);
+    const update = () => setCompact(isCompactLayoutViewport());
     update();
     mq.addEventListener("change", update);
     window.addEventListener("resize", update);
@@ -1992,18 +2070,39 @@ function useIsNarrow() {
       window.visualViewport?.removeEventListener("resize", update);
     };
   }, []);
-  return narrow;
+  return compact;
 }
 
-function isMobileLayout() {
+function isCompactLayoutViewport() {
   if (typeof window === "undefined") {
     return false;
   }
-  return (
-    window.matchMedia(NARROW_QUERY).matches ||
-    navigator.maxTouchPoints > 0 ||
-    window.innerWidth <= 1024
-  );
+  return window.matchMedia(COMPACT_LAYOUT_QUERY).matches || window.innerWidth <= 820;
+}
+
+function useIsTouchInput() {
+  const [touchInput, setTouchInput] = useState(() => isTouchInputViewport());
+  useEffect(() => {
+    const mq = window.matchMedia(TOUCH_INPUT_QUERY);
+    const update = () => setTouchInput(isTouchInputViewport());
+    update();
+    mq.addEventListener("change", update);
+    window.addEventListener("resize", update);
+    window.addEventListener("orientationchange", update);
+    return () => {
+      mq.removeEventListener("change", update);
+      window.removeEventListener("resize", update);
+      window.removeEventListener("orientationchange", update);
+    };
+  }, []);
+  return touchInput;
+}
+
+function isTouchInputViewport() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  return window.matchMedia(TOUCH_INPUT_QUERY).matches || navigator.maxTouchPoints > 0;
 }
 
 function summary(panes: PaneInfo[]) {
