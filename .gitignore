@@ -4,9 +4,9 @@
 /web/.vite/
 /web/.next/
 /web/tsconfig.tsbuildinfo
-/vendor/herdr/target/
-/vendor/herdr/vendor/libghostty-vt/.zig-cache/
-/vendor/herdr/vendor/libghostty-vt/zig-out/
+/bridge/target/
+/vendor/herdr-compat/target/
+/dist-packages/
 .specs/
 *.log
 .DS_Store

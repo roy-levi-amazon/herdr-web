@@ -12,7 +12,7 @@ npm run test
 npm run build
 ```
 
-The production build is written to `web/dist/` and served by the vendored bridge through
+The production build is written to `web/dist/` and served by `herdr-web-bridge` through
 `scripts/run-bridge.sh`.
 
 During development, run the bridge separately and use the Vite server for the frontend:
@@ -26,9 +26,9 @@ scripts/run-bridge.sh
 npm run dev:web
 ```
 
-`scripts/run-bridge.sh` points the vendored debug bridge at the stable Herdr socket by default
-instead of the debug `herdr-dev` socket. Override `HERDR_SOCKET_PATH` when targeting a named or
-development session.
+`scripts/run-bridge.sh` points debug bridge builds at the stable Herdr socket by default instead of
+the debug `herdr-dev` socket. Override `HERDR_SOCKET_PATH` when targeting a named or development
+session.
 
 The app expects these bridge routes:
 

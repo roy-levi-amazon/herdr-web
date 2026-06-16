@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8787}"
-BRIDGE_BIN="${BRIDGE_BIN:-$ROOT/vendor/herdr/target/debug/herdr}"
+BRIDGE_BIN="${BRIDGE_BIN:-$ROOT/bridge/target/debug/herdr-web-bridge}"
 STATIC_DIR="${STATIC_DIR:-$ROOT/web/dist}"
 UPLOAD_DIR="${UPLOAD_DIR:-}"
 
@@ -27,7 +27,7 @@ if [[ -n "${HERDR_SOCKET_PATH:-}" && ! -S "$HERDR_SOCKET_PATH" ]]; then
   echo "start Herdr first, or set HERDR_SOCKET_PATH to the running session socket" >&2
 fi
 
-args=(web-bridge --host "$HOST" --port "$PORT" --static-dir "$STATIC_DIR")
+args=(--host "$HOST" --port "$PORT" --static-dir "$STATIC_DIR")
 if [[ -n "$UPLOAD_DIR" ]]; then
   args+=(--upload-dir "$UPLOAD_DIR")
 fi

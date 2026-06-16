@@ -102,7 +102,14 @@ export ANDROID_SDK_ROOT="$ANDROID_HOME"
 export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
 ```
 
-The local verification environment used:
+If Gradle is run without those environment variables, create the ignored local SDK pointer instead:
+
+```properties
+# android/local.properties
+sdk.dir=/absolute/path/to/android-sdk
+```
+
+Known verified versions:
 
 - OpenJDK 21
 - Android SDK command-line tools 20.0
@@ -148,21 +155,13 @@ npm run android:open
 This branch was command-line verified with:
 
 ```bash
-npm run test:web
-npm run lint:web
-npm run build:web
-npm run android:sync
-cd android && ./gradlew assembleDebug
+HERDR_SRC=/path/to/herdr scripts/check-vendor.sh
+npm run check
+npm run android:build:debug
 ```
 
-The full repository check also passed with:
-
-```bash
-ZIG=/home/kevin/.local/zig/zig npm run check
-```
-
-The APK was built successfully. It was not installed on a physical Android device or emulator in
-this environment, so device-level behavior still needs manual smoke testing.
+The debug APK is produced at `android/app/build/outputs/apk/debug/app-debug.apk`. Install that
+artifact on a device or emulator for the manual smoke checklist below.
 
 ## Manual Smoke Checklist
 

@@ -8,7 +8,6 @@ They do not publish npm packages, and the package versions are not release versi
 - Clean `main` branch.
 - Node.js 22 or newer.
 - Rust stable.
-- Zig on `PATH` or exported through `ZIG`, because vendored Herdr builds `libghostty-vt`.
 - JDK 21 and Android SDK when validating the Android shell.
 - GitHub CLI authenticated as a user that can create releases.
 - A local Herdr session for browser smoke testing.
@@ -16,7 +15,7 @@ They do not publish npm packages, and the package versions are not release versi
 ## Prepare
 
 1. Confirm the changelog has user-facing notes under `## [Unreleased]`.
-2. Confirm vendored Herdr is intentional and clean:
+2. Confirm the vendored Herdr compatibility crate is intentional and clean:
 
 ```bash
 scripts/check-vendor.sh
@@ -28,8 +27,51 @@ scripts/check-vendor.sh
 npm run check
 ```
 
-If Zig is missing, install Zig or set `ZIG=/path/to/zig` before releasing. Do not cut a release
-without bridge test/build coverage.
+Do not cut a release without bridge test/build coverage.
+
+## Package Artifacts
+
+Build platform artifacts before or immediately after cutting the GitHub release.
+
+Linux desktop tarball:
+
+```bash
+npm ci
+npm ci --prefix web
+scripts/package-tarball.sh vX.Y.Z linux-x86_64
+```
+
+macOS ARM desktop tarball, run on an Apple Silicon Mac:
+
+```bash
+npm ci
+npm ci --prefix web
+scripts/package-tarball.sh vX.Y.Z macos-arm64
+```
+
+Android debug APK:
+
+```bash
+npm ci
+npm ci --prefix web
+npm run android:build:debug
+```
+
+The desktop tarballs are written to `dist-packages/`. The debug APK is written to
+`android/app/build/outputs/apk/debug/app-debug.apk`.
+
+To stage the current debug APK under the release asset name for private testing:
+
+```bash
+mkdir -p dist-packages
+cp android/app/build/outputs/apk/debug/app-debug.apk dist-packages/herdr-web-vX.Y.Z-android-debug.apk
+```
+
+For a public release, build a signed release APK instead and use the non-debug release asset name:
+
+```text
+dist-packages/herdr-web-vX.Y.Z-android.apk
+```
 
 ## Browser Smoke
 
@@ -76,19 +118,49 @@ The script:
 - creates a GitHub release with notes extracted from `CHANGELOG.md`
 - opens the next `## [Unreleased]` changelog section and pushes it
 
-Release artifact upload is intentionally not part of the process yet. Add that checklist later once
-the build and packaging output is settled.
+The release script does not upload binary artifacts. Upload tarballs and APKs manually after the
+release exists.
 
 ## Android Validation
 
-The Android shell is not part of release artifact upload yet. Before distributing Android builds,
-follow [docs/android.md](android.md): run `npm run android:sync`, build a debug APK with
+Before distributing Android builds, follow [docs/android.md](android.md): run
 `npm run android:build:debug`, and smoke test bridge configuration on a device or emulator with a
 bridge started using `--allow-origin http://localhost`. Revisit the Android backup policy before
 adding any pairing token or other secret storage.
 
+## Upload Artifacts
+
+Upload release artifacts manually with GitHub CLI after `node scripts/release.mjs vX.Y.Z` creates
+the release.
+
+Upload the Linux tarball from the Linux build host:
+
+```bash
+gh release upload vX.Y.Z \
+  dist-packages/herdr-web-vX.Y.Z-linux-x86_64.tar.gz \
+  dist-packages/herdr-web-vX.Y.Z-linux-x86_64.tar.gz.sha256
+```
+
+Upload the macOS ARM tarball from the Apple Silicon Mac build host, or copy it to the release
+operator machine first:
+
+```bash
+gh release upload vX.Y.Z \
+  dist-packages/herdr-web-vX.Y.Z-macos-arm64.tar.gz \
+  dist-packages/herdr-web-vX.Y.Z-macos-arm64.tar.gz.sha256
+```
+
+Upload the Android debug APK after it has the final debug asset name:
+
+```bash
+gh release upload vX.Y.Z dist-packages/herdr-web-vX.Y.Z-android-debug.apk
+```
+
+If every artifact has been copied to one machine, the same paths can be uploaded in one
+`gh release upload` invocation.
+
 ## After
 
 - Confirm the GitHub release exists and points at the expected tag.
+- Confirm release assets and checksum files are attached.
 - Confirm `CHANGELOG.md` on `main` has a fresh empty `## [Unreleased]` section.
-- Do not upload artifacts until the release build/packaging process is defined.

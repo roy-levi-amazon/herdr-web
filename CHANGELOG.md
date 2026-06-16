@@ -6,10 +6,14 @@
 
 ### Added
 
+- Added a standalone `herdr-web-bridge` Rust executable so the web bridge builds outside Herdr's
+  full CLI package and avoids the vendored `libghostty-vt` build path.
 - Added a Capacitor Android shell that bundles the web app, stores bridge profiles with native
   Preferences, starts disconnected until a bridge is selected, and supports debug APK builds.
 - Added bridge `--allow-origin` and `--allow-host` options with CORS preflight support for bundled
   Android bridge access and explicit hostname backends.
+- Added `herdr-web-bridge --session NAME` to target a named Herdr session while ignoring
+  `HERDR_SOCKET_PATH`.
 - Added Android build, sync, HTTP/cleartext, and smoke-test documentation.
 - Added named bridge backend profiles and a settings dialog for switching the active backend.
 - Added a bridge capabilities endpoint so the web app can discover supported commands without
@@ -20,10 +24,25 @@
 - Added a clear-name action for workspace and tab rename dialogs so custom names can return to
   their default labels.
 - Added release-process documentation and a GitHub Release script.
-- Added top-level agent onboarding guidance for web app, bridge overlay, vendoring, testing, and release work.
+- Added a desktop tarball packaging script for bridge/web release artifacts.
+- Added packaging documentation for Linux/macOS tarballs, Android APK artifacts, and manual GitHub
+  release uploads.
+- Added a run-focused README for desktop tarball distributions.
+- Added top-level agent onboarding guidance for web app, bridge, vendoring, testing, and release work.
 
 ### Changed
 
+- Changed bridge build, test, and run scripts to use the repo-owned `herdr-web-bridge` executable
+  instead of invoking `herdr web-bridge` from the vendored Herdr package.
+- Split README setup guidance into release quick-start and source development sections.
+- Clarified Android debug APK release artifact naming separately from future signed release APKs.
+- Updated the vendoring strategy so only a minimal `vendor/herdr-compat` crate is checked in
+  instead of the full upstream Herdr source tree.
+- Removed bridge build-time path imports from `vendor/herdr/src` and moved copied compatibility
+  modules for IPC, runtime status, socket path discovery, bridge file logging, API schema, and
+  terminal protocol into `vendor/herdr-compat`.
+- Added vendoring checks that reject a restored full `vendor/herdr` tree and optionally compare
+  exact upstream schema/protocol copies when `HERDR_SRC` points at a Herdr checkout.
 - Added a bridge `Host` header allow-list and basic static security headers.
 - Narrowed web bridge validation for workspace and tab creation parameters.
 - Narrowed web bridge command validation for browser-launched pane input, splits, and agent starts.
@@ -33,7 +52,7 @@
 - Added the Herdr logo to the app header and Android launcher icon.
 - Disabled Android cloud backup for the shell and removed unused Capacitor mixed-content/deprecated
   runtime config.
-- Included Rust formatting checks for the vendored bridge overlay in the root lint command.
+- Included Rust formatting checks for the bridge in the root lint command.
 - Changed mobile terminal taps to focus the command input by default, with raw terminal focus behind
   a keyboard-row button.
 - Moved mobile arrow keys into the expanded keyboard and added separate `1`, `2`, and `3` quick keys.
@@ -58,5 +77,10 @@
 - Preserved custom CORS preflight request headers for future bridge auth headers.
 - Re-probed and reconnected active Android bridge sessions promptly after app foreground/resume.
 - Centered the mobile header summary next to the Herdr logo and app title.
+- Added a bounded timeout to the bridge startup daemon protocol check so an accepted but
+  unresponsive Herdr daemon returns actionable restart guidance instead of blocking indefinitely.
 
 ### Removed
+
+- Removed the full `vendor/herdr/` source snapshot and the legacy vendored `herdr web-bridge`
+  overlay from this repository.

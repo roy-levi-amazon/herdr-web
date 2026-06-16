@@ -1,14 +1,14 @@
 # herdr-web
 
-> W.I.P. prototype. This repository is experimental, the bridge is vendored, and the runtime/API
-> shape is expected to change.
+> W.I.P. prototype. This repository is experimental, Herdr compatibility code is vendored, and the
+> runtime/API shape is expected to change.
 
 Browser UI for Herdr workspaces and agent panes.
 
 This repository is structured as a standalone app that can be distributed without asking users to
-modify their installed Herdr checkout. The current bridge is built from a vendored Herdr source
-tree because the app needs private Herdr APIs for terminal attach, terminal resize/scroll/input,
-workspace snapshots, and event subscriptions.
+modify their installed Herdr checkout. The bridge builds as `herdr-web-bridge`, a repo-owned
+executable that uses vendored Herdr compatibility code because the app needs private Herdr APIs for
+terminal attach, terminal resize/scroll/input, workspace snapshots, and event subscriptions.
 
 The goal is to provide a browser-native interface for monitoring and controlling Herdr agents from
 desktop and mobile clients. It keeps the terminal experience close to Herdr while adding web-focused
@@ -34,46 +34,79 @@ navigation, multi-client viewing, mobile input controls, and synchronized pane s
 ```text
 web/                 React + Vite browser app
 android/             Capacitor Android shell for the bundled web app
-vendor/herdr/        vendored Herdr source with the web bridge overlay
+bridge/              Slim Rust HTTP/WebSocket bridge executable
+vendor/herdr-compat/ minimal Herdr protocol/API compatibility crate
 scripts/run-bridge.sh
 scripts/check-vendor.sh
 docs/android.md
 docs/vendoring.md
+docs/packaging.md
 docs/release.md
 ```
 
-The bridge is currently compiled as the vendored Herdr binary and run with:
+The bridge is compiled as a repo-owned executable and run with:
 
 ```bash
-vendor/herdr/target/debug/herdr web-bridge --static-dir web/dist
+bridge/target/debug/herdr-web-bridge --static-dir web/dist
 ```
 
 The top-level scripts hide that detail.
 
 ## Requirements
 
+For release tarball users:
+
+- A running Herdr daemon/session
+- A supported host for the downloaded bridge tarball. Current planned desktop release artifacts are
+  Linux x86_64 and macOS ARM64.
+
+For source development:
+
 - Node.js 22 or newer
 - npm
 - Rust stable
-- Zig, needed by Herdr's vendored `libghostty-vt` build
 - A running Herdr daemon/session
 
 Android development also needs a JDK and Android SDK. See [docs/android.md](docs/android.md).
 
-If Zig is not on `PATH`, set `ZIG`:
+## Quick Start From Release
+
+Download the matching desktop tarball from the GitHub release, unpack it, and run the bundled
+wrapper:
 
 ```bash
-export ZIG=/home/kevin/.local/zig/zig
+tar -xzf herdr-web-vX.Y.Z-linux-x86_64.tar.gz
+cd herdr-web-vX.Y.Z-linux-x86_64
+bin/herdr-web
 ```
 
-## Install
+Open:
+
+```text
+http://127.0.0.1:8787
+```
+
+The desktop tarball includes the web assets and `herdr-web-bridge`; it does not include Herdr.
+Start or attach Herdr separately before running the bridge.
+
+For Android, install the APK from the same release and add the bridge URL in Bridges settings. LAN
+bridges must allow Android's app origin:
+
+```bash
+bin/herdr-web --host 0.0.0.0 --port 4000 --allow-origin http://localhost
+```
+
+See [docs/packaging.md](docs/packaging.md) for release artifact layout and
+[docs/android.md](docs/android.md) for Android behavior.
+
+## Development Setup
 
 ```bash
 npm install
 npm install --prefix web
 ```
 
-## Build And Test
+## Development Build And Test
 
 ```bash
 npm run lint
@@ -92,6 +125,7 @@ npm run bridge:test
 npm run bridge:build
 npm run android:sync
 npm run android:build:debug
+scripts/package-tarball.sh vX.Y.Z linux-x86_64
 scripts/check-vendor.sh
 ```
 
@@ -126,8 +160,9 @@ The launcher uses the installed/stable Herdr socket by default:
 ~/.config/herdr/herdr.sock
 ```
 
-This avoids the vendored debug bridge falling back to Herdr's `herdr-dev` app directory. To target
-a named or development Herdr session, set `HERDR_SOCKET_PATH` explicitly before running the script.
+This avoids debug builds falling back to Herdr's `herdr-dev` app directory. To target a named or
+development Herdr session, either pass `--session NAME` to the bridge or set `HERDR_SOCKET_PATH`
+explicitly before running the script.
 
 Open:
 
@@ -202,9 +237,9 @@ over `/ws/ui-events`, and other browsers switch to the same pane.
 
 ## Vendoring Strategy
 
-The vendored tree is intentionally a full Herdr source snapshot with a small bridge overlay. This
-is the practical short-term path because the web app needs private APIs that are not available from
-released Herdr:
+The repository intentionally vendors only the Herdr compatibility pieces the bridge builds against,
+not the full upstream Herdr application. This is the practical short-term path because the web app
+needs private APIs that are not available from released Herdr:
 
 - internal API client and schema types
 - client socket path discovery
@@ -212,13 +247,18 @@ released Herdr:
 - terminal ANSI render encoding
 - scroll and resize protocol frames
 
-This lets `herdr-web` ship now without asking users to patch their installed Herdr checkout. The
-cost is that the bridge must be kept compatible with Herdr protocol changes.
+The shipped bridge is `herdr-web-bridge`, a slim executable owned by this repo. It depends on the
+local `vendor/herdr-compat` crate for copied Herdr protocol/schema/client/socket helpers and keeps
+bridge HTTP/WebSocket behavior in `bridge/src/web_bridge.rs`. A separate upstream Herdr checkout can
+be used for refreshes and drift audits, but a full `vendor/herdr` snapshot is not part of this repo.
+The cost is that `vendor/herdr-compat` must be kept compatible with Herdr protocol changes.
 
 See [docs/vendoring.md](docs/vendoring.md) for the refresh process.
 
-See [docs/release.md](docs/release.md) for release validation, browser smoke testing, tagging, and
-GitHub release creation.
+See [docs/packaging.md](docs/packaging.md) for desktop tarball and APK artifact packaging.
+
+See [docs/release.md](docs/release.md) for release validation, browser smoke testing, tagging,
+GitHub release creation, and manual artifact upload.
 
 ## Long-Term Direction
 
@@ -232,7 +272,8 @@ The cleaner upstream shape is for Herdr to expose a supported web bridge or publ
 - resize ownership semantics
 - browser auth/token support
 
-Once that exists, this repository can drop most or all of `vendor/herdr` and use the public surface.
+Once that exists, this repository can drop most or all of `vendor/herdr-compat` and use the public
+surface.
 
 ## Acknowledgements
 

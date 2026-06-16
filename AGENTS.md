@@ -6,18 +6,23 @@ This is a lightweight internal onboarding note for agents working in this repo.
 
 - Read `README.md` for the product shape, bridge runtime model, and local run commands.
 - Read `web/README.md` before changing the React/Vite app.
-- Read `docs/vendoring.md` before touching `vendor/herdr/`.
+- Read `docs/vendoring.md` before touching `vendor/herdr-compat/`.
+- Read `docs/packaging.md` before changing desktop tarball or Android release artifact behavior.
+- Read `docs/release.md` before changing release scripts or release checklists.
 - Web source lives in `web/src/`.
-- The Herdr bridge overlay lives in `vendor/herdr/src/web_bridge.rs`.
-- Other vendored overlay files are `vendor/herdr/src/main.rs`, `vendor/herdr/Cargo.toml`, and `vendor/herdr/Cargo.lock`.
-- Do not treat `vendor/herdr/AGENTS.md` as repo-level guidance; it belongs to the vendored upstream tree.
+- The repo-owned bridge implementation lives in `bridge/src/web_bridge.rs`.
+- The minimal Herdr compatibility crate lives in `vendor/herdr-compat/`.
+- Do not recreate a full `vendor/herdr/` upstream snapshot; use a separate Herdr checkout for
+  refreshes and audits.
 
 ## Conventions
 
-- Keep product changes scoped to the web app and bridge overlay unless the user explicitly asks for core Herdr changes.
+- Keep product changes scoped to the web app, bridge executable, and minimal compatibility crate
+  unless the user explicitly asks for core Herdr changes.
 - Prefer small pure helpers in `web/src/` for state, launch, and protocol formatting logic that can be unit tested.
 - Keep bridge command exposure narrow. Browser commands should stay allow-listed and parameter-validated in `web_bridge.rs`.
-- Keep generated outputs out of commits: `web/dist/`, `vendor/herdr/target/`, `.zig-cache/`, and `zig-out/`.
+- Keep generated outputs out of commits: `web/dist/`, `bridge/target/`, and
+  `vendor/herdr-compat/target/`, `dist-packages/`, and Android build outputs.
 - The bridge is local-first and currently has no full browser authentication. Treat LAN binding and upload behavior as security-sensitive.
 
 ## Testing
@@ -30,6 +35,17 @@ This is a lightweight internal onboarding note for agents working in this repo.
 - Run `npm run bridge:test` for bridge unit tests when Zig is available.
 - Run `npm run check` before committing or releasing.
 - If Zig is missing, call out that bridge build/test verification could not run.
+
+## Build And Packaging
+
+- Development build: `npm run build` builds the web app and debug bridge binary.
+- Android debug build: `npm run android:build:debug`; output is
+  `android/app/build/outputs/apk/debug/app-debug.apk`.
+- Desktop release tarball: `scripts/package-tarball.sh vX.Y.Z PLATFORM`; outputs go under
+  `dist-packages/`.
+- Build Linux tarballs on Linux. Build `macos-arm64` tarballs on an Apple Silicon Mac host.
+- Desktop tarballs include only `herdr-web-bridge`, bundled `web/dist` assets, a wrapper script, and
+  docs. They do not include Herdr itself.
 
 ## Changelog
 
@@ -47,4 +63,7 @@ This is a lightweight internal onboarding note for agents working in this repo.
 - Run the browser smoke checklist in `docs/release.md`.
 - Run `node scripts/release.mjs vX.Y.Z`.
 - The release script promotes the changelog, commits, tags, pushes, creates a GitHub release from changelog notes, and opens the next `## [Unreleased]` section.
-- Do not bump npm package versions or upload release artifacts until the packaging process is defined.
+- Build/upload tarball and APK artifacts manually after the release exists. Use
+  `docs/packaging.md` and `docs/release.md`; do not commit `dist-packages/`, APKs, or generated
+  Android outputs.
+- Do not bump npm package versions until package publishing is defined.
