@@ -52,7 +52,7 @@ pub fn active_api_socket_path() -> PathBuf {
     if explicit_session_requested() {
         return api_socket_path_for(active_name().as_deref());
     }
-    if let Ok(path) = std::env::var(herdr_compat::api::SOCKET_PATH_ENV_VAR) {
+    if let Some(path) = non_empty_env(herdr_compat::api::SOCKET_PATH_ENV_VAR) {
         return PathBuf::from(path);
     }
     api_socket_path_for(active_name().as_deref())
@@ -67,12 +67,8 @@ pub fn active_client_socket_path() -> PathBuf {
         return client_socket_path_for(active_name().as_deref());
     }
     herdr_compat::server::socket_paths::client_socket_path_from_overrides(
-        std::env::var(herdr_compat::api::SOCKET_PATH_ENV_VAR)
-            .ok()
-            .as_deref(),
-        std::env::var(herdr_compat::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR)
-            .ok()
-            .as_deref(),
+        non_empty_env(herdr_compat::api::SOCKET_PATH_ENV_VAR).as_deref(),
+        non_empty_env(herdr_compat::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR).as_deref(),
         client_socket_path_for(active_name().as_deref()),
     )
 }
@@ -91,6 +87,10 @@ pub fn validate_session_name(name: &str) -> Result<(), String> {
     } else {
         Err("session name must be 1-64 ASCII letters, digits, '.', '_', or '-'".to_string())
     }
+}
+
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]
@@ -130,6 +130,34 @@ mod tests {
         assert!(validate_session_name("../work").is_err());
         assert!(validate_session_name(&"a".repeat(65)).is_err());
         assert!(validate_session_name("work_1.2-3").is_ok());
+    }
+
+    #[test]
+    fn empty_socket_overrides_fall_back_to_default_session_paths() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let previous_session = std::env::var(SESSION_ENV_VAR).ok();
+        let previous_socket = std::env::var(herdr_compat::api::SOCKET_PATH_ENV_VAR).ok();
+        let previous_client_socket =
+            std::env::var(herdr_compat::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR).ok();
+
+        clear_explicit_session_for_test();
+        std::env::remove_var(SESSION_ENV_VAR);
+        std::env::set_var(herdr_compat::api::SOCKET_PATH_ENV_VAR, "");
+        std::env::set_var(
+            herdr_compat::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
+            "",
+        );
+
+        assert_eq!(active_api_socket_path(), api_socket_path_for(None));
+        assert_eq!(active_client_socket_path(), client_socket_path_for(None));
+
+        restore_env(SESSION_ENV_VAR, previous_session);
+        restore_env(herdr_compat::api::SOCKET_PATH_ENV_VAR, previous_socket);
+        restore_env(
+            herdr_compat::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
+            previous_client_socket,
+        );
+        clear_explicit_session_for_test();
     }
 
     fn restore_env(name: &str, value: Option<String>) {

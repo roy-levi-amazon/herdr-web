@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPAT="$ROOT/vendor/herdr-compat"
 
+if ! command -v rg >/dev/null; then
+  echo "ripgrep (rg) is required for vendor checks" >&2
+  exit 1
+fi
+
 required=(
   "$COMPAT/Cargo.toml"
   "$COMPAT/src/lib.rs"
@@ -30,10 +35,21 @@ if [[ -d "$ROOT/vendor/herdr" ]]; then
   exit 1
 fi
 
-forbidden_vendor_ref='(#\[path[[:space:]]*=[[:space:]]*"[^"]*vendor/herdr/|vendor/herdr/src)'
-if rg -n "$forbidden_vendor_ref" "$ROOT/bridge" "$ROOT/vendor/herdr-compat" >/dev/null; then
-  echo "build-time imports from vendor/herdr are not allowed" >&2
-  rg -n "$forbidden_vendor_ref" "$ROOT/bridge" "$ROOT/vendor/herdr-compat" >&2
+if rg -n '#\[path[[:space:]]*=' "$ROOT/bridge" "$COMPAT" >/dev/null; then
+  echo "build-time Rust #[path] imports are not allowed in bridge or vendor/herdr-compat" >&2
+  rg -n '#\[path[[:space:]]*=' "$ROOT/bridge" "$COMPAT" >&2
+  exit 1
+fi
+
+unexpected_path_deps="$(
+  rg -n 'path[[:space:]]*=' "$ROOT/bridge/Cargo.toml" "$COMPAT/Cargo.toml" \
+    | grep -Ev 'path[[:space:]]*=[[:space:]]*"src/(main|lib)\.rs"' \
+    | grep -Ev 'path[[:space:]]*=[[:space:]]*"\.\./vendor/herdr-compat"' \
+    || true
+)"
+if [[ -n "$unexpected_path_deps" ]]; then
+  echo "unexpected Cargo path dependency; only ../vendor/herdr-compat is allowed" >&2
+  echo "$unexpected_path_deps" >&2
   exit 1
 fi
 
