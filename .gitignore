@@ -6,5 +6,6 @@
 /vendor/herdr/target/
 /vendor/herdr/vendor/libghostty-vt/.zig-cache/
 /vendor/herdr/vendor/libghostty-vt/zig-out/
+.specs/
 *.log
 .DS_Store
