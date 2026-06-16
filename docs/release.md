@@ -84,7 +84,8 @@ the build and packaging output is settled.
 The Android shell is not part of release artifact upload yet. Before distributing Android builds,
 follow [docs/android.md](android.md): run `npm run android:sync`, build a debug APK with
 `npm run android:build:debug`, and smoke test bridge configuration on a device or emulator with a
-bridge started using `--allow-origin http://localhost`.
+bridge started using `--allow-origin http://localhost`. Revisit the Android backup policy before
+adding any pairing token or other secret storage.
 
 ## After
 

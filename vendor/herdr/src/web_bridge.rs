@@ -486,10 +486,12 @@ fn insert_cors_headers(headers: &mut HeaderMap, origin: HeaderValue) {
         ACCESS_CONTROL_ALLOW_METHODS,
         HeaderValue::from_static("GET, POST, OPTIONS"),
     );
-    headers.insert(
-        ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("content-type"),
-    );
+    if !headers.contains_key(ACCESS_CONTROL_ALLOW_HEADERS) {
+        headers.insert(
+            ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("content-type"),
+        );
+    }
     headers.insert(ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
     headers.insert(VARY, HeaderValue::from_static("Origin"));
 }
@@ -2162,6 +2164,24 @@ mod tests {
             &policy
         )
         .is_none());
+    }
+
+    #[test]
+    fn cors_headers_preserve_preflight_requested_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("content-type, authorization"),
+        );
+
+        insert_cors_headers(&mut headers, HeaderValue::from_static("http://localhost"));
+
+        assert_eq!(
+            headers
+                .get(ACCESS_CONTROL_ALLOW_HEADERS)
+                .and_then(|value| value.to_str().ok()),
+            Some("content-type, authorization")
+        );
     }
 
     #[test]

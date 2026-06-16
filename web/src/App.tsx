@@ -432,7 +432,7 @@ export function App() {
       uiEvents?.close();
       window.clearInterval(interval);
     };
-  }, [bridge.canConnect, bridge.connectionKey, bridge.httpUrl, bridge.wsUrl]);
+  }, [bridge.canConnect, bridge.connectionKey, bridge.httpUrl, bridge.resumeToken, bridge.wsUrl]);
 
   useEffect(() => {
     if (!error) {
@@ -1143,6 +1143,7 @@ export function App() {
             focusToken={terminalFocusToken}
             touchInput={isTouchInput}
             connectionKey={bridge.connectionKey}
+            resumeToken={bridge.resumeToken}
             httpUrl={bridge.httpUrl}
             wsUrl={bridge.wsUrl}
           />
@@ -1150,6 +1151,7 @@ export function App() {
           <TerminalView
             pane={selectedPane}
             connectionKey={bridge.connectionKey}
+            resumeToken={bridge.resumeToken}
             httpUrl={bridge.httpUrl}
             wsUrl={bridge.wsUrl}
             autoFocus={!isTouchInput}
@@ -1362,6 +1364,7 @@ function SplitGrid({
   focusToken,
   touchInput,
   connectionKey,
+  resumeToken,
   httpUrl,
   wsUrl,
 }: {
@@ -1372,6 +1375,7 @@ function SplitGrid({
   focusToken: number;
   touchInput: boolean;
   connectionKey: string;
+  resumeToken: number;
   httpUrl: (path: string, query?: URLSearchParams) => string;
   wsUrl: (path: string, query?: URLSearchParams) => string;
 }) {
@@ -1390,6 +1394,7 @@ function SplitGrid({
             <TerminalView
               pane={pane}
               connectionKey={connectionKey}
+              resumeToken={resumeToken}
               httpUrl={httpUrl}
               wsUrl={wsUrl}
               autoFocus={selected && !touchInput}

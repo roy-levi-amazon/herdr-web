@@ -66,22 +66,23 @@ HOST=0.0.0.0 PORT=4000 scripts/run-bridge.sh \
 
 ## HTTP And Cleartext
 
-The Android shell currently enables Capacitor cleartext and mixed-content support:
+The Android shell currently enables Capacitor cleartext support:
 
 ```ts
 server: {
   androidScheme: "http",
   cleartext: true,
 },
-android: {
-  allowMixedContent: true,
-},
 ```
 
 This is intentional for the current Herdr bridge workflow because local/LAN bridge URLs are usually
-plain `http://host:port`. Treat this as a local-network trust boundary: only point the app at Herdr
-bridges on networks you trust. For a public or store-distributed build, prefer HTTPS bridge URLs and
-revisit whether cleartext should remain enabled.
+plain `http://host:port`. The app does not enable mixed-content mode because its WebView origin is
+also HTTP. Treat this as a local-network trust boundary: only point the app at Herdr bridges on
+networks you trust. For a public or store-distributed build, prefer HTTPS bridge URLs and revisit
+whether cleartext should remain enabled.
+
+Android cloud auto-backup is disabled for the shell, so saved bridge profiles are not copied into
+device backup storage.
 
 ## Build Prerequisites
 
@@ -194,4 +195,5 @@ The generated debug APK is unsigned for distribution. A production release still
 - release build command/checklist;
 - device/emulator smoke testing;
 - release validation for `--allow-origin http://localhost` and any documented `--allow-host` names;
+- backup policy review before any secret or pairing-token storage is added;
 - a decision on whether HTTP cleartext remains enabled for production builds.

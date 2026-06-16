@@ -10,6 +10,7 @@ import {
 import type { ReactNode } from "react";
 import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
+import { addNativeResumeHandler } from "./native";
 
 export type BridgeBackendProfile = {
   id: string;
@@ -40,6 +41,7 @@ export type BridgeRuntime = {
   store: BridgeBackendStore;
   activeBackend: BridgeBackendProfile | null;
   connectionKey: string;
+  resumeToken: number;
   capabilities: BridgeCapabilities | null;
   capabilityState: CapabilityState;
   capabilityError: string | null;
@@ -79,6 +81,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
   const [connectionBlocked, setConnectionBlocked] = useState(false);
   const [capabilityRetry, setCapabilityRetry] = useState(0);
+  const [resumeToken, setResumeToken] = useState(0);
   const storeEditedRef = useRef(false);
 
   const activeBackend = store.activeBackendId
@@ -107,6 +110,12 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
+    return addNativeResumeHandler(() => {
+      setResumeToken((token) => token + 1);
+    });
+  }, []);
+
+  useEffect(() => {
     if (storeLoaded) {
       void writeBackendStore(store);
     }
@@ -126,7 +135,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     setCapabilityRetry(0);
-  }, [connectionKey]);
+  }, [connectionKey, resumeToken]);
 
   useEffect(() => {
     let cancelled = false;
@@ -171,7 +180,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
         window.clearTimeout(retryTimer);
       }
     };
-  }, [canProbe, capabilityRetry, connectionKey, httpUrl]);
+  }, [canProbe, capabilityRetry, connectionKey, httpUrl, resumeToken]);
 
   const addBackend = useCallback(async (input: BackendInput, activate = true) => {
     const baseUrl = normalizeBridgeBaseUrl(input.baseUrl);
@@ -250,6 +259,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
       store,
       activeBackend,
       connectionKey,
+      resumeToken,
       capabilities,
       capabilityState,
       capabilityError,
@@ -277,6 +287,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
       httpUrl,
       mode,
       probeBackend,
+      resumeToken,
       setActiveBackend,
       sameOriginAvailable,
       store,

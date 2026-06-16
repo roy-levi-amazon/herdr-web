@@ -10,6 +10,7 @@ import type { PaneInfo } from "./types";
 type Props = {
   pane: PaneInfo | null;
   connectionKey: string;
+  resumeToken: number;
   httpUrl: (path: string, query?: URLSearchParams) => string;
   wsUrl: (path: string, query?: URLSearchParams) => string;
   /** Whether to grab keyboard focus on attach. Off on mobile to avoid popping the keyboard. */
@@ -46,6 +47,7 @@ const MAX_UPLOAD_FILES = 8;
 export function TerminalView({
   pane,
   connectionKey,
+  resumeToken,
   httpUrl,
   wsUrl,
   autoFocus = true,
@@ -294,7 +296,7 @@ export function TerminalView({
       rendererRef.current = null;
       host.replaceChildren();
     };
-  }, [connectionKey, pane?.terminal_id, wsUrl]);
+  }, [connectionKey, pane?.terminal_id, resumeToken, wsUrl]);
 
   useEffect(() => {
     rendererRef.current?.setTapFocusHandler(mobileControls ? focusMobileCommandInput : null);

@@ -30,6 +30,8 @@
 - Added same-origin browser request checks to bridge API and WebSocket routes.
 - Changed the Android shell origin to `http://localhost` with cleartext enabled for trusted-LAN
   HTTP bridge URLs.
+- Disabled Android cloud backup for the shell and removed unused Capacitor mixed-content/deprecated
+  runtime config.
 - Included Rust formatting checks for the vendored bridge overlay in the root lint command.
 - Changed mobile terminal taps to focus the command input by default, with raw terminal focus behind
   a keyboard-row button.
@@ -52,5 +54,7 @@
 - Avoided duplicate default agent names when launching repeated agent splits.
 - Kept clear-name requests compatible with older running Herdr daemons by translating them in the bridge.
 - Hid the clear-name action when a workspace or tab is already using its default label.
+- Preserved custom CORS preflight request headers for future bridge auth headers.
+- Re-probed and reconnected active Android bridge sessions promptly after app foreground/resume.
 
 ### Removed

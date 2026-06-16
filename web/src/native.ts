@@ -2,9 +2,12 @@ import { App } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
 
 type NativeBackHandler = () => boolean;
+type NativeResumeHandler = () => void;
 
 let nativeControlsStarted = false;
+let lastNativeResumeAt = 0;
 const nativeBackHandlers: NativeBackHandler[] = [];
+const nativeResumeHandlers: NativeResumeHandler[] = [];
 
 export function startNativeControls() {
   if (nativeControlsStarted || !Capacitor.isNativePlatform()) {
@@ -12,6 +15,12 @@ export function startNativeControls() {
   }
   nativeControlsStarted = true;
 
+  void App.addListener("appStateChange", ({ isActive }) => {
+    if (isActive) {
+      emitNativeResume();
+    }
+  });
+  void App.addListener("resume", emitNativeResume);
   void App.addListener("backButton", ({ canGoBack }) => {
     for (const handler of [...nativeBackHandlers].reverse()) {
       if (handler()) {
@@ -26,6 +35,16 @@ export function startNativeControls() {
   });
 }
 
+export function addNativeResumeHandler(handler: NativeResumeHandler) {
+  nativeResumeHandlers.push(handler);
+  return () => {
+    const index = nativeResumeHandlers.lastIndexOf(handler);
+    if (index >= 0) {
+      nativeResumeHandlers.splice(index, 1);
+    }
+  };
+}
+
 export function addNativeBackHandler(handler: NativeBackHandler) {
   nativeBackHandlers.push(handler);
   return () => {
@@ -34,4 +53,15 @@ export function addNativeBackHandler(handler: NativeBackHandler) {
       nativeBackHandlers.splice(index, 1);
     }
   };
+}
+
+function emitNativeResume() {
+  const now = Date.now();
+  if (now - lastNativeResumeAt < 250) {
+    return;
+  }
+  lastNativeResumeAt = now;
+  for (const handler of [...nativeResumeHandlers]) {
+    handler();
+  }
 }
