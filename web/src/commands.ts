@@ -5,6 +5,7 @@ import type { LaunchSpec, SplitDirection } from "./launch";
 import { shellCommand } from "./shell";
 
 export type CommandResult = { type?: string; [key: string]: unknown };
+export type PaneFocusDirection = "left" | "right" | "up" | "down";
 export type { LaunchSpec, SplitDirection };
 
 async function runCommand(
@@ -37,7 +38,15 @@ export function createdPaneId(result: CommandResult): string | null {
   const pane = result.pane as { pane_id?: string } | undefined;
   const agent = result.agent as { pane_id?: string } | undefined;
   const moveResult = result.move_result as { pane?: { pane_id?: string } } | undefined;
-  return rootPane?.pane_id ?? pane?.pane_id ?? agent?.pane_id ?? moveResult?.pane?.pane_id ?? null;
+  const focus = result.focus as { focused_pane_id?: string | null } | undefined;
+  return (
+    rootPane?.pane_id ??
+    pane?.pane_id ??
+    agent?.pane_id ??
+    moveResult?.pane?.pane_id ??
+    focus?.focused_pane_id ??
+    null
+  );
 }
 
 export const commands = {
@@ -64,6 +73,8 @@ export const commands = {
   // Layout-mutating: requires the bridge allow-list to include `pane.split`.
   splitPane: (targetPaneId: string, direction: SplitDirection) =>
     runCommand("pane.split", { target_pane_id: targetPaneId, direction, focus: true }),
+  focusPaneDirection: (paneId: string, direction: PaneFocusDirection) =>
+    runCommand("pane.focus_direction", { pane_id: paneId, direction }),
   movePaneToNewTab: (paneId: string, workspaceId: string, label?: string) =>
     runCommand("pane.move", {
       pane_id: paneId,

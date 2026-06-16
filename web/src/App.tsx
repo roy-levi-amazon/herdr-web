@@ -10,7 +10,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { AgentIcon, agentIconKind } from "./AgentIcon";
 import { commands, createdPaneId, probeSupportedCommands } from "./commands";
-import type { LaunchSpec } from "./commands";
+import type { LaunchSpec, PaneFocusDirection, SplitDirection } from "./commands";
 import { LaunchDialog } from "./LaunchDialog";
 import { resolveLaunchSpec } from "./launch";
 import type { LaunchTarget } from "./launch";
@@ -35,7 +35,7 @@ import {
   spaceSubtitle,
   statusLabel,
 } from "./state";
-import type { AgentStatus, PaneInfo, Snapshot, WorkspaceInfo } from "./types";
+import type { AgentStatus, PaneInfo, Snapshot, TabInfo, WorkspaceInfo } from "./types";
 
 type LoadState = "loading" | "ready" | "error";
 type Scope = "space" | "all";
@@ -200,8 +200,10 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [splitSupported, setSplitSupported] = useState(false);
+  const [paneFocusSupported, setPaneFocusSupported] = useState(false);
   const [paneMoveSupported, setPaneMoveSupported] = useState(false);
   const [refitToken, setRefitToken] = useState(0);
+  const [terminalFocusToken, setTerminalFocusToken] = useState(0);
   const isNarrow = useIsNarrow();
   const snapshotRef = useRef<Snapshot | null>(null);
   const isNarrowRef = useRef(isNarrow);
@@ -342,6 +344,7 @@ export function App() {
     void probeSupportedCommands().then((supportedCommands) => {
       if (!cancelled) {
         setSplitSupported(supportedCommands.has("pane.split"));
+        setPaneFocusSupported(supportedCommands.has("pane.focus_direction"));
         setPaneMoveSupported(supportedCommands.has("pane.move"));
       }
     });
@@ -506,6 +509,8 @@ export function App() {
     }
   };
 
+  const requestTerminalFocus = () => setTerminalFocusToken((token) => token + 1);
+
   const selectSpace = (workspaceId: string) => {
     setActiveSpaceId(workspaceId);
     if (!isNarrow && snapshot) {
@@ -534,6 +539,178 @@ export function App() {
       }
     }
   };
+
+  const focusTab = (tabId: string) => {
+    selectTab(tabId);
+    requestTerminalFocus();
+  };
+
+  const focusPane = (pane: PaneInfo) => {
+    openPane(pane);
+    requestTerminalFocus();
+  };
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const navigationShortcut = isAppNavigationShortcut(event);
+      const closeTabShortcut = isCloseTabShortcut(event);
+      const newTabShortcut = isNewTabShortcut(event);
+      const splitDirection = splitSupported ? splitShortcutDirection(event) : null;
+      const paneFocusDirection = paneFocusSupported ? paneFocusShortcutDirection(event) : null;
+      const paneCycleStep = paneCycleShortcutStep(event);
+      if (
+        (!navigationShortcut &&
+          !closeTabShortcut &&
+          !newTabShortcut &&
+          !splitDirection &&
+          !paneFocusDirection &&
+          paneCycleStep === 0) ||
+        isShortcutTextEntryTarget(event.target) ||
+        !snapshot ||
+        busy ||
+        menu ||
+        dialog ||
+        launchTarget ||
+        hasOpenModal()
+      ) {
+        return;
+      }
+
+      if (paneFocusDirection) {
+        if (!selectedPane) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        void exec(
+          () => commands.focusPaneDirection(selectedPane.pane_id, paneFocusDirection),
+          true,
+        ).then((ok) => ok && requestTerminalFocus());
+        return;
+      }
+
+      if (paneCycleStep !== 0) {
+        const panes = orderedShortcutTabPanes(snapshot, activeSpace, selectedPane);
+        if (panes.length === 0) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        const currentIndex = selectedPane
+          ? panes.findIndex((pane) => pane.pane_id === selectedPane.pane_id)
+          : -1;
+        const fallbackIndex = paneCycleStep > 0 ? 0 : panes.length - 1;
+        const nextIndex =
+          currentIndex === -1
+            ? fallbackIndex
+            : (currentIndex + paneCycleStep + panes.length) % panes.length;
+        focusPane(panes[nextIndex]);
+        return;
+      }
+
+      if (splitDirection) {
+        if (!selectedPane) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        void exec(() => commands.splitPane(selectedPane.pane_id, splitDirection), true).then(
+          (ok) => ok && requestTerminalFocus(),
+        );
+        return;
+      }
+
+      if (newTabShortcut) {
+        if (!activeSpace) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        setLaunchTarget({ mode: "tab", workspaceId: activeSpace.workspace_id });
+        return;
+      }
+
+      if (closeTabShortcut) {
+        const tab = activeShortcutTab(snapshot, activeSpace, selectedPane);
+        if (!tab) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        setDialog({
+          mode: "close",
+          kind: "tab",
+          id: tab.tab_id,
+          label: displayTabLabel(tab, snapshot.panes),
+        });
+        return;
+      }
+
+      if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+        const agentPanes = orderedShortcutAgentPanes(
+          snapshot,
+          scope,
+          activeSpace?.workspace_id,
+          agentSort,
+          agentGroup,
+        );
+        if (agentPanes.length === 0) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        const currentIndex = selectedPane
+          ? agentPanes.findIndex((pane) => pane.pane_id === selectedPane.pane_id)
+          : -1;
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        const fallbackIndex = step > 0 ? 0 : agentPanes.length - 1;
+        const nextIndex =
+          currentIndex === -1
+            ? fallbackIndex
+            : (currentIndex + step + agentPanes.length) % agentPanes.length;
+        focusPane(agentPanes[nextIndex]);
+        return;
+      }
+
+      const workspace = activeSpace;
+      if (!workspace || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) {
+        return;
+      }
+      const tabs = sortTabsForWorkspace(snapshot.tabs, workspace.workspace_id);
+      if (tabs.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const activeTabId =
+        selectedPane && selectedPane.workspace_id === workspace.workspace_id
+          ? selectedPane.tab_id
+          : workspace.active_tab_id;
+      const currentIndex = tabs.findIndex((tab) => tab.tab_id === activeTabId);
+      const step = event.key === "ArrowRight" ? 1 : -1;
+      const fallbackIndex = step > 0 ? 0 : tabs.length - 1;
+      const nextIndex =
+        currentIndex === -1 ? fallbackIndex : (currentIndex + step + tabs.length) % tabs.length;
+      focusTab(tabs[nextIndex].tab_id);
+    };
+
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, [
+    activeSpace,
+    agentGroup,
+    agentSort,
+    busy,
+    dialog,
+    isNarrow,
+    launchTarget,
+    menu,
+    paneFocusSupported,
+    scope,
+    selectedPane,
+    splitSupported,
+    snapshot,
+  ]);
 
   const refreshNow = () => {
     setLoadState("loading");
@@ -805,6 +982,7 @@ export function App() {
             selectedPaneId={selectedPane?.pane_id ?? null}
             onSelectPane={openPane}
             refitToken={refitToken}
+            focusToken={terminalFocusToken}
           />
         ) : renderTerminal ? (
           <TerminalView
@@ -813,6 +991,7 @@ export function App() {
             scrollSensitivity={isNarrow ? 2 : 0.4}
             mobileControls={isNarrow}
             refitToken={refitToken}
+            focusToken={terminalFocusToken}
           />
         ) : (
           <div className="terminal-stage" aria-hidden="true" />
@@ -871,16 +1050,153 @@ export function App() {
   );
 }
 
+function orderedShortcutAgentPanes(
+  snapshot: Snapshot,
+  scope: Scope,
+  activeWorkspaceId: string | undefined,
+  agentSort: AgentSort,
+  agentGroup: AgentGroup,
+) {
+  const scoped =
+    scope === "all"
+      ? snapshot.panes
+      : snapshot.panes.filter((pane) => pane.workspace_id === activeWorkspaceId);
+  const agentPanes = sortAgentPanes(scoped.filter(isAgentPane), agentSort, snapshot);
+  if (agentGroup !== "workspace") {
+    return agentPanes;
+  }
+
+  const panesByWorkspace = new Map<string, PaneInfo[]>();
+  for (const pane of agentPanes) {
+    const panes = panesByWorkspace.get(pane.workspace_id) ?? [];
+    panes.push(pane);
+    panesByWorkspace.set(pane.workspace_id, panes);
+  }
+
+  return snapshot.workspaces.flatMap((workspace) => panesByWorkspace.get(workspace.workspace_id) ?? []);
+}
+
+function orderedShortcutTabPanes(
+  snapshot: Snapshot,
+  activeSpace: WorkspaceInfo | null,
+  selectedPane: PaneInfo | null,
+) {
+  const tab = activeShortcutTab(snapshot, activeSpace, selectedPane);
+  return tab ? sortPanesForTab(snapshot.panes, tab.tab_id) : [];
+}
+
+function isAppNavigationShortcut(event: KeyboardEvent) {
+  return (
+    isPlatformShortcutModifier(event) &&
+    event.shiftKey &&
+    (event.key === "ArrowUp" ||
+      event.key === "ArrowDown" ||
+      event.key === "ArrowLeft" ||
+      event.key === "ArrowRight")
+  );
+}
+
+function isCloseTabShortcut(event: KeyboardEvent) {
+  return (
+    isPlatformShortcutModifier(event) &&
+    event.shiftKey &&
+    event.code === "KeyX"
+  );
+}
+
+function isNewTabShortcut(event: KeyboardEvent) {
+  return isPlatformShortcutModifier(event) && event.shiftKey && event.code === "KeyT";
+}
+
+function paneFocusShortcutDirection(event: KeyboardEvent): PaneFocusDirection | null {
+  if (!isPlatformShortcutModifier(event) || event.shiftKey) {
+    return null;
+  }
+  if (event.code === "KeyH") {
+    return "left";
+  }
+  if (event.code === "KeyJ") {
+    return "down";
+  }
+  if (event.code === "KeyK") {
+    return "up";
+  }
+  if (event.code === "KeyL") {
+    return "right";
+  }
+  return null;
+}
+
+function paneCycleShortcutStep(event: KeyboardEvent) {
+  if (!isPlatformShortcutModifier(event) || event.key !== "Tab") {
+    return 0;
+  }
+  return event.shiftKey ? -1 : 1;
+}
+
+function splitShortcutDirection(event: KeyboardEvent): SplitDirection | null {
+  if (!isPlatformShortcutModifier(event) || !event.shiftKey) {
+    return null;
+  }
+  if (event.code === "KeyV") {
+    return "down";
+  }
+  if (event.code === "Minus") {
+    return "right";
+  }
+  return null;
+}
+
+function isPlatformShortcutModifier(event: KeyboardEvent) {
+  return !event.ctrlKey && event.metaKey !== event.altKey;
+}
+
+function activeShortcutTab(
+  snapshot: Snapshot,
+  activeSpace: WorkspaceInfo | null,
+  selectedPane: PaneInfo | null,
+): TabInfo | null {
+  const tabId =
+    selectedPane && selectedPane.workspace_id === activeSpace?.workspace_id
+      ? selectedPane.tab_id
+      : activeSpace?.active_tab_id;
+  if (!tabId) {
+    return null;
+  }
+  return snapshot.tabs.find((tab) => tab.tab_id === tabId) ?? null;
+}
+
+function isShortcutTextEntryTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  if (target.classList.contains("ghostty-hidden-input")) {
+    return false;
+  }
+  if (target.isContentEditable) {
+    return true;
+  }
+  return target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement;
+}
+
+function hasOpenModal() {
+  return document.querySelector(".overlay-root [role='dialog']") !== null;
+}
+
 function SplitGrid({
   cells,
   selectedPaneId,
   onSelectPane,
   refitToken,
+  focusToken,
 }: {
   cells: { pane: PaneInfo; style: CSSProperties }[];
   selectedPaneId: string | null;
   onSelectPane: (pane: PaneInfo) => void;
   refitToken: number;
+  focusToken: number;
 }) {
   return (
     <div className="pane-grid" aria-label="Split panes">
@@ -897,6 +1213,7 @@ function SplitGrid({
             autoFocus={pane.pane_id === selectedPaneId}
             scrollSensitivity={0.4}
             refitToken={pane.pane_id === selectedPaneId ? refitToken : 0}
+            focusToken={pane.pane_id === selectedPaneId ? focusToken : 0}
           />
         </div>
       ))}

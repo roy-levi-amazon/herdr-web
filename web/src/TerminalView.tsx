@@ -17,6 +17,8 @@ type Props = {
   mobileControls?: boolean;
   /** Incrementing token from the parent that requests an immediate fit+resize. */
   refitToken?: number;
+  /** Incrementing token from the parent that requests focus on the preferred terminal input. */
+  focusToken?: number;
 };
 
 type ConnectionState = "idle" | "connecting" | "attached" | "closed" | "error";
@@ -44,6 +46,7 @@ export function TerminalView({
   scrollSensitivity = 1,
   mobileControls = false,
   refitToken = 0,
+  focusToken = 0,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -82,11 +85,32 @@ export function TerminalView({
     return true;
   }, []);
 
+  const focusPreferredInput = useCallback(() => {
+    if (!focusMobileCommandInput()) {
+      rendererRef.current?.focusTextInput();
+    }
+  }, [focusMobileCommandInput]);
+
   // Re-apply scroll tuning live when crossing the desktop/mobile breakpoint,
   // without tearing down the socket.
   useEffect(() => {
     rendererRef.current?.setScrollSensitivity(scrollSensitivity);
   }, [scrollSensitivity]);
+
+  useEffect(() => {
+    if (focusToken === 0) {
+      return;
+    }
+    const focus = () => focusPreferredInput();
+    const frame = window.requestAnimationFrame(focus);
+    const timers = [80, 220].map((delay) => window.setTimeout(focus, delay));
+    return () => {
+      window.cancelAnimationFrame(frame);
+      for (const timer of timers) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [focusPreferredInput, focusToken]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -350,6 +374,11 @@ export function TerminalView({
     pending?.resolve(replace);
   }
 
+  function confirmUploadConflictReplace() {
+    resolveUploadConflict(true);
+    focusPreferredInput();
+  }
+
   const uploadAndInsert = async (files: UploadCandidate[]) => {
     if (files.length === 0 || !pane) {
       if (files.length > 0) {
@@ -514,7 +543,7 @@ export function TerminalView({
           message={uploadConflictMessage(uploadConflict)}
           confirmLabel="Replace"
           onCancel={() => resolveUploadConflict(false)}
-          onConfirm={() => resolveUploadConflict(true)}
+          onConfirm={confirmUploadConflictReplace}
         />
       ) : null}
     </section>
