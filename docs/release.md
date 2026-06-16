@@ -60,7 +60,15 @@ npm run android:build:debug
 The desktop tarballs are written to `dist-packages/`. The debug APK is written to
 `android/app/build/outputs/apk/debug/app-debug.apk`.
 
-For a public release, replace the debug APK with a signed release APK named:
+To stage the current debug APK under the release asset name for private testing:
+
+```bash
+mkdir -p dist-packages
+cp android/app/build/outputs/apk/debug/app-debug.apk dist-packages/herdr-web-vX.Y.Z-android.apk
+```
+
+For a public release, build a signed release APK instead and place it at the same release asset
+path:
 
 ```text
 dist-packages/herdr-web-vX.Y.Z-android.apk
