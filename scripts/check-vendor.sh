@@ -42,7 +42,7 @@ if rg -n '#\[path[[:space:]]*=' "$ROOT/bridge" "$COMPAT" >/dev/null; then
 fi
 
 unexpected_path_deps="$(
-  rg -n 'path[[:space:]]*=' "$ROOT/bridge/Cargo.toml" "$COMPAT/Cargo.toml" \
+  rg -n '(^|[[:space:]{,])path[[:space:]]*=' "$ROOT/bridge/Cargo.toml" "$COMPAT/Cargo.toml" \
     | grep -Ev 'path[[:space:]]*=[[:space:]]*"src/(main|lib)\.rs"' \
     | grep -Ev 'path[[:space:]]*=[[:space:]]*"\.\./vendor/herdr-compat"' \
     || true
