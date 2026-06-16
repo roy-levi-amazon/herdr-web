@@ -9,6 +9,9 @@ import type { PaneInfo } from "./types";
 
 type Props = {
   pane: PaneInfo | null;
+  connectionKey: string;
+  httpUrl: (path: string, query?: URLSearchParams) => string;
+  wsUrl: (path: string, query?: URLSearchParams) => string;
   /** Whether to grab keyboard focus on attach. Off on mobile to avoid popping the keyboard. */
   autoFocus?: boolean;
   /** Wheel scroll speed multiplier; slower on desktop, faster on mobile. */
@@ -42,6 +45,9 @@ const MAX_UPLOAD_FILES = 8;
 
 export function TerminalView({
   pane,
+  connectionKey,
+  httpUrl,
+  wsUrl,
   autoFocus = true,
   scrollSensitivity = 1,
   mobileControls = false,
@@ -60,6 +66,8 @@ export function TerminalView({
   const uploadStatusTimerRef = useRef<number | null>(null);
   const uploadInFlightRef = useRef(false);
   const uploadConflictRef = useRef<UploadConflictState | null>(null);
+  const connectionKeyRef = useRef(connectionKey);
+  const terminalIdRef = useRef(pane?.terminal_id ?? null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [closeReason, setCloseReason] = useState<string | null>(null);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
@@ -72,6 +80,8 @@ export function TerminalView({
   scrollSensitivityRef.current = scrollSensitivity;
   const mobileControlsRef = useRef(mobileControls);
   mobileControlsRef.current = mobileControls;
+  connectionKeyRef.current = connectionKey;
+  terminalIdRef.current = pane?.terminal_id ?? null;
 
   const focusMobileCommandInput = useCallback(() => {
     if (!mobileControlsRef.current) {
@@ -198,7 +208,7 @@ export function TerminalView({
           if (disposed) {
             return;
           }
-          const nextSocket = new WebSocket(terminalSocketUrl(pane.terminal_id, renderer.fit()));
+          const nextSocket = new WebSocket(terminalSocketUrl(wsUrl, pane.terminal_id, renderer.fit()));
           socket = nextSocket;
           socketRef.current = nextSocket;
           nextSocket.binaryType = "arraybuffer";
@@ -284,7 +294,7 @@ export function TerminalView({
       rendererRef.current = null;
       host.replaceChildren();
     };
-  }, [pane?.terminal_id]);
+  }, [connectionKey, pane?.terminal_id, wsUrl]);
 
   useEffect(() => {
     rendererRef.current?.setTapFocusHandler(mobileControls ? focusMobileCommandInput : null);
@@ -392,6 +402,8 @@ export function TerminalView({
     }
     uploadInFlightRef.current = true;
     setUploading(true);
+    const uploadConnectionKey = connectionKey;
+    const uploadTerminalId = pane.terminal_id;
     const uploadFiles = files.slice(0, MAX_UPLOAD_FILES);
     const skippedCount = files.length - uploadFiles.length;
     showUploadStatus(
@@ -402,7 +414,14 @@ export function TerminalView({
     try {
       const uploaded: UploadedFile[] = [];
       for (const file of uploadFiles) {
-        uploaded.push(await uploadWithOverwritePrompt(file, confirmUploadReplace));
+        uploaded.push(await uploadWithOverwritePrompt(httpUrl, file, confirmUploadReplace));
+      }
+      if (
+        connectionKeyRef.current !== uploadConnectionKey ||
+        terminalIdRef.current !== uploadTerminalId
+      ) {
+        showUploadStatus("Upload completed after terminal changed", 3000);
+        return;
       }
       if (uploaded.length > 0) {
         enqueueTerminalInput([uploaded.map((file) => shellQuote(file.path)).join(" ")]);
@@ -764,15 +783,18 @@ const SPECIAL_KEYS: TerminalKey[] = [
   { label: "}", data: "}" },
 ];
 
-function terminalSocketUrl(terminalId: string, size: TerminalSize) {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+function terminalSocketUrl(
+  wsUrl: (path: string, query?: URLSearchParams) => string,
+  terminalId: string,
+  size: TerminalSize,
+) {
   const params = new URLSearchParams({
     terminal_id: terminalId,
     cols: String(size.cols),
     rows: String(size.rows),
     takeover: "false",
   });
-  return `${protocol}//${window.location.host}/ws/terminal?${params.toString()}`;
+  return wsUrl("/ws/terminal", params);
 }
 
 function parseCloseReason(message: string) {
@@ -841,11 +863,12 @@ function uploadCandidatesFromClipboard(data: DataTransfer): UploadCandidate[] {
 }
 
 async function uploadWithOverwritePrompt(
+  httpUrl: (path: string, query?: URLSearchParams) => string,
   file: UploadCandidate,
   confirmReplace: (error: UploadConflictError) => Promise<boolean>,
 ): Promise<UploadedFile> {
   try {
-    return await uploadFile(file, false);
+    return await uploadFile(httpUrl, file, false);
   } catch (error) {
     if (!(error instanceof UploadConflictError)) {
       throw error;
@@ -854,7 +877,7 @@ async function uploadWithOverwritePrompt(
     if (!replace) {
       throw new Error("Upload canceled");
     }
-    return uploadFile(file, true);
+    return uploadFile(httpUrl, file, true);
   }
 }
 
@@ -864,7 +887,11 @@ function uploadConflictMessage(conflict: UploadConflictState) {
     : `${conflict.name} already exists.`;
 }
 
-async function uploadFile(file: UploadCandidate, overwrite: boolean): Promise<UploadedFile> {
+async function uploadFile(
+  httpUrl: (path: string, query?: URLSearchParams) => string,
+  file: UploadCandidate,
+  overwrite: boolean,
+): Promise<UploadedFile> {
   const params = new URLSearchParams();
   if (file.name) {
     params.set("name", file.name);
@@ -872,7 +899,7 @@ async function uploadFile(file: UploadCandidate, overwrite: boolean): Promise<Up
   if (overwrite) {
     params.set("overwrite", "true");
   }
-  const response = await fetch(`/api/uploads?${params.toString()}`, {
+  const response = await fetch(httpUrl("/api/uploads", params), {
     method: "POST",
     headers: file.blob.type ? { "content-type": file.blob.type } : undefined,
     body: file.blob,
