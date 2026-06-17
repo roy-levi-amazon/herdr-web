@@ -1,8 +1,19 @@
-import { Keyboard, Paperclip, Send, SquareTerminal, TextCursorInput } from "lucide-react";
+import {
+  Copy,
+  ExternalLink,
+  Keyboard,
+  Link,
+  Paperclip,
+  Send,
+  SquareTerminal,
+  TextCursorInput,
+  X,
+} from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, DragEvent, RefObject } from "react";
 import { ConfirmDialog } from "./overlays";
 import { shellQuote } from "./shell";
+import { findFirstUrlInSelection, openableHttpUrl } from "./terminalSelection";
 import { GhosttyRenderer } from "./terminalRenderer";
 import type { TerminalRenderer, TerminalSize } from "./terminalRenderer";
 import type { MobileTerminalTapTarget } from "./mobileTerminalPrefs";
@@ -22,6 +33,8 @@ type Props = {
   mobileControls?: boolean;
   /** Where terminal taps should send focus on mobile. */
   mobileTapTarget?: MobileTerminalTapTarget;
+  /** Enables long-press drag selection on touch terminals. */
+  mobileTouchSelection?: boolean;
   /** Incrementing token from the parent that requests an immediate fit+resize. */
   refitToken?: number;
   /** Incrementing token from the parent that requests focus on the preferred terminal input. */
@@ -44,6 +57,10 @@ type UploadConflictState = {
   path: string;
   resolve: (replace: boolean) => void;
 };
+type MobileSelectionAction = {
+  text: string;
+  url: string;
+};
 
 const MAX_UPLOAD_FILES = 8;
 const TERMINAL_CONNECT_TIMEOUT_MS = 3500;
@@ -58,6 +75,7 @@ export function TerminalView({
   scrollSensitivity = 1,
   mobileControls = false,
   mobileTapTarget = "command-input",
+  mobileTouchSelection = false,
   refitToken = 0,
   focusToken = 0,
 }: Props) {
@@ -80,6 +98,8 @@ export function TerminalView({
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadConflict, setUploadConflict] = useState<UploadConflictState | null>(null);
+  const [mobileSelectionAction, setMobileSelectionAction] =
+    useState<MobileSelectionAction | null>(null);
   // Read at attach time without re-running the effect (which would re-attach the socket).
   const autoFocusRef = useRef(autoFocus);
   autoFocusRef.current = autoFocus;
@@ -89,6 +109,8 @@ export function TerminalView({
   mobileControlsRef.current = mobileControls;
   const mobileTapTargetRef = useRef(mobileTapTarget);
   mobileTapTargetRef.current = mobileTapTarget;
+  const mobileTouchSelectionRef = useRef(mobileTouchSelection);
+  mobileTouchSelectionRef.current = mobileTouchSelection;
   connectionKeyRef.current = connectionKey;
   terminalIdRef.current = pane?.terminal_id ?? null;
 
@@ -118,6 +140,78 @@ export function TerminalView({
       rendererRef.current?.focusTextInput();
     }
   }, [focusMobileCommandInput]);
+
+  const showUploadStatus = useCallback((message: string | null, timeoutMs?: number) => {
+    if (uploadStatusTimerRef.current !== null) {
+      window.clearTimeout(uploadStatusTimerRef.current);
+      uploadStatusTimerRef.current = null;
+    }
+    setUploadStatus(message);
+    if (message && timeoutMs) {
+      uploadStatusTimerRef.current = window.setTimeout(() => {
+        uploadStatusTimerRef.current = null;
+        setUploadStatus(null);
+      }, timeoutMs);
+    }
+  }, []);
+
+  const copyText = useCallback(
+    async (text: string, successMessage: string) => {
+      try {
+        await copyToClipboard(text);
+        showUploadStatus(successMessage, 2200);
+      } catch (error) {
+        console.warn("selection copy failed", error);
+        showUploadStatus("Copy failed", 3000);
+      }
+    },
+    [showUploadStatus],
+  );
+
+  const handleMobileSelection = useCallback(
+    (text: string) => {
+      const trimmed = text.trim();
+      setMobileSelectionAction(null);
+      if (!trimmed) {
+        return;
+      }
+      const url = findFirstUrlInSelection(trimmed);
+      if (url) {
+        setMobileSelectionAction({ text: trimmed, url });
+        return;
+      }
+      void copyText(trimmed, "Copied selection");
+    },
+    [copyText],
+  );
+
+  const measureTerminal = useCallback(
+    (renderer: TerminalRenderer, mode: "fit" | "refresh" = "fit") => {
+      try {
+        return mode === "refresh" ? renderer.refreshMetrics() : renderer.fit();
+      } catch (error) {
+        if (rendererRef.current === renderer) {
+          console.warn("terminal resize skipped", error);
+        }
+        return null;
+      }
+    },
+    [],
+  );
+
+  const resizeTerminal = useCallback(
+    (mode: "fit" | "refresh" = "fit") => {
+      const renderer = rendererRef.current;
+      if (!renderer) {
+        return;
+      }
+      const size = measureTerminal(renderer, mode);
+      if (size) {
+        sendResizeRef.current(size);
+      }
+    },
+    [measureTerminal],
+  );
 
   // Re-apply scroll tuning live when crossing the desktop/mobile breakpoint,
   // without tearing down the socket.
@@ -183,6 +277,10 @@ export function TerminalView({
               ? focusMobileCommandInput
               : focusTerminalKeyboardInput,
         );
+        renderer.setMobileTouchSelection(
+          mobileControlsRef.current && mobileTouchSelectionRef.current,
+          handleMobileSelection,
+        );
 
         disposeInput = renderer.onInput((data) => {
           if (socket?.readyState === WebSocket.OPEN) {
@@ -203,7 +301,10 @@ export function TerminalView({
         });
 
         resizeObserver = new ResizeObserver(() => {
-          sendResize(renderer.fit());
+          const size = measureTerminal(renderer);
+          if (size) {
+            sendResize(size);
+          }
         });
         resizeObserver.observe(host);
 
@@ -211,7 +312,10 @@ export function TerminalView({
         if (fontReady) {
           void fontReady.then(() => {
             if (!disposed) {
-              sendResize(renderer.refreshMetrics());
+              const size = measureTerminal(renderer, "refresh");
+              if (size) {
+                sendResize(size);
+              }
             }
           });
         }
@@ -257,8 +361,13 @@ export function TerminalView({
             return;
           }
           clearConnectTimer();
+          const initialSize = measureTerminal(renderer);
+          if (!initialSize) {
+            scheduleReconnect();
+            return;
+          }
           const nextSocket = new WebSocket(
-            terminalSocketUrl(wsUrl, pane.terminal_id, renderer.fit()),
+            terminalSocketUrl(wsUrl, pane.terminal_id, initialSize),
           );
           socket = nextSocket;
           socketRef.current = nextSocket;
@@ -275,7 +384,10 @@ export function TerminalView({
               lastCloseReason = null;
               setCloseReason(null);
               setConnectionState("attached");
-              sendResize(renderer.fit());
+              const size = measureTerminal(renderer);
+              if (size) {
+                sendResize(size);
+              }
               if (autoFocusRef.current) {
                 window.setTimeout(() => renderer.focus(), 0);
               }
@@ -356,7 +468,7 @@ export function TerminalView({
       rendererRef.current = null;
       host.replaceChildren();
     };
-  }, [connectionKey, pane?.terminal_id, resumeToken, wsUrl]);
+  }, [connectionKey, measureTerminal, pane?.terminal_id, resumeToken, wsUrl]);
 
   useEffect(() => {
     rendererRef.current?.setTapFocusHandler(
@@ -367,6 +479,17 @@ export function TerminalView({
           : focusTerminalKeyboardInput,
     );
   }, [focusMobileCommandInput, focusTerminalKeyboardInput, mobileControls, mobileTapTarget]);
+
+  useEffect(() => {
+    rendererRef.current?.setMobileTouchSelection(
+      mobileControls && mobileTouchSelection,
+      handleMobileSelection,
+    );
+  }, [handleMobileSelection, mobileControls, mobileTouchSelection]);
+
+  useEffect(() => {
+    setMobileSelectionAction(null);
+  }, [connectionKey, pane?.terminal_id]);
 
   useEffect(() => {
     return () => {
@@ -382,21 +505,15 @@ export function TerminalView({
     if (refitToken === 0) {
       return;
     }
-    const renderer = rendererRef.current;
-    if (renderer) {
-      sendResizeRef.current(renderer.refreshMetrics());
-    }
-  }, [refitToken]);
+    resizeTerminal("refresh");
+  }, [refitToken, resizeTerminal]);
 
   useEffect(() => {
     if (!mobileControls || !pane) {
       return;
     }
     const refit = () => {
-      const renderer = rendererRef.current;
-      if (renderer) {
-        sendResizeRef.current(renderer.refreshMetrics());
-      }
+      resizeTerminal("refresh");
     };
     const frame = window.requestAnimationFrame(refit);
     const timers = [80, 280, 520].map((delay) => window.setTimeout(refit, delay));
@@ -406,7 +523,7 @@ export function TerminalView({
         window.clearTimeout(timer);
       }
     };
-  }, [mobileControls, pane?.terminal_id]);
+  }, [mobileControls, pane?.terminal_id, resizeTerminal]);
 
   const sendTerminalInput = (data: string) => {
     const socket = socketRef.current;
@@ -416,18 +533,22 @@ export function TerminalView({
   };
   const uploadDisabled = !pane || uploading;
 
-  const showUploadStatus = (message: string | null, timeoutMs?: number) => {
-    if (uploadStatusTimerRef.current !== null) {
-      window.clearTimeout(uploadStatusTimerRef.current);
-      uploadStatusTimerRef.current = null;
+  const openSelectionUrl = () => {
+    if (!mobileSelectionAction) {
+      return;
     }
-    setUploadStatus(message);
-    if (message && timeoutMs) {
-      uploadStatusTimerRef.current = window.setTimeout(() => {
-        uploadStatusTimerRef.current = null;
-        setUploadStatus(null);
-      }, timeoutMs);
+    const url = openableHttpUrl(mobileSelectionAction.url);
+    if (url) {
+      window.open(url, "_blank", "noopener,noreferrer");
+    } else {
+      void copyText(mobileSelectionAction.text, "Copied selection");
     }
+    setMobileSelectionAction(null);
+  };
+
+  const copySelectionText = (text: string, successMessage: string) => {
+    setMobileSelectionAction(null);
+    void copyText(text, successMessage);
   };
 
   const openFilePicker = () => {
@@ -625,6 +746,17 @@ export function TerminalView({
           onSubmitCommand={(command) => enqueueTerminalInput([command, "\r"])}
         />
       ) : null}
+      {mobileSelectionAction ? (
+        <MobileSelectionActions
+          action={mobileSelectionAction}
+          onOpen={openSelectionUrl}
+          onCopyUrl={() => copySelectionText(mobileSelectionAction.url, "Copied URL")}
+          onCopyText={() => copySelectionText(mobileSelectionAction.text, "Copied selection")}
+          onClose={() => {
+            setMobileSelectionAction(null);
+          }}
+        />
+      ) : null}
       {uploadConflict ? (
         <ConfirmDialog
           title="Replace uploaded file?"
@@ -635,6 +767,60 @@ export function TerminalView({
         />
       ) : null}
     </section>
+  );
+}
+
+function MobileSelectionActions({
+  action,
+  onOpen,
+  onCopyUrl,
+  onCopyText,
+  onClose,
+}: {
+  action: MobileSelectionAction;
+  onOpen: () => void;
+  onCopyUrl: () => void;
+  onCopyText: () => void;
+  onClose: () => void;
+}) {
+  const canCopyTextSeparately = action.text !== action.url;
+  const stopInteraction = (event: { stopPropagation: () => void }) => {
+    event.stopPropagation();
+  };
+  return (
+    <div
+      className="terminal-selection-sheet"
+      role="dialog"
+      aria-label="Selected URL actions"
+      onPointerDown={stopInteraction}
+      onPointerUp={stopInteraction}
+      onTouchStart={stopInteraction}
+      onTouchEnd={stopInteraction}
+      onMouseDown={stopInteraction}
+      onMouseUp={stopInteraction}
+      onClick={stopInteraction}
+    >
+      <div className="terminal-selection-url mono">{action.url}</div>
+      <div className="terminal-selection-actions">
+        <button type="button" className="btn btn-primary" onClick={onOpen}>
+          <ExternalLink size={15} />
+          Open
+        </button>
+        <button type="button" className="btn" onClick={onCopyUrl}>
+          <Link size={15} />
+          Copy URL
+        </button>
+        {canCopyTextSeparately ? (
+          <button type="button" className="btn" onClick={onCopyText}>
+            <Copy size={15} />
+            Copy text
+          </button>
+        ) : null}
+        <button type="button" className="icon-btn" aria-label="Close" title="Close" onClick={onClose}>
+          <X size={15} />
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -919,6 +1105,28 @@ function connectionCopy(state: ConnectionState, reason: string | null) {
     case "idle":
     case "attached":
       return "";
+  }
+}
+
+async function copyToClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-10000px";
+  textarea.style.top = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    if (!document.execCommand("copy")) {
+      throw new Error("execCommand copy failed");
+    }
+  } finally {
+    textarea.remove();
   }
 }
 

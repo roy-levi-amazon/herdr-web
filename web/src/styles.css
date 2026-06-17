@@ -1023,12 +1023,59 @@ button {
   white-space: nowrap;
 }
 
+.terminal-selection-sheet {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 6;
+  display: grid;
+  gap: 10px;
+  max-width: 620px;
+  margin: 0 auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 10px;
+  background: color-mix(in srgb, var(--mantle) 94%, black);
+  box-shadow: var(--shadow);
+}
+
+.terminal-selection-url {
+  min-width: 0;
+  max-height: 48px;
+  overflow: hidden;
+  color: var(--subtext0);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.terminal-selection-actions {
+  display: flex;
+  min-width: 0;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.terminal-selection-actions .btn {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  min-height: 34px;
+  padding-inline: 10px;
+}
+
+.terminal-selection-actions .icon-btn {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
 .terminal-mobile-controls {
   display: none;
   flex: 0 0 auto;
   gap: 5px;
-  padding: 6px max(8px, env(safe-area-inset-right)) max(7px, env(safe-area-inset-bottom))
-    max(8px, env(safe-area-inset-left));
+  padding: 6px max(8px, env(safe-area-inset-right)) 7px max(8px, env(safe-area-inset-left));
   border-top: 1px solid var(--line);
   background: color-mix(in srgb, var(--mantle) 94%, black);
 }
@@ -1872,6 +1919,10 @@ button {
   bottom: 122px;
 }
 
+.app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-selection-sheet {
+  bottom: 122px;
+}
+
 .app[data-touch="true"]
   .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"])
   .terminal-overlay {
@@ -1881,5 +1932,11 @@ button {
 .app[data-touch="true"]
   .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"])
   .terminal-upload-status {
+  bottom: 160px;
+}
+
+.app[data-touch="true"]
+  .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"])
+  .terminal-selection-sheet {
   bottom: 160px;
 }

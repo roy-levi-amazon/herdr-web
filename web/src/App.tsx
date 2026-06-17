@@ -22,11 +22,15 @@ import { LaunchDialog } from "./LaunchDialog";
 import { resolveLaunchSpec } from "./launch";
 import type { LaunchTarget } from "./launch";
 import {
+  DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT,
+  DEFAULT_MOBILE_TOUCH_SELECTION,
   DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
+  parseMobileKeyboardHideRefit,
+  parseMobileTouchSelection,
   parseMobileTerminalTapTarget,
 } from "./mobileTerminalPrefs";
 import type { MobileTerminalTapTarget } from "./mobileTerminalPrefs";
-import { addNativeBackHandler } from "./native";
+import { addNativeBackHandler, addNativeKeyboardHideHandler, isNativeAndroid } from "./native";
 import { ActionMenu, ConfirmDialog, RenameDialog, useLongPress } from "./overlays";
 import type { MenuItem } from "./overlays";
 import { TerminalView } from "./TerminalView";
@@ -81,6 +85,8 @@ type DisplayPrefs = {
   activeSpaceId: string | null;
   selectedPaneId: string | null;
   mobileTerminalTapTarget: MobileTerminalTapTarget;
+  mobileTouchSelection: boolean;
+  mobileKeyboardHideRefit: boolean;
 };
 
 const COMPACT_LAYOUT_QUERY = "(max-width: 820px)";
@@ -103,6 +109,8 @@ function readDisplayPrefs(): DisplayPrefs {
     activeSpaceId: null,
     selectedPaneId: null,
     mobileTerminalTapTarget: DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
+    mobileTouchSelection: DEFAULT_MOBILE_TOUCH_SELECTION,
+    mobileKeyboardHideRefit: DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT,
   };
   try {
     const raw = window.localStorage.getItem(DISPLAY_PREFS_KEY);
@@ -137,6 +145,8 @@ function readDisplayPrefs(): DisplayPrefs {
       selectedPaneId:
         typeof parsed.selectedPaneId === "string" ? parsed.selectedPaneId : fallback.selectedPaneId,
       mobileTerminalTapTarget: parseMobileTerminalTapTarget(parsed.mobileTerminalTapTarget),
+      mobileTouchSelection: parseMobileTouchSelection(parsed.mobileTouchSelection),
+      mobileKeyboardHideRefit: parseMobileKeyboardHideRefit(parsed.mobileKeyboardHideRefit),
     };
   } catch {
     return fallback;
@@ -221,6 +231,12 @@ export function App() {
   const [mobileTerminalTapTarget, setMobileTerminalTapTarget] = useState(
     initialPrefs.mobileTerminalTapTarget,
   );
+  const [mobileTouchSelection, setMobileTouchSelection] = useState(
+    initialPrefs.mobileTouchSelection,
+  );
+  const [mobileKeyboardHideRefit, setMobileKeyboardHideRefit] = useState(
+    initialPrefs.mobileKeyboardHideRefit,
+  );
   const [launchTarget, setLaunchTarget] = useState<LaunchTarget | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -228,6 +244,7 @@ export function App() {
   const [terminalFocusToken, setTerminalFocusToken] = useState(0);
   const isCompactLayout = useIsCompactLayout();
   const isTouchInput = useIsTouchInput();
+  const showMobileKeyboardHideRefit = isNativeAndroid();
   const snapshotRef = useRef<Snapshot | null>(null);
   const isCompactLayoutRef = useRef(isCompactLayout);
   const showDetailRef = useRef(showDetail);
@@ -330,6 +347,8 @@ export function App() {
       activeSpaceId,
       selectedPaneId,
       mobileTerminalTapTarget,
+      mobileTouchSelection,
+      mobileKeyboardHideRefit,
     });
   }, [
     scope,
@@ -341,7 +360,29 @@ export function App() {
     activeSpaceId,
     selectedPaneId,
     mobileTerminalTapTarget,
+    mobileTouchSelection,
+    mobileKeyboardHideRefit,
   ]);
+
+  useEffect(() => {
+    if (!mobileKeyboardHideRefit || !showMobileKeyboardHideRefit) {
+      return;
+    }
+
+    const requestRefit = () => setRefitToken((token) => token + 1);
+    return addNativeKeyboardHideHandler(() => {
+      blurActiveTextInput();
+      requestRefit();
+      const frame = window.requestAnimationFrame(requestRefit);
+      const timers = [80, 280].map((delay) => window.setTimeout(requestRefit, delay));
+      window.setTimeout(() => {
+        window.cancelAnimationFrame(frame);
+        for (const timer of timers) {
+          window.clearTimeout(timer);
+        }
+      }, 360);
+    });
+  }, [mobileKeyboardHideRefit, showMobileKeyboardHideRefit]);
 
   useEffect(() => {
     setSidebarWidth((width) => clampSidebarWidth(width));
@@ -1156,6 +1197,7 @@ export function App() {
             focusToken={terminalFocusToken}
             touchInput={isTouchInput}
             mobileTapTarget={mobileTerminalTapTarget}
+            mobileTouchSelection={mobileTouchSelection}
             connectionKey={bridge.connectionKey}
             resumeToken={bridge.resumeToken}
             httpUrl={bridge.httpUrl}
@@ -1172,6 +1214,7 @@ export function App() {
             scrollSensitivity={isTouchInput ? 2 : 0.4}
             mobileControls={isTouchInput}
             mobileTapTarget={mobileTerminalTapTarget}
+            mobileTouchSelection={mobileTouchSelection}
             refitToken={refitToken}
             focusToken={terminalFocusToken}
           />
@@ -1228,6 +1271,11 @@ export function App() {
           showMobileTerminalSettings={isTouchInput}
           mobileTerminalTapTarget={mobileTerminalTapTarget}
           onMobileTerminalTapTarget={setMobileTerminalTapTarget}
+          mobileTouchSelection={mobileTouchSelection}
+          onMobileTouchSelection={setMobileTouchSelection}
+          showMobileKeyboardHideRefit={showMobileKeyboardHideRefit}
+          mobileKeyboardHideRefit={mobileKeyboardHideRefit}
+          onMobileKeyboardHideRefit={setMobileKeyboardHideRefit}
           onClose={() => setBackendSettingsOpen(false)}
         />
       ) : null}
@@ -1384,6 +1432,7 @@ function SplitGrid({
   focusToken,
   touchInput,
   mobileTapTarget,
+  mobileTouchSelection,
   connectionKey,
   resumeToken,
   httpUrl,
@@ -1396,6 +1445,7 @@ function SplitGrid({
   focusToken: number;
   touchInput: boolean;
   mobileTapTarget: MobileTerminalTapTarget;
+  mobileTouchSelection: boolean;
   connectionKey: string;
   resumeToken: number;
   httpUrl: (path: string, query?: URLSearchParams) => string;
@@ -1423,6 +1473,7 @@ function SplitGrid({
               scrollSensitivity={touchInput ? 2 : 0.4}
               mobileControls={selected && touchInput}
               mobileTapTarget={mobileTapTarget}
+              mobileTouchSelection={mobileTouchSelection}
               refitToken={selected ? refitToken : 0}
               focusToken={selected ? focusToken : 0}
             />
@@ -2370,6 +2421,21 @@ function selectionPaneId(event: MessageEvent) {
       : null;
   } catch {
     return null;
+  }
+}
+
+function blurActiveTextInput() {
+  const element = document.activeElement;
+  if (!(element instanceof HTMLElement)) {
+    return;
+  }
+  if (
+    element instanceof HTMLInputElement ||
+    element instanceof HTMLTextAreaElement ||
+    element instanceof HTMLSelectElement ||
+    element.isContentEditable
+  ) {
+    element.blur();
   }
 }
 
