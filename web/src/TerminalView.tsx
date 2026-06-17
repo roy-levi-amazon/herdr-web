@@ -251,6 +251,8 @@ export function TerminalView({
     let connectTimer: number | null = null;
     let reconnectAttempts = 0;
     let lastCloseReason: string | null = null;
+    let rendererReady = false;
+    let pendingData: Uint8Array[] = [];
     const renderer: TerminalRenderer = new GhosttyRenderer();
     rendererRef.current = renderer;
     setConnectionState("connecting");
@@ -262,12 +264,139 @@ export function TerminalView({
     };
     sendResizeRef.current = sendResize;
 
+    const scheduleReconnect = () => {
+      if (disposed || reconnectTimer !== null) {
+        return;
+      }
+      const delay = Math.min(500 * 2 ** reconnectAttempts, 5000);
+      reconnectAttempts += 1;
+      setConnectionState("connecting");
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        connectSocket();
+      }, delay);
+    };
+
+    const clearConnectTimer = () => {
+      if (connectTimer !== null) {
+        window.clearTimeout(connectTimer);
+        connectTimer = null;
+          }
+        };
+
+    const retryStalledConnect = (stalledSocket: WebSocket) => {
+      if (
+        disposed ||
+        socket !== stalledSocket ||
+        stalledSocket.readyState !== WebSocket.CONNECTING
+      ) {
+        return;
+      }
+      socket = null;
+      if (socketRef.current === stalledSocket) {
+        socketRef.current = null;
+      }
+      stalledSocket.close();
+      scheduleReconnect();
+    };
+
+    const connectSocket = () => {
+      if (disposed) {
+        return;
+      }
+      clearConnectTimer();
+      const initialSize = measureTerminal(renderer) ?? { cols: 80, rows: 24 };
+      const nextSocket = new WebSocket(
+        terminalSocketUrl(wsUrl, pane.terminal_id, initialSize),
+      );
+      socket = nextSocket;
+      socketRef.current = nextSocket;
+      nextSocket.binaryType = "arraybuffer";
+      connectTimer = window.setTimeout(
+        () => retryStalledConnect(nextSocket),
+        TERMINAL_CONNECT_TIMEOUT_MS,
+      );
+
+      nextSocket.addEventListener("open", () => {
+        if (!disposed && socket === nextSocket) {
+          clearConnectTimer();
+          reconnectAttempts = 0;
+          lastCloseReason = null;
+          setCloseReason(null);
+          setConnectionState("attached");
+          const size = measureTerminal(renderer);
+          if (size) {
+            sendResize(size);
+          }
+          if (autoFocusRef.current && rendererReady) {
+            window.setTimeout(() => renderer.focus(), 0);
+          }
+        }
+      });
+      nextSocket.addEventListener("message", (event) => {
+        if (typeof event.data === "string") {
+          lastCloseReason = parseCloseReason(event.data) ?? lastCloseReason;
+          return;
+        }
+        if (event.data instanceof ArrayBuffer) {
+          if (rendererReady) {
+            renderer.write(new Uint8Array(event.data));
+          } else {
+            pendingData.push(new Uint8Array(event.data));
+          }
+          return;
+        }
+        if (event.data instanceof Blob) {
+          void event.data.arrayBuffer().then((buffer) => {
+            if (!disposed && socket === nextSocket) {
+              if (rendererReady) {
+                renderer.write(new Uint8Array(buffer));
+              } else {
+                pendingData.push(new Uint8Array(buffer));
+              }
+            }
+          });
+        }
+      });
+      nextSocket.addEventListener("close", () => {
+        if (!disposed && socket === nextSocket) {
+          clearConnectTimer();
+          if (lastCloseReason) {
+            console.warn("terminal websocket closed", lastCloseReason);
+          }
+          if (isNonRetryableAttachClose(lastCloseReason)) {
+            setCloseReason(lastCloseReason);
+            setConnectionState("closed");
+          } else {
+            scheduleReconnect();
+          }
+        }
+      });
+      nextSocket.addEventListener("error", () => {
+        if (!disposed && socket === nextSocket) {
+          clearConnectTimer();
+          setConnectionState("error");
+        }
+      });
+    };
+
+    // Start WS connection immediately (in parallel with renderer mount)
+    connectSocket();
+
+    // Mount renderer in parallel
     void renderer
       .mount(host)
       .then(() => {
         if (disposed) {
           return;
         }
+        rendererReady = true;
+
+        // Flush buffered data
+        for (const chunk of pendingData) {
+          renderer.write(chunk);
+        }
+        pendingData = [];
 
         renderer.setScrollSensitivity(scrollSensitivityRef.current);
         renderer.setTapFocusHandler(
@@ -320,119 +449,10 @@ export function TerminalView({
           });
         }
 
-        const scheduleReconnect = () => {
-          if (disposed || reconnectTimer !== null) {
-            return;
-          }
-          const delay = Math.min(500 * 2 ** reconnectAttempts, 5000);
-          reconnectAttempts += 1;
-          setConnectionState("connecting");
-          reconnectTimer = window.setTimeout(() => {
-            reconnectTimer = null;
-            connectSocket();
-          }, delay);
-        };
-
-        const clearConnectTimer = () => {
-          if (connectTimer !== null) {
-            window.clearTimeout(connectTimer);
-            connectTimer = null;
-          }
-        };
-
-        const retryStalledConnect = (stalledSocket: WebSocket) => {
-          if (
-            disposed ||
-            socket !== stalledSocket ||
-            stalledSocket.readyState !== WebSocket.CONNECTING
-          ) {
-            return;
-          }
-          socket = null;
-          if (socketRef.current === stalledSocket) {
-            socketRef.current = null;
-          }
-          stalledSocket.close();
-          scheduleReconnect();
-        };
-
-        const connectSocket = () => {
-          if (disposed) {
-            return;
-          }
-          clearConnectTimer();
-          const initialSize = measureTerminal(renderer);
-          if (!initialSize) {
-            scheduleReconnect();
-            return;
-          }
-          const nextSocket = new WebSocket(
-            terminalSocketUrl(wsUrl, pane.terminal_id, initialSize),
-          );
-          socket = nextSocket;
-          socketRef.current = nextSocket;
-          nextSocket.binaryType = "arraybuffer";
-          connectTimer = window.setTimeout(
-            () => retryStalledConnect(nextSocket),
-            TERMINAL_CONNECT_TIMEOUT_MS,
-          );
-
-          nextSocket.addEventListener("open", () => {
-            if (!disposed && socket === nextSocket) {
-              clearConnectTimer();
-              reconnectAttempts = 0;
-              lastCloseReason = null;
-              setCloseReason(null);
-              setConnectionState("attached");
-              const size = measureTerminal(renderer);
-              if (size) {
-                sendResize(size);
-              }
-              if (autoFocusRef.current) {
-                window.setTimeout(() => renderer.focus(), 0);
-              }
-            }
-          });
-          nextSocket.addEventListener("message", (event) => {
-            if (typeof event.data === "string") {
-              lastCloseReason = parseCloseReason(event.data) ?? lastCloseReason;
-              return;
-            }
-            if (event.data instanceof ArrayBuffer) {
-              renderer.write(new Uint8Array(event.data));
-              return;
-            }
-            if (event.data instanceof Blob) {
-              void event.data.arrayBuffer().then((buffer) => {
-                if (!disposed && socket === nextSocket) {
-                  renderer.write(new Uint8Array(buffer));
-                }
-              });
-            }
-          });
-          nextSocket.addEventListener("close", () => {
-            if (!disposed && socket === nextSocket) {
-              clearConnectTimer();
-              if (lastCloseReason) {
-                console.warn("terminal websocket closed", lastCloseReason);
-              }
-              if (isNonRetryableAttachClose(lastCloseReason)) {
-                setCloseReason(lastCloseReason);
-                setConnectionState("closed");
-              } else {
-                scheduleReconnect();
-              }
-            }
-          });
-          nextSocket.addEventListener("error", () => {
-            if (!disposed && socket === nextSocket) {
-              clearConnectTimer();
-              setConnectionState("error");
-            }
-          });
-        };
-
-        connectSocket();
+        // Focus if socket is already open
+        if (autoFocusRef.current && socket?.readyState === WebSocket.OPEN) {
+          window.setTimeout(() => renderer.focus(), 0);
+        }
       })
       .catch((error: unknown) => {
         console.error("failed to mount terminal renderer", error);
