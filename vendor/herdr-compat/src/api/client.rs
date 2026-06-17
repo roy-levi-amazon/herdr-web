@@ -5,6 +5,7 @@
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use interprocess::local_socket::traits::Stream as _;
@@ -31,9 +32,12 @@ impl ConnectionTarget {
 }
 
 /// Reusable client for Herdr's newline-delimited JSON API.
+///
+/// Maintains a small pool of pre-connected sockets to amortize connection setup.
 #[derive(Debug, Clone)]
 pub struct ApiClient {
     target: ConnectionTarget,
+    pool: Arc<Mutex<Vec<LocalStream>>>,
 }
 
 impl ApiClient {
@@ -42,7 +46,10 @@ impl ApiClient {
     }
 
     pub fn for_target(target: ConnectionTarget) -> Self {
-        Self { target }
+        Self {
+            target,
+            pool: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 
     pub fn socket_path(&self) -> PathBuf {
@@ -143,7 +150,26 @@ impl ApiClient {
     }
 
     fn connect(&self) -> io::Result<LocalStream> {
+        if let Ok(mut pool) = self.pool.lock() {
+            if let Some(stream) = pool.pop() {
+                return Ok(stream);
+            }
+        }
         crate::ipc::connect_local_stream(&self.socket_path())
+    }
+
+    /// Pre-connect sockets in the background to reduce latency on the next request.
+    pub fn replenish_pool(&self, count: usize) {
+        let Ok(mut pool) = self.pool.lock() else {
+            return;
+        };
+        let target_size = count.min(8);
+        while pool.len() < target_size {
+            match crate::ipc::connect_local_stream(&self.socket_path()) {
+                Ok(stream) => pool.push(stream),
+                Err(_) => break,
+            }
+        }
     }
 }
 
@@ -215,7 +241,7 @@ impl From<serde_json::Error> for ApiClientError {
 }
 
 fn write_request(stream: &mut LocalStream, request: &Request) -> Result<(), ApiClientError> {
-    stream.write_all(serde_json::to_string(request)?.as_bytes())?;
+    serde_json::to_writer(&mut *stream, request)?;
     stream.write_all(b"\n")?;
     stream.flush()?;
     Ok(())
