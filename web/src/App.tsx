@@ -91,12 +91,50 @@ type DisplayPrefs = {
 
 const COMPACT_LAYOUT_QUERY = "(max-width: 820px)";
 const TOUCH_INPUT_QUERY = "(hover: none) and (pointer: coarse)";
+const MAX_CACHED_TERMINALS = 8;
 const DISPLAY_PREFS_KEY = "herdr.mobileWeb.displayPrefs.v1";
 const MOBILE_SIDEBAR_HISTORY_KEY = "herdrWebMobileSidebar";
 const MOBILE_DETAIL_HISTORY_KEY = "herdrWebMobileDetail";
 const DEFAULT_SIDEBAR_WIDTH = 320;
 const MIN_SIDEBAR_WIDTH = 260;
 const MAX_SIDEBAR_WIDTH = 560;
+
+function useCachedPaneIds(
+  activePaneId: string | null,
+  snapshot: Snapshot | null,
+): string[] {
+  const [cache, setCache] = useState<string[]>([]);
+  const cacheRef = useRef(cache);
+  cacheRef.current = cache;
+
+  useEffect(() => {
+    if (!activePaneId) {
+      return;
+    }
+    setCache((prev) => {
+      const next = [activePaneId, ...prev.filter((id) => id !== activePaneId)];
+      return next.length > MAX_CACHED_TERMINALS ? next.slice(0, MAX_CACHED_TERMINALS) : next;
+    });
+  }, [activePaneId]);
+
+  useEffect(() => {
+    if (!snapshot) {
+      return;
+    }
+    const activePaneIds = new Set(snapshot.panes.map((p) => p.pane_id));
+    setCache((prev) => {
+      // Seed cache with all panes from snapshot if empty
+      if (prev.length === 0) {
+        const all = snapshot.panes.map((p) => p.pane_id);
+        return all.length > MAX_CACHED_TERMINALS ? all.slice(0, MAX_CACHED_TERMINALS) : all;
+      }
+      const next = prev.filter((id) => activePaneIds.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [snapshot]);
+
+  return cache;
+}
 
 function readDisplayPrefs(): DisplayPrefs {
   const fallback: DisplayPrefs = {
@@ -437,6 +475,8 @@ export function App() {
     [],
   );
 
+  const refreshRef = useRef<(() => void) | null>(null);
+
   useEffect(() => {
     let disposed = false;
     if (connectionKeyRef.current !== bridge.connectionKey) {
@@ -452,6 +492,7 @@ export function App() {
       setSelectedPaneId(null);
       setActiveSpaceId(null);
       setLoadState("ready");
+      refreshRef.current = null;
       return () => {
         disposed = true;
       };
@@ -466,9 +507,37 @@ export function App() {
         setLoadState,
         () => disposed,
       );
-    void refresh();
-    const interval = window.setInterval(refresh, 10000);
-    const events = openEventsSocket(bridge.wsUrl, "/ws/events", () => void refresh());
+    refreshRef.current = refresh;
+    // Fetch initial snapshot via HTTP as fallback if WS push hasn't arrived within 500ms
+    const initialFetchTimer = window.setTimeout(() => {
+      if (!snapshotRef.current) {
+        void refresh();
+      }
+    }, 500);
+    // Fallback polling at 30s (snapshots are pushed over WS, so this is just a safety net)
+    const interval = window.setInterval(refresh, 30000);
+    const SNAPSHOT_PREFIX = '{"type":"snapshot","data":';
+    const events = openEventsSocket(bridge.wsUrl, "/ws/events", (event) => {
+      if (typeof event.data !== "string") {
+        return;
+      }
+      const msg = event.data as string;
+      if (msg.startsWith(SNAPSHOT_PREFIX)) {
+        if (msg === lastSnapshotRaw) {
+          return;
+        }
+        lastSnapshotRaw = msg;
+        try {
+          const parsed = JSON.parse(msg) as { data: Snapshot };
+          setSnapshot(parsed.data);
+          setSnapshotConnectionKey(bridge.connectionKey);
+          setLoadState("ready");
+        } catch {
+          // malformed
+        }
+        return;
+      }
+    });
     const uiEvents = openEventsSocket(bridge.wsUrl, "/ws/ui-events", (event) => {
       const paneId = selectionPaneId(event);
       if (paneId) {
@@ -478,15 +547,22 @@ export function App() {
           setActiveSpaceId(pane.workspace_id);
         }
       }
-      void refresh();
     });
     return () => {
       disposed = true;
+      refreshRef.current = null;
       events?.close();
       uiEvents?.close();
       window.clearInterval(interval);
+      window.clearTimeout(initialFetchTimer);
     };
-  }, [bridge.canConnect, bridge.connectionKey, bridge.httpUrl, bridge.resumeToken, bridge.wsUrl]);
+  }, [bridge.canConnect, bridge.connectionKey, bridge.httpUrl, bridge.wsUrl]);
+
+  useEffect(() => {
+    if (bridge.resumeToken > 0) {
+      refreshRef.current?.();
+    }
+  }, [bridge.resumeToken]);
 
   useEffect(() => {
     if (!error) {
@@ -873,11 +949,12 @@ export function App() {
     const requestConnectionKey = bridge.connectionKey;
     setLoadState("loading");
     void fetchSnapshot(bridge.httpUrl)
-      .then((next) => {
+      .then(({ snapshot, raw }) => {
         if (!isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
           return;
         }
-        setSnapshot(next);
+        lastSnapshotRaw = raw;
+        setSnapshot(snapshot);
         setSnapshotConnectionKey(requestConnectionKey);
         setLoadState("ready");
       })
@@ -893,10 +970,11 @@ export function App() {
     setBusy(true);
     try {
       const result = await action();
-      const next = await fetchSnapshot(bridge.httpUrl);
+      const { snapshot: next, raw } = await fetchSnapshot(bridge.httpUrl);
       if (!isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
         return false;
       }
+      lastSnapshotRaw = raw;
       setSnapshot(next);
       setSnapshotConnectionKey(requestConnectionKey);
       setLoadState("ready");
@@ -1006,6 +1084,7 @@ export function App() {
   };
 
   const renderTerminal = !isCompactLayout || showDetail;
+  const cachedPaneIds = useCachedPaneIds(resolvedPaneId, snapshot);
   const appStyle = { "--sidebar-w": `${sidebarWidth}px` } as CSSProperties &
     Record<"--sidebar-w", string>;
 
@@ -1204,8 +1283,10 @@ export function App() {
             wsUrl={bridge.wsUrl}
           />
         ) : renderTerminal ? (
-          <TerminalView
-            pane={selectedPane}
+          <TerminalStack
+            cachedPaneIds={cachedPaneIds}
+            activePaneId={resolvedPaneId}
+            panes={snapshot?.panes ?? []}
             connectionKey={bridge.connectionKey}
             resumeToken={bridge.resumeToken}
             httpUrl={bridge.httpUrl}
@@ -1422,6 +1503,73 @@ function isShortcutTextEntryTarget(target: EventTarget | null) {
 
 function hasOpenModal() {
   return document.querySelector(".overlay-root [role='dialog']") !== null;
+}
+
+function TerminalStack({
+  cachedPaneIds,
+  activePaneId,
+  panes,
+  connectionKey,
+  resumeToken,
+  httpUrl,
+  wsUrl,
+  autoFocus,
+  scrollSensitivity,
+  mobileControls,
+  mobileTapTarget,
+  mobileTouchSelection,
+  refitToken,
+  focusToken,
+}: {
+  cachedPaneIds: string[];
+  activePaneId: string | null;
+  panes: PaneInfo[];
+  connectionKey: string;
+  resumeToken: number;
+  httpUrl: (path: string, query?: URLSearchParams) => string;
+  wsUrl: (path: string, query?: URLSearchParams) => string;
+  autoFocus: boolean;
+  scrollSensitivity: number;
+  mobileControls: boolean;
+  mobileTapTarget: MobileTerminalTapTarget;
+  mobileTouchSelection: boolean;
+  refitToken: number;
+  focusToken: number;
+}) {
+  if (cachedPaneIds.length === 0) {
+    return <div className="terminal-stage" aria-hidden="true" />;
+  }
+  return (
+    <div className="terminal-stack">
+      {cachedPaneIds.map((paneId) => {
+        const active = paneId === activePaneId;
+        const pane = panes.find((p) => p.pane_id === paneId) ?? null;
+        return (
+          <div
+            key={paneId}
+            className="terminal-stack-layer"
+            data-active={active}
+            aria-hidden={!active}
+          >
+            <TerminalView
+              pane={pane}
+              connectionKey={connectionKey}
+              resumeToken={resumeToken}
+              httpUrl={httpUrl}
+              wsUrl={wsUrl}
+              autoFocus={active && autoFocus}
+              scrollSensitivity={scrollSensitivity}
+              mobileControls={active && mobileControls}
+              mobileTapTarget={mobileTapTarget}
+              mobileTouchSelection={mobileTouchSelection}
+              refitToken={active ? refitToken : 0}
+              focusToken={active ? focusToken : 0}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function SplitGrid({
@@ -2374,7 +2522,8 @@ async function fetchSnapshot(httpUrl: (path: string, query?: URLSearchParams) =>
   if (!response.ok) {
     throw new Error(`snapshot failed: ${response.status}`);
   }
-  return (await response.json()) as Snapshot;
+  const text = await response.text();
+  return { snapshot: JSON.parse(text) as Snapshot, raw: text };
 }
 
 async function syncSelectedPane(
@@ -2391,6 +2540,8 @@ async function syncSelectedPane(
   }
 }
 
+let lastSnapshotRaw: string | null = null;
+
 async function refreshSnapshot(
   httpUrl: (path: string, query?: URLSearchParams) => string,
   setSnapshot: (snapshot: Snapshot) => void,
@@ -2398,9 +2549,12 @@ async function refreshSnapshot(
   isDisposed: () => boolean,
 ) {
   try {
-    const next = await fetchSnapshot(httpUrl);
+    const { snapshot, raw } = await fetchSnapshot(httpUrl);
     if (!isDisposed()) {
-      setSnapshot(next);
+      if (raw !== lastSnapshotRaw) {
+        lastSnapshotRaw = raw;
+        setSnapshot(snapshot);
+      }
       setLoadState("ready");
     }
   } catch {
