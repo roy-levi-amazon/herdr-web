@@ -16,7 +16,7 @@ const TAP_URL_PATTERN =
   /(?:https?:\/\/|mailto:|ftp:\/\/|ssh:\/\/|git:\/\/|tel:|magnet:|gemini:\/\/|gopher:\/\/|news:)[\w\-.~:/?#@!$&*+,;=%]+/giu;
 const TAP_URL_TRAILING_PUNCTUATION = /[.,;!?)\]]+$/u;
 
-const ghosttyReady = init();
+let ghosttyReady: ReturnType<typeof init> | null = null;
 
 export type TerminalSize = {
   cols: number;
@@ -80,6 +80,9 @@ export class GhosttyRenderer implements TerminalRenderer {
   #textInputTapGraceUntil = 0;
 
   async mount(container: HTMLElement) {
+    if (!ghosttyReady) {
+      ghosttyReady = init();
+    }
     await ghosttyReady;
 
     this.#container = container;
