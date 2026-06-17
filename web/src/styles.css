@@ -944,6 +944,31 @@ button {
   display: block;
 }
 
+.terminal-stack {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.terminal-stack-layer {
+  position: absolute;
+  inset: 0;
+  display: none;
+}
+
+.terminal-stack-layer[data-active="true"] {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
 .terminal-host .ghostty-hidden-input {
   position: fixed !important;
   left: -10000px !important;
