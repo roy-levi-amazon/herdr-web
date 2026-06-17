@@ -5,9 +5,11 @@ use std::io::{self, ErrorKind, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
+
+use tokio::sync::OnceCell;
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -64,8 +66,12 @@ struct BridgeState {
     api: ApiClient,
     client_socket_path: PathBuf,
     request_policy: RequestPolicy,
-    terminal_sessions: Arc<Mutex<HashMap<String, SharedTerminalSession>>>,
+    terminal_sessions: Arc<Mutex<HashMap<String, Arc<OnceCell<SharedTerminalSession>>>>>,
     selected_pane_id: Arc<Mutex<Option<String>>>,
+    layout_cache: Arc<RwLock<Vec<PaneLayoutSnapshot>>>,
+    snapshot_cache: Arc<RwLock<Option<String>>>,
+    snapshot_tx: tokio::sync::broadcast::Sender<Arc<str>>,
+    daemon_event_tx: tokio::sync::broadcast::Sender<String>,
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
     upload_dir: PathBuf,
 }
@@ -149,7 +155,7 @@ fn default_scroll_lines() -> u16 {
 
 #[derive(Debug, Clone)]
 enum TerminalOutput {
-    Bytes(Vec<u8>),
+    Bytes(Bytes),
     Close(String),
 }
 
@@ -407,15 +413,23 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         protocol = daemon_protocol,
         "herdr-web bridge connected to compatible Herdr daemon"
     );
+    let daemon_event_tx = tokio::sync::broadcast::channel(256).0;
+    let snapshot_tx = tokio::sync::broadcast::channel::<Arc<str>>(16).0;
+    spawn_daemon_event_loop(api.clone(), daemon_event_tx.clone());
     let state = BridgeState {
         api,
         client_socket_path: crate::session::active_client_socket_path(),
         request_policy: request_policy.clone(),
         terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
         selected_pane_id: Arc::new(Mutex::new(None)),
+        layout_cache: Arc::new(RwLock::new(Vec::new())),
+        snapshot_cache: Arc::new(RwLock::new(None)),
+        snapshot_tx: snapshot_tx.clone(),
+        daemon_event_tx,
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
         upload_dir: options.upload_dir.clone(),
     };
+    spawn_snapshot_refresh_loop(state.clone());
     let app = Router::new()
         .route(
             "/api/snapshot",
@@ -446,6 +460,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             add_security_headers,
         ))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
+        .layer(tower_http::compression::CompressionLayer::new())
         .with_state(state);
     let bind = format!("{}:{}", options.host, options.port);
     let listener = tokio::net::TcpListener::bind(&bind).await?;
@@ -1099,13 +1114,15 @@ async fn command_handler(
     let mut request: Request = serde_json::from_value(request_value)
         .map_err(|err| BridgeError::BadRequest(format!("invalid command: {err}")))?;
     validate_web_command(&request.method)?;
-    fill_clear_rename_labels(&state.api, &mut request.method)?;
     let should_prune_terminal_sessions = command_may_close_terminal_session(&request.method);
 
     let api = state.api.clone();
-    let response = tokio::task::spawn_blocking(move || api.request(request))
-        .await
-        .map_err(|err| BridgeError::Protocol(err.to_string()))??;
+    let response = tokio::task::spawn_blocking(move || {
+        fill_clear_rename_labels(&api, &mut request.method)?;
+        api.request(request).map_err(BridgeError::from)
+    })
+    .await
+    .map_err(|err| BridgeError::Protocol(err.to_string()))??;
     let value = serde_json::to_value(response.result)
         .map_err(|err| BridgeError::Protocol(err.to_string()))?;
     if should_prune_terminal_sessions {
@@ -1181,20 +1198,16 @@ async fn selection_handler(
     Json(body): Json<SelectionRequest>,
 ) -> Result<Json<serde_json::Value>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
-    let pane_id = body.pane_id.trim();
+    let pane_id = body.pane_id.trim().to_string();
     if pane_id.is_empty() {
         return Err(BridgeError::BadRequest("missing pane_id".to_string()));
-    }
-    let panes = current_panes(&state.api)?;
-    if !panes.iter().any(|pane| pane.pane_id == pane_id) {
-        return Err(BridgeError::Protocol(format!("pane not found: {pane_id}")));
     }
     {
         let mut selected = state
             .selected_pane_id
             .lock()
             .map_err(|_| BridgeError::Protocol("selection lock poisoned".to_string()))?;
-        *selected = Some(pane_id.to_string());
+        *selected = Some(pane_id.clone());
     }
     let _ = state.ui_event_tx.send(
         serde_json::json!({
@@ -1310,8 +1323,24 @@ async fn upload_handler(
 async fn snapshot_handler(
     State(state): State<BridgeState>,
     headers: HeaderMap,
-) -> Result<Json<Snapshot>, BridgeError> {
+) -> Result<Response, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
+    if let Ok(cache) = state.snapshot_cache.read() {
+        if let Some(ref json) = *cache {
+            return Ok((
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                json.clone(),
+            )
+                .into_response());
+        }
+    }
+    let snapshot = tokio::task::spawn_blocking(move || build_snapshot(&state))
+        .await
+        .map_err(|err| BridgeError::Protocol(err.to_string()))??;
+    Ok(Json(snapshot).into_response())
+}
+
+fn build_snapshot(state: &BridgeState) -> Result<Snapshot, BridgeError> {
     let workspaces = match api_request(
         &state.api,
         "herdr-web:workspace-list",
@@ -1337,8 +1366,17 @@ async fn snapshot_handler(
         }
     };
     let panes = current_panes(&state.api)?;
-    let layouts = collect_tab_layouts(&state.api, &tabs, &panes);
-    let selected_pane_id = shared_selected_pane(&state, &panes)?;
+    let cached_layouts = state.layout_cache.read().ok().map(|c| c.clone());
+    let layouts = if needs_layout_rebuild(&tabs, &panes, cached_layouts.as_deref()) {
+        let fresh = collect_tab_layouts(&state.api, &tabs, &panes);
+        if let Ok(mut cache) = state.layout_cache.write() {
+            *cache = fresh.clone();
+        }
+        fresh
+    } else {
+        cached_layouts.unwrap_or_default()
+    };
+    let selected_pane_id = shared_selected_pane(state, &panes)?;
     let workspaces = workspaces
         .into_iter()
         .map(|workspace| {
@@ -1361,13 +1399,14 @@ async fn snapshot_handler(
         })
         .collect();
 
-    Ok(Json(Snapshot {
+    state.api.replenish_pool(4);
+    Ok(Snapshot {
         workspaces,
         tabs,
         panes,
         layouts,
         selected_pane_id,
-    }))
+    })
 }
 
 fn is_default_tab_label(label: &str) -> bool {
@@ -1425,26 +1464,60 @@ fn api_request(api: &ApiClient, id: &str, method: Method) -> Result<ResponseResu
         .result)
 }
 
+fn needs_layout_rebuild(
+    tabs: &[TabInfo],
+    panes: &[PaneInfo],
+    cached: Option<&[PaneLayoutSnapshot]>,
+) -> bool {
+    let Some(cached) = cached else {
+        return true;
+    };
+    if cached.is_empty() && !tabs.is_empty() {
+        return true;
+    }
+    if cached.len() != tabs.len() {
+        return true;
+    }
+    let cached_pane_count: usize = cached.iter().map(|l| l.panes.len()).sum();
+    cached_pane_count != panes.len()
+}
+
 fn collect_tab_layouts(
     api: &ApiClient,
     tabs: &[TabInfo],
     panes: &[PaneInfo],
 ) -> Vec<PaneLayoutSnapshot> {
-    tabs.iter()
+    let requests: Vec<_> = tabs
+        .iter()
         .filter_map(|tab| {
             let pane = panes.iter().find(|pane| pane.tab_id == tab.tab_id)?;
-            match api_request(
-                api,
-                &format!("herdr-web:layout:{}", tab.tab_id),
-                Method::PaneLayout(PaneLayoutParams {
-                    pane_id: Some(pane.pane_id.clone()),
-                }),
-            ) {
-                Ok(ResponseResult::PaneLayout { layout }) => Some(layout),
-                Ok(_) | Err(_) => None,
-            }
+            Some((tab.tab_id.clone(), pane.pane_id.clone()))
         })
-        .collect()
+        .collect();
+
+    thread::scope(|s| {
+        let handles: Vec<_> = requests
+            .iter()
+            .map(|(tab_id, pane_id)| {
+                s.spawn(move || {
+                    match api_request(
+                        api,
+                        &format!("herdr-web:layout:{tab_id}"),
+                        Method::PaneLayout(PaneLayoutParams {
+                            pane_id: Some(pane_id.clone()),
+                        }),
+                    ) {
+                        Ok(ResponseResult::PaneLayout { layout }) => Some(layout),
+                        Ok(_) | Err(_) => None,
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok().flatten())
+            .collect()
+    })
 }
 
 async fn terminal_ws_handler(
@@ -1485,29 +1558,76 @@ async fn ui_events_ws_handler(
 }
 
 async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
-    let api = state.api.clone();
-    let mut ui_event_rx = state.ui_event_tx.subscribe();
-    let subscribed = tokio::task::spawn_blocking(move || open_event_subscription(api)).await;
-    let Ok(Ok(mut event_rx)) = subscribed else {
-        return;
-    };
+    let daemon_event_rx = state.daemon_event_tx.subscribe();
+    let ui_event_rx = state.ui_event_tx.subscribe();
+    let snapshot_rx = state.snapshot_tx.subscribe();
 
-    let (mut ws_sender, mut ws_receiver) = socket.split();
+    let (mut ws_sender, ws_receiver) = socket.split();
+
+    // Send current cached snapshot immediately so the client doesn't need an HTTP fetch
+    let initial_snapshot = state
+        .snapshot_cache
+        .read()
+        .ok()
+        .and_then(|cache| cache.as_ref().map(|json| format!(r#"{{"type":"snapshot","data":{json}}}"#)));
+    if let Some(msg) = initial_snapshot {
+        if ws_sender.send(Message::Text(msg.into())).await.is_err() {
+            return;
+        }
+    }
+
+    handle_events_socket_loop(
+        ws_sender,
+        ws_receiver,
+        daemon_event_rx,
+        ui_event_rx,
+        snapshot_rx,
+        state,
+    )
+    .await;
+}
+
+async fn handle_events_socket_loop(
+    mut ws_sender: futures_util::stream::SplitSink<WebSocket, Message>,
+    mut ws_receiver: futures_util::stream::SplitStream<WebSocket>,
+    mut daemon_event_rx: tokio::sync::broadcast::Receiver<String>,
+    mut ui_event_rx: tokio::sync::broadcast::Receiver<String>,
+    mut snapshot_rx: tokio::sync::broadcast::Receiver<Arc<str>>,
+    state: BridgeState,
+) {
     loop {
         tokio::select! {
-            Some(event) = event_rx.recv() => {
-                if event_may_close_terminal_session(&event) {
-                    let prune_state = state.clone();
-                    tokio::task::spawn_blocking(move || prune_detached_terminal_sessions(&prune_state));
-                }
-                if ws_sender.send(Message::Text(event.into())).await.is_err() {
-                    break;
+            event = daemon_event_rx.recv() => {
+                match event {
+                    Ok(event) => {
+                        if event_may_close_terminal_session(&event) {
+                            let prune_state = state.clone();
+                            tokio::task::spawn_blocking(move || prune_detached_terminal_sessions(&prune_state));
+                        }
+                        if ws_sender.send(Message::Text(event.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
             event = ui_event_rx.recv() => {
                 match event {
                     Ok(event) => {
                         if ws_sender.send(Message::Text(event.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            snapshot = snapshot_rx.recv() => {
+                match snapshot {
+                    Ok(json) => {
+                        let msg = format!(r#"{{"type":"snapshot","data":{json}}}"#);
+                        if ws_sender.send(Message::Text(msg.into())).await.is_err() {
                             break;
                         }
                     }
@@ -1596,23 +1716,41 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
         cell_height_px: 0,
     });
 
+    let batch_interval = tokio::time::interval(Duration::from_millis(16));
+    tokio::pin!(batch_interval);
+    let mut pending_bytes: Vec<Bytes> = Vec::new();
+
     loop {
         tokio::select! {
             output = terminal_rx.recv() => {
                 match output {
-                    Ok(output) => match output {
-                    TerminalOutput::Bytes(bytes) => {
-                        if ws_sender.send(Message::Binary(bytes.into())).await.is_err() {
-                            break;
-                        }
+                    Ok(TerminalOutput::Bytes(bytes)) => {
+                        pending_bytes.push(bytes);
                     }
-                    TerminalOutput::Close(reason) => {
+                    Ok(TerminalOutput::Close(reason)) => {
                         let _ = ws_sender.send(Message::Text(close_message(&reason).into())).await;
                         break;
                     }
-                    },
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            _ = batch_interval.tick() => {
+                if !pending_bytes.is_empty() {
+                    let batch = if pending_bytes.len() == 1 {
+                        pending_bytes.pop().unwrap()
+                    } else {
+                        let total: usize = pending_bytes.iter().map(|b| b.len()).sum();
+                        let mut merged = Vec::with_capacity(total);
+                        for chunk in pending_bytes.drain(..) {
+                            merged.extend_from_slice(&chunk);
+                        }
+                        Bytes::from(merged)
+                    };
+                    pending_bytes.clear();
+                    if ws_sender.send(Message::Binary(batch)).await.is_err() {
+                        break;
+                    }
                 }
             }
             Some(message) = ws_receiver.next() => {
@@ -1644,36 +1782,40 @@ async fn acquire_terminal_session(
     rows: u16,
     takeover: bool,
 ) -> Result<SharedTerminalSession, BridgeError> {
-    tokio::task::spawn_blocking(move || {
+    let cell = {
         let mut sessions = state
             .terminal_sessions
             .lock()
             .map_err(|_| BridgeError::Protocol("terminal session lock poisoned".to_string()))?;
-        if let Some(session) = sessions.get(&terminal_id) {
-            return Ok(session.clone());
-        }
+        Arc::clone(sessions.entry(terminal_id.clone()).or_default())
+    };
 
-        let protocol_version = terminal_attach_protocol(&state.api)?;
-        let (output_tx, _) = tokio::sync::broadcast::channel(256);
-        let attach = open_terminal_attach(
-            state.client_socket_path.clone(),
-            terminal_id.clone(),
-            cols,
-            rows,
-            takeover,
-            protocol_version,
-            output_tx.clone(),
-        )?;
-        let session = SharedTerminalSession {
-            write_tx: attach.write_tx,
-            output_tx,
-            client_count: Arc::new(AtomicUsize::new(0)),
-        };
-        sessions.insert(terminal_id, session.clone());
-        Ok(session)
-    })
-    .await
-    .map_err(|err| BridgeError::Protocol(err.to_string()))?
+    let result = cell
+        .get_or_try_init(|| async {
+            tokio::task::spawn_blocking(move || {
+                let protocol_version = terminal_attach_protocol(&state.api)?;
+                let (output_tx, _) = tokio::sync::broadcast::channel(256);
+                let attach = open_terminal_attach(
+                    state.client_socket_path.clone(),
+                    terminal_id,
+                    cols,
+                    rows,
+                    takeover,
+                    protocol_version,
+                    output_tx.clone(),
+                )?;
+                Ok(SharedTerminalSession {
+                    write_tx: attach.write_tx,
+                    output_tx,
+                    client_count: Arc::new(AtomicUsize::new(0)),
+                })
+            })
+            .await
+            .map_err(|err| BridgeError::Protocol(err.to_string()))?
+        })
+        .await;
+
+    result.cloned()
 }
 
 fn release_terminal_session(
@@ -1689,10 +1831,11 @@ fn release_terminal_session(
     let Ok(mut sessions) = state.terminal_sessions.lock() else {
         return;
     };
-    if sessions
-        .get(terminal_id)
-        .is_some_and(|current| Arc::ptr_eq(&current.client_count, &session.client_count))
-    {
+    let matches = sessions.get(terminal_id).is_some_and(|cell| {
+        cell.get()
+            .is_some_and(|current| Arc::ptr_eq(&current.client_count, &session.client_count))
+    });
+    if matches {
         sessions.remove(terminal_id);
     }
 }
@@ -1714,7 +1857,9 @@ fn prune_detached_terminal_sessions(state: &BridgeState) {
         sessions
             .iter()
             .filter(|(terminal_id, _)| !active_terminal_ids.contains(terminal_id.as_str()))
-            .map(|(terminal_id, session)| (terminal_id.clone(), session.clone()))
+            .filter_map(|(terminal_id, cell)| {
+                cell.get().map(|session| (terminal_id.clone(), session.clone()))
+            })
             .collect::<Vec<_>>()
     };
 
@@ -1736,10 +1881,11 @@ fn close_terminal_session(
     let Ok(mut sessions) = state.terminal_sessions.lock() else {
         return;
     };
-    if sessions
-        .get(terminal_id)
-        .is_some_and(|current| Arc::ptr_eq(&current.client_count, &session.client_count))
-    {
+    let matches = sessions.get(terminal_id).is_some_and(|cell| {
+        cell.get()
+            .is_some_and(|current| Arc::ptr_eq(&current.client_count, &session.client_count))
+    });
+    if matches {
         sessions.remove(terminal_id);
     }
 }
@@ -1757,63 +1903,106 @@ fn close_message(reason: &str) -> String {
     )
 }
 
-fn open_event_subscription(
-    api: ApiClient,
-) -> Result<tokio::sync::mpsc::UnboundedReceiver<String>, BridgeError> {
-    let request = Request {
-        id: "herdr-web:events".to_string(),
-        method: Method::EventsSubscribe(EventsSubscribeParams {
-            subscriptions: vec![
-                Subscription::WorkspaceCreated {},
-                Subscription::WorkspaceUpdated {},
-                Subscription::WorkspaceRenamed {},
-                Subscription::WorkspaceClosed {},
-                Subscription::WorkspaceFocused {},
-                Subscription::TabCreated {},
-                Subscription::TabClosed {},
-                Subscription::TabFocused {},
-                Subscription::TabRenamed {},
-                Subscription::PaneCreated {},
-                Subscription::PaneClosed {},
-                Subscription::PaneFocused {},
-                Subscription::PaneMoved {},
-                Subscription::PaneExited {},
-                Subscription::PaneAgentDetected {},
-            ],
-        }),
-    };
-    let (ack, mut stream) = api.subscribe_value(&request, None)?;
-    let response = herdr_compat::api::client::parse_response_value(ack)?;
-    if !matches!(response.result, ResponseResult::SubscriptionStarted {}) {
-        return Err(BridgeError::Protocol(format!(
-            "unexpected subscription response: {:?}",
-            response.result
-        )));
-    }
+fn spawn_snapshot_refresh_loop(state: BridgeState) {
+    tokio::spawn(async move {
+        let mut daemon_rx = state.daemon_event_tx.subscribe();
+        let mut ui_rx = state.ui_event_tx.subscribe();
 
-    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-    thread::spawn(move || loop {
-        match stream.next_value() {
-            Ok(Some(event)) => {
-                if event_tx.send(event.to_string()).is_err() {
-                    break;
-                }
+        // Build initial snapshot
+        rebuild_snapshot(&state).await;
+
+        loop {
+            // Wait for any event (leading edge — build immediately)
+            tokio::select! {
+                _ = daemon_rx.recv() => {}
+                _ = ui_rx.recv() => {}
             }
-            Ok(None) => break,
-            Err(err) => {
-                let _ = event_tx.send(
-                    serde_json::json!({
-                        "type": "error",
-                        "error": err.to_string(),
-                    })
-                    .to_string(),
-                );
-                break;
+
+            // Build immediately
+            rebuild_snapshot(&state).await;
+
+            // Cooldown: drain events that arrive within 30ms (coalesce burst)
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let had_more = daemon_rx.try_recv().is_ok() || ui_rx.try_recv().is_ok();
+            while daemon_rx.try_recv().is_ok() || ui_rx.try_recv().is_ok() {}
+
+            // If more events arrived during cooldown, rebuild once more
+            if had_more {
+                rebuild_snapshot(&state).await;
             }
         }
     });
+}
 
-    Ok(event_rx)
+async fn rebuild_snapshot(state: &BridgeState) {
+    let s = state.clone();
+    let snapshot_cache = state.snapshot_cache.clone();
+    let snapshot_tx = state.snapshot_tx.clone();
+    let result = tokio::task::spawn_blocking(move || build_snapshot(&s)).await;
+    if let Ok(Ok(snapshot)) = result {
+        if let Ok(json) = serde_json::to_string(&snapshot) {
+            let arc: Arc<str> = Arc::from(json.as_str());
+            if let Ok(mut cache) = snapshot_cache.write() {
+                *cache = Some(json);
+            }
+            let _ = snapshot_tx.send(arc);
+        }
+    }
+}
+
+static EVENT_SUB_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn spawn_daemon_event_loop(
+    api: ApiClient,
+    daemon_event_tx: tokio::sync::broadcast::Sender<String>,
+) {
+    thread::spawn(move || loop {
+        let seq = EVENT_SUB_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let request = Request {
+            id: format!("herdr-web:events:{seq}"),
+            method: Method::EventsSubscribe(EventsSubscribeParams {
+                subscriptions: vec![
+                    Subscription::WorkspaceCreated {},
+                    Subscription::WorkspaceUpdated {},
+                    Subscription::WorkspaceRenamed {},
+                    Subscription::WorkspaceClosed {},
+                    Subscription::WorkspaceFocused {},
+                    Subscription::TabCreated {},
+                    Subscription::TabClosed {},
+                    Subscription::TabFocused {},
+                    Subscription::TabRenamed {},
+                    Subscription::PaneCreated {},
+                    Subscription::PaneClosed {},
+                    Subscription::PaneFocused {},
+                    Subscription::PaneMoved {},
+                    Subscription::PaneExited {},
+                    Subscription::PaneAgentDetected {},
+                ],
+            }),
+        };
+        let Ok((ack, mut stream)) = api.subscribe_value(&request, None) else {
+            thread::sleep(Duration::from_secs(1));
+            continue;
+        };
+        let Ok(response) = herdr_compat::api::client::parse_response_value(ack) else {
+            thread::sleep(Duration::from_secs(1));
+            continue;
+        };
+        if !matches!(response.result, ResponseResult::SubscriptionStarted {}) {
+            thread::sleep(Duration::from_secs(1));
+            continue;
+        }
+        loop {
+            match stream.next_value() {
+                Ok(Some(event)) => {
+                    let _ = daemon_event_tx.send(event.to_string());
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        thread::sleep(Duration::from_millis(500));
+    });
 }
 
 fn handle_terminal_text_frame(
@@ -1935,7 +2124,7 @@ fn open_terminal_attach(
             };
         match message {
             ServerMessage::Terminal(frame) => {
-                let _ = output_tx.send(TerminalOutput::Bytes(frame.bytes));
+                let _ = output_tx.send(TerminalOutput::Bytes(Bytes::from(frame.bytes)));
             }
             ServerMessage::ServerShutdown { reason } => {
                 let _ = output_tx.send(TerminalOutput::Close(
