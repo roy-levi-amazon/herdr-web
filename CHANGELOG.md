@@ -8,8 +8,9 @@
 
 ### Changed
 
-- Improved browser startup by lazy-loading the terminal renderer, adding mobile web app metadata,
-  and compressing static bridge-served web assets.
+- Improved browser startup by lazy-loading the terminal renderer with retry after load failures,
+  adding installable mobile web app metadata and raster icons, and compressing static
+  bridge-served web assets.
 
 ### Fixed
 
