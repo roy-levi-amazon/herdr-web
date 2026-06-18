@@ -24,6 +24,8 @@ use axum::{extract::Request as AxumRequest, Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use herdr_compat::TryClone as _;
 use serde::{Deserialize, Serialize};
+use tower::ServiceBuilder;
+use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 use tracing::{debug, info, warn};
 
@@ -440,7 +442,11 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         .route("/ws/events", get(events_ws_handler))
         .route("/ws/ui-events", get(ui_events_ws_handler))
         .route("/ws/terminal", get(terminal_ws_handler))
-        .fallback_service(ServeDir::new(options.static_dir))
+        .fallback_service(
+            ServiceBuilder::new()
+                .layer(CompressionLayer::new())
+                .service(ServeDir::new(options.static_dir)),
+        )
         .layer(middleware::from_fn_with_state(
             request_policy.clone(),
             add_security_headers,
