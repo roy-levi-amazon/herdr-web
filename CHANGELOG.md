@@ -9,8 +9,10 @@
 - Added a bridge-owned agent activity stream so pane status, title, display agent, and custom
   status updates reach connected browsers without waiting for a full snapshot refresh; concepts
   derived from the @roy-levi-amazon fork. [PR #11](https://github.com/kcosr/herdr-web/pull/11)
-- Added configurable terminal input transport and opt-in input batching controls with a fixed
-  32-byte flush threshold for slow connections.
+- Added configurable terminal input transport, with binary payload concepts derived from the
+  @roy-levi-amazon fork.
+- Added opt-in terminal input batching controls with a fixed 32-byte flush threshold for slow
+  connections.
 - Added a Shift-Tab key to the expanded mobile terminal key panel. [PR #11](https://github.com/kcosr/herdr-web/pull/11)
 
 ### Changed
