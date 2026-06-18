@@ -539,6 +539,7 @@ export function TerminalView({
     return () => {
       disposed = true;
       flushBatchedTerminalInput();
+      batchedInputRef.current = emptyTerminalInputBatch();
       inputQueueRef.current = [];
       if (inputFlushTimerRef.current !== null) {
         window.clearTimeout(inputFlushTimerRef.current);
