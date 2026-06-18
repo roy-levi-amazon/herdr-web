@@ -10,6 +10,7 @@
   status updates reach connected browsers without waiting for a full snapshot refresh; concepts
   derived from the @roy-levi-amazon fork. [PR #11](https://github.com/kcosr/herdr-web/pull/11)
 - Added Display settings for top/bottom app padding and mobile terminal controls size.
+  [PR #13](https://github.com/kcosr/herdr-web/pull/13)
 - Added configurable terminal input transport, with binary payload concepts derived from the
   @roy-levi-amazon fork. [PR #12](https://github.com/kcosr/herdr-web/pull/12)
 - Added opt-in terminal input batching controls with a fixed 32-byte flush threshold for slow
