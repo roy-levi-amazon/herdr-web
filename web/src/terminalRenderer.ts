@@ -1,4 +1,4 @@
-import { FitAddon, init, Terminal } from "ghostty-web";
+import type { FitAddon, Terminal } from "ghostty-web";
 import { selectedTextFromVisibleRows, terminalSelectionRange } from "./terminalSelection";
 import type { TerminalSelectionPoint } from "./terminalSelection";
 import { terminalTapFocusAction } from "./terminalTapFocus";
@@ -16,7 +16,19 @@ const TAP_URL_PATTERN =
   /(?:https?:\/\/|mailto:|ftp:\/\/|ssh:\/\/|git:\/\/|tel:|magnet:|gemini:\/\/|gopher:\/\/|news:)[\w\-.~:/?#@!$&*+,;=%]+/giu;
 const TAP_URL_TRAILING_PUNCTUATION = /[.,;!?)\]]+$/u;
 
-const ghosttyReady = init();
+type GhosttyModule = typeof import("ghostty-web");
+
+let ghosttyModule: Promise<GhosttyModule> | null = null;
+
+async function loadGhosttyModule() {
+  if (!ghosttyModule) {
+    ghosttyModule = import("ghostty-web").then(async (module) => {
+      await module.init();
+      return module;
+    });
+  }
+  return ghosttyModule;
+}
 
 export type TerminalSize = {
   cols: number;
@@ -80,7 +92,7 @@ export class GhosttyRenderer implements TerminalRenderer {
   #textInputTapGraceUntil = 0;
 
   async mount(container: HTMLElement) {
-    await ghosttyReady;
+    const { FitAddon, Terminal } = await loadGhosttyModule();
 
     this.#container = container;
     const terminal = new Terminal({
