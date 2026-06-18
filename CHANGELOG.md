@@ -1,8 +1,6 @@
 # Changelog
 
-## [Unreleased]
-
-### Breaking Changes
+## [0.1.2] - 2026-06-18
 
 ### Added
 
@@ -29,10 +27,6 @@
   adding installable mobile web app metadata and raster icons, and compressing static
   bridge-served web assets; concepts derived from the @roy-levi-amazon fork.
   [PR #10](https://github.com/kcosr/herdr-web/pull/10)
-
-### Fixed
-
-### Removed
 
 ## [0.1.1] - 2026-06-17
 
