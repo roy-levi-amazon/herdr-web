@@ -1030,13 +1030,12 @@ button {
   left: 12px;
   right: 12px;
   bottom: 12px;
-  z-index: 6;
-  display: grid;
+  z-index: 9;
+  display: flex;
+  align-items: center;
   gap: 10px;
-  max-width: 620px;
-  margin: 0 auto;
   border: 1px solid var(--line);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-md);
   padding: 10px;
   background: color-mix(in srgb, var(--mantle) 94%, black);
   box-shadow: var(--shadow);
@@ -1046,9 +1045,9 @@ button {
   min-width: 0;
   max-height: 48px;
   overflow: hidden;
-  color: var(--subtext0);
+  color: var(--subtext);
   font-size: 12px;
-  line-height: 1.35;
+  line-height: 1.3;
   overflow-wrap: anywhere;
 }
 
@@ -1064,13 +1063,76 @@ button {
   display: inline-flex;
   gap: 6px;
   align-items: center;
-  min-height: 34px;
   padding-inline: 10px;
 }
 
 .terminal-selection-actions .icon-btn {
   margin-left: auto;
   flex: 0 0 auto;
+}
+
+.terminal-touch-loupe {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 8;
+  width: 132px;
+  height: 82px;
+  overflow: hidden;
+  pointer-events: none;
+  border: 1px solid color-mix(in srgb, var(--accent) 68%, white);
+  border-radius: 18px;
+  background: var(--term-bg);
+  box-shadow: 0 12px 34px rgb(0 0 0 / 44%), 0 0 0 1px rgb(255 255 255 / 8%) inset;
+  will-change: transform;
+}
+
+.terminal-touch-loupe canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.terminal-touch-endpoint {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 7;
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 72%, white);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 78%, var(--mantle));
+  box-shadow: 0 10px 28px rgb(0 0 0 / 38%);
+  touch-action: none;
+  will-change: transform;
+}
+
+.terminal-touch-endpoint::before {
+  content: attr(data-hint);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 5px);
+  transform: translateX(-50%);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: color-mix(in srgb, var(--mantle) 92%, black);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.terminal-touch-endpoint::after {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-radius: inherit;
+  background: var(--base);
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 42%);
 }
 
 .terminal-mobile-controls {

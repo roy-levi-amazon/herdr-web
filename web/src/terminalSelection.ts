@@ -31,9 +31,6 @@ export function selectedTextFromVisibleRows(
   cols: number,
 ) {
   const range = terminalSelectionRange(start, end, cols);
-  if (range.length <= 1) {
-    return "";
-  }
 
   const selectedLines: string[] = [];
   for (let row = range.from.row; row <= range.to.row; row += 1) {
@@ -69,6 +66,13 @@ export function openableHttpUrl(value: string) {
   }
 }
 
+export function terminalUrlTapTarget(value: string | null, mouseTracking: boolean) {
+  if (mouseTracking || !value) {
+    return null;
+  }
+  return openableHttpUrl(value);
+}
+
 export function normalizeSelectionForUrl(selection: string) {
   return selection.replace(/\s*\n\s*/gu, "").replace(/[ \t\r\f\v]+/gu, " ").trim();
 }
@@ -96,7 +100,7 @@ function shouldJoinWrappedUrl(url: string, continuation: string) {
   return /[/?#&=._~%+-]$/u.test(url) || /^[/?#&=._~%+-]/u.test(continuation);
 }
 
-function trimUrlPunctuation(value: string) {
+export function trimUrlPunctuation(value: string) {
   let next = value.replace(TRAILING_URL_PUNCTUATION, "");
   while (TRAILING_BALANCED_CLOSERS.test(next) && hasUnmatchedTrailingCloser(next)) {
     next = next.slice(0, -1);

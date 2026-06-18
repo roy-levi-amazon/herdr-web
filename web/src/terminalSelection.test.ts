@@ -5,6 +5,7 @@ import {
   openableHttpUrl,
   selectedTextFromVisibleRows,
   terminalSelectionRange,
+  terminalUrlTapTarget,
 } from "./terminalSelection";
 
 describe("terminal selection helpers", () => {
@@ -57,6 +58,15 @@ describe("terminal selection helpers", () => {
     expect(openableHttpUrl("tel:+15555555555")).toBeNull();
   });
 
+  it("opens tapped terminal URLs only when mouse tracking is inactive", () => {
+    expect(terminalUrlTapTarget("https://example.com/path", false)).toBe(
+      "https://example.com/path",
+    );
+    expect(terminalUrlTapTarget("https://example.com/path", true)).toBeNull();
+    expect(terminalUrlTapTarget("mailto:test@example.com", false)).toBeNull();
+    expect(terminalUrlTapTarget(null, false)).toBeNull();
+  });
+
   it("orders forward and backward terminal selection ranges", () => {
     expect(terminalSelectionRange({ col: 2, row: 1 }, { col: 5, row: 3 }, 10)).toEqual({
       from: { col: 2, row: 1 },
@@ -89,9 +99,9 @@ describe("terminal selection helpers", () => {
     );
   });
 
-  it("ignores single-cell selections to match terminal hasSelection behavior", () => {
+  it("extracts a single character for same-cell selections", () => {
     expect(selectedTextFromVisibleRows(["alpha"], { col: 1, row: 0 }, { col: 1, row: 0 }, 10)).toBe(
-      "",
+      "l",
     );
   });
 });

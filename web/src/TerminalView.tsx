@@ -15,7 +15,7 @@ import { ConfirmDialog } from "./overlays";
 import { shellQuote } from "./shell";
 import { findFirstUrlInSelection, openableHttpUrl } from "./terminalSelection";
 import { GhosttyRenderer } from "./terminalRenderer";
-import type { TerminalRenderer, TerminalSize } from "./terminalRenderer";
+import type { MobileTerminalTouchEvent, TerminalRenderer, TerminalSize } from "./terminalRenderer";
 import {
   appendTerminalInputBatch,
   drainTerminalInputBatch,
@@ -75,7 +75,6 @@ type MobileSelectionAction = {
   text: string;
   url: string;
 };
-
 const MAX_UPLOAD_FILES = 8;
 const TERMINAL_CONNECT_TIMEOUT_MS = 3500;
 
@@ -192,11 +191,19 @@ export function TerminalView({
     [showUploadStatus],
   );
 
-  const handleMobileSelection = useCallback(
-    (text: string) => {
-      const trimmed = text.trim();
+  const handleMobileTerminalTouch = useCallback(
+    (event: MobileTerminalTouchEvent) => {
+      if (event.type === "url") {
+        const url = openableHttpUrl(event.url);
+        if (url) {
+          window.open(url, "_blank", "noopener,noreferrer");
+        }
+        return;
+      }
+      const trimmed = event.text.trim();
       setMobileSelectionAction(null);
       if (!trimmed) {
+        rendererRef.current?.clearSelection();
         return;
       }
       const url = findFirstUrlInSelection(trimmed);
@@ -204,6 +211,7 @@ export function TerminalView({
         setMobileSelectionAction({ text: trimmed, url });
         return;
       }
+      rendererRef.current?.clearSelection();
       void copyText(trimmed, "Copied selection");
     },
     [copyText],
@@ -379,7 +387,7 @@ export function TerminalView({
         );
         renderer.setMobileTouchSelection(
           mobileControlsRef.current && mobileTouchSelectionRef.current,
-          handleMobileSelection,
+          mobileControlsRef.current ? handleMobileTerminalTouch : null,
         );
 
         disposeInput = renderer.onInput((data) => {
@@ -594,12 +602,13 @@ export function TerminalView({
   useEffect(() => {
     rendererRef.current?.setMobileTouchSelection(
       mobileControls && mobileTouchSelection,
-      handleMobileSelection,
+      mobileControls ? handleMobileTerminalTouch : null,
     );
-  }, [handleMobileSelection, mobileControls, mobileTouchSelection]);
+  }, [handleMobileTerminalTouch, mobileControls, mobileTouchSelection]);
 
   useEffect(() => {
     setMobileSelectionAction(null);
+    rendererRef.current?.clearSelection();
   }, [connectionKey, pane?.terminal_id]);
 
   useEffect(() => {
@@ -641,6 +650,11 @@ export function TerminalView({
   };
   const uploadDisabled = !pane || uploading;
 
+  const closeMobileSelectionActions = () => {
+    setMobileSelectionAction(null);
+    rendererRef.current?.clearSelection();
+  };
+
   const openSelectionUrl = () => {
     if (!mobileSelectionAction) {
       return;
@@ -651,11 +665,11 @@ export function TerminalView({
     } else {
       void copyText(mobileSelectionAction.text, "Copied selection");
     }
-    setMobileSelectionAction(null);
+    closeMobileSelectionActions();
   };
 
   const copySelectionText = (text: string, successMessage: string) => {
-    setMobileSelectionAction(null);
+    closeMobileSelectionActions();
     void copyText(text, successMessage);
   };
 
@@ -860,9 +874,7 @@ export function TerminalView({
           onOpen={openSelectionUrl}
           onCopyUrl={() => copySelectionText(mobileSelectionAction.url, "Copied URL")}
           onCopyText={() => copySelectionText(mobileSelectionAction.text, "Copied selection")}
-          onClose={() => {
-            setMobileSelectionAction(null);
-          }}
+          onClose={closeMobileSelectionActions}
         />
       ) : null}
       {uploadConflict ? (

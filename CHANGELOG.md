@@ -8,6 +8,10 @@
 
 ### Changed
 
+- Changed mobile terminal long-press selection to use a two-stage loupe and endpoint flow; normal
+  selections copy immediately, selected URLs keep the action sheet, and tapped HTTP(S) URLs open
+  directly.
+
 ### Fixed
 
 ### Removed
