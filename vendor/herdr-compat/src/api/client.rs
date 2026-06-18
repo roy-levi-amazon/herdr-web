@@ -104,7 +104,13 @@ impl ApiClient {
 
         let mut reader = BufReader::new(stream);
         let ack = read_json_line(&mut reader)?;
-        Ok((ack, EventStream { reader }))
+        Ok((
+            ack,
+            EventStream {
+                reader,
+                pending_line: Vec::new(),
+            },
+        ))
     }
 
     pub fn status_with_timeout(
@@ -171,11 +177,17 @@ fn set_timeout_best_effort(
 
 pub struct EventStream {
     reader: BufReader<LocalStream>,
+    pending_line: Vec<u8>,
 }
 
 impl EventStream {
+    pub fn set_read_timeout(&self, timeout: Duration) -> Result<(), ApiClientError> {
+        set_timeout_best_effort(self.reader.get_ref(), TimeoutKind::Recv, timeout)
+            .map_err(ApiClientError::Io)
+    }
+
     pub fn next_value(&mut self) -> Result<Option<serde_json::Value>, ApiClientError> {
-        read_optional_json_line(&mut self.reader)
+        read_optional_json_line(&mut self.reader, &mut self.pending_line)
     }
 }
 
@@ -233,19 +245,34 @@ fn read_json_line<T: DeserializeOwned>(
 }
 
 fn read_optional_json_line<T: DeserializeOwned>(
-    reader: &mut BufReader<LocalStream>,
+    reader: &mut impl BufRead,
+    pending_line: &mut Vec<u8>,
 ) -> Result<Option<T>, ApiClientError> {
-    let mut line = String::new();
-    let read = reader.read_line(&mut line)?;
+    let mut line = std::mem::take(pending_line);
+    let read = match reader.read_until(b'\n', &mut line) {
+        Ok(read) => read,
+        Err(err) if is_timeout_error(&err) => {
+            *pending_line = line;
+            return Err(ApiClientError::Io(err));
+        }
+        Err(err) => return Err(ApiClientError::Io(err)),
+    };
     if read == 0 {
         return Ok(None);
     }
-    if line.trim().is_empty() {
+    if line.iter().all(|byte| byte.is_ascii_whitespace()) {
         return Err(ApiClientError::EmptyResponse);
     }
-    serde_json::from_str(&line)
+    serde_json::from_slice(&line)
         .map(Some)
         .map_err(ApiClientError::Json)
+}
+
+fn is_timeout_error(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
 }
 
 #[derive(serde::Deserialize)]
@@ -265,11 +292,66 @@ pub fn parse_response_value(value: serde_json::Value) -> Result<SuccessResponse,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::io::Read;
 
     #[test]
     fn socket_path_target_uses_explicit_path() {
         let path = PathBuf::from("/tmp/herdr-test.sock");
         let client = ApiClient::for_socket_path(path.clone());
         assert_eq!(client.socket_path(), path);
+    }
+
+    #[test]
+    fn optional_json_line_preserves_split_utf8_across_timeout() {
+        let mut reader = BufReader::new(ScriptedRead::new(vec![
+            ReadStep::Bytes(b"{\"value\":\"caf\xc3"),
+            ReadStep::Error(io::ErrorKind::WouldBlock),
+            ReadStep::Bytes(b"\xa9\"}\n"),
+        ]));
+        let mut pending_line = Vec::new();
+
+        let first = read_optional_json_line::<serde_json::Value>(&mut reader, &mut pending_line);
+        assert!(matches!(
+            first,
+            Err(ApiClientError::Io(err)) if err.kind() == io::ErrorKind::WouldBlock
+        ));
+        assert_eq!(pending_line, b"{\"value\":\"caf\xc3");
+
+        let second =
+            read_optional_json_line::<serde_json::Value>(&mut reader, &mut pending_line).unwrap();
+        assert_eq!(second, Some(serde_json::json!({ "value": "café" })));
+        assert!(pending_line.is_empty());
+    }
+
+    enum ReadStep {
+        Bytes(&'static [u8]),
+        Error(io::ErrorKind),
+    }
+
+    struct ScriptedRead {
+        steps: VecDeque<ReadStep>,
+    }
+
+    impl ScriptedRead {
+        fn new(steps: Vec<ReadStep>) -> Self {
+            Self {
+                steps: steps.into(),
+            }
+        }
+    }
+
+    impl Read for ScriptedRead {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.steps.pop_front() {
+                Some(ReadStep::Bytes(bytes)) => {
+                    assert!(buf.len() >= bytes.len());
+                    buf[..bytes.len()].copy_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+                Some(ReadStep::Error(kind)) => Err(io::Error::new(kind, "scripted read error")),
+                None => Ok(0),
+            }
+        }
     }
 }

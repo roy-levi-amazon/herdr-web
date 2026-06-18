@@ -1035,6 +1035,7 @@ const SPECIAL_KEYS: TerminalKey[] = [
   { label: "↑", data: "\x1B[A" },
   { label: "↓", data: "\x1B[B" },
   { label: "→", data: "\x1B[C" },
+  { label: "S-Tab", data: "\x1B[Z" },
   { label: "Bksp", data: "\x7F" },
   { label: "Del", data: "\x1B[3~" },
   { label: "Home", data: "\x1B[H" },

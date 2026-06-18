@@ -10,6 +10,8 @@ import {
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { AgentIcon, agentIconKind } from "./AgentIcon";
+import { applyActivityMessage, parseActivityEventData, replayActivityMessages } from "./activity";
+import type { ActivityLogEntry } from "./activity";
 import { BackendSettingsDialog } from "./BackendSettingsDialog";
 import { useBridge } from "./bridge";
 import { createCommands, createdPaneId } from "./commands";
@@ -33,6 +35,7 @@ import type { MobileTerminalTapTarget } from "./mobileTerminalPrefs";
 import { addNativeBackHandler, addNativeKeyboardHideHandler, isNativeAndroid } from "./native";
 import { ActionMenu, ConfirmDialog, RenameDialog, useLongPress } from "./overlays";
 import type { MenuItem } from "./overlays";
+import { createSnapshotRefreshController } from "./refreshCoordinator";
 import { TerminalView } from "./TerminalView";
 import {
   aggregateStatus,
@@ -52,7 +55,13 @@ import {
   spaceSubtitle,
   statusLabel,
 } from "./state";
-import type { AgentStatus, PaneInfo, Snapshot, TabInfo, WorkspaceInfo } from "./types";
+import type {
+  AgentStatus,
+  PaneInfo,
+  Snapshot,
+  TabInfo,
+  WorkspaceInfo,
+} from "./types";
 
 type LoadState = "loading" | "ready" | "error";
 type Scope = "space" | "all";
@@ -88,7 +97,6 @@ type DisplayPrefs = {
   mobileTouchSelection: boolean;
   mobileKeyboardHideRefit: boolean;
 };
-
 const COMPACT_LAYOUT_QUERY = "(max-width: 820px)";
 const TOUCH_INPUT_QUERY = "(hover: none) and (pointer: coarse)";
 const DISPLAY_PREFS_KEY = "herdr.mobileWeb.displayPrefs.v1";
@@ -249,6 +257,9 @@ export function App() {
   const isCompactLayoutRef = useRef(isCompactLayout);
   const showDetailRef = useRef(showDetail);
   const connectionKeyRef = useRef(bridge.connectionKey);
+  const activityGenerationRef = useRef(0);
+  const resyncBarrierGenerationRef = useRef(0);
+  const activityLogRef = useRef<ActivityLogEntry[]>([]);
   const mobileSidebarHistoryRef = useRef(false);
   const mobileDetailHistoryRef = useRef(false);
   const sidebarResizePressRef = useRef<{
@@ -441,12 +452,17 @@ export function App() {
     let disposed = false;
     if (connectionKeyRef.current !== bridge.connectionKey) {
       connectionKeyRef.current = bridge.connectionKey;
+      activityGenerationRef.current += 1;
+      resyncBarrierGenerationRef.current = activityGenerationRef.current;
+      activityLogRef.current = [];
+      snapshotRef.current = null;
       setSnapshot(null);
       setSnapshotConnectionKey(bridge.connectionKey);
       setSelectedPaneId(null);
       setActiveSpaceId(null);
     }
     if (!bridge.canConnect) {
+      snapshotRef.current = null;
       setSnapshot(null);
       setSnapshotConnectionKey(bridge.connectionKey);
       setSelectedPaneId(null);
@@ -456,20 +472,66 @@ export function App() {
         disposed = true;
       };
     }
-    const refresh = () =>
-      refreshSnapshot(
-        bridge.httpUrl,
-        (next) => {
-          setSnapshot(next);
-          setSnapshotConnectionKey(bridge.connectionKey);
-        },
-        setLoadState,
-        () => disposed,
-      );
-    void refresh();
+    const requestConnectionKey = bridge.connectionKey;
+    const isCurrentConnection = () =>
+      !disposed && isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey);
+    const refreshController = createSnapshotRefreshController({
+      fetchSnapshot: () => fetchSnapshot(bridge.httpUrl),
+      getGeneration: () => activityGenerationRef.current,
+      getBarrierGeneration: () => resyncBarrierGenerationRef.current,
+      isCurrent: isCurrentConnection,
+      onError: () => setLoadState("error"),
+      applySnapshot: (next, refreshGeneration) => {
+        const patched = replayActivityMessages(next, activityLogRef.current, refreshGeneration);
+        snapshotRef.current = patched;
+        setSnapshot(patched);
+        setSnapshotConnectionKey(requestConnectionKey);
+        setLoadState("ready");
+      },
+    });
+    const refresh = () => refreshController.request();
+    const requestActivityResync = () => {
+      activityGenerationRef.current += 1;
+      resyncBarrierGenerationRef.current = activityGenerationRef.current;
+      refresh();
+    };
+    refresh();
     const interval = window.setInterval(refresh, 10000);
-    const events = openEventsSocket(bridge.wsUrl, "/ws/events", () => void refresh());
+    const events = openEventsSocket(bridge.wsUrl, "/ws/events", refresh);
+    const activity = openEventsSocket(
+      bridge.wsUrl,
+      "/ws/activity",
+      (event) => {
+        if (!isCurrentConnection()) {
+          return;
+        }
+        const parsed = parseActivityEventData(event.data);
+        if (parsed.status === "ignored") {
+          return;
+        }
+        if (parsed.status === "invalid_known") {
+          requestActivityResync();
+          return;
+        }
+        const result = applyActivityMessage(snapshotRef.current, parsed.message);
+        if (result.status === "applied") {
+          activityGenerationRef.current += 1;
+          activityLogRef.current = [
+            ...activityLogRef.current,
+            { generation: activityGenerationRef.current, message: parsed.message },
+          ].slice(-100);
+          snapshotRef.current = result.snapshot;
+          setSnapshot(result.snapshot);
+        } else if (result.status === "resync") {
+          requestActivityResync();
+        }
+      },
+      { onOpen: refresh },
+    );
     const uiEvents = openEventsSocket(bridge.wsUrl, "/ws/ui-events", (event) => {
+      if (!isCurrentConnection()) {
+        return;
+      }
       const paneId = selectionPaneId(event);
       if (paneId) {
         setSelectedPaneId(paneId);
@@ -478,11 +540,12 @@ export function App() {
           setActiveSpaceId(pane.workspace_id);
         }
       }
-      void refresh();
+      refresh();
     });
     return () => {
       disposed = true;
       events?.close();
+      activity?.close();
       uiEvents?.close();
       window.clearInterval(interval);
     };
@@ -871,13 +934,20 @@ export function App() {
       return;
     }
     const requestConnectionKey = bridge.connectionKey;
+    const refreshGeneration = activityGenerationRef.current;
     setLoadState("loading");
     void fetchSnapshot(bridge.httpUrl)
       .then((next) => {
         if (!isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
           return;
         }
-        setSnapshot(next);
+        if (resyncBarrierGenerationRef.current > refreshGeneration) {
+          refreshNow();
+          return;
+        }
+        const patched = replayActivityMessages(next, activityLogRef.current, refreshGeneration);
+        snapshotRef.current = patched;
+        setSnapshot(patched);
         setSnapshotConnectionKey(requestConnectionKey);
         setLoadState("ready");
       })
@@ -893,16 +963,23 @@ export function App() {
     setBusy(true);
     try {
       const result = await action();
-      const next = await fetchSnapshot(bridge.httpUrl);
+      let refreshGeneration = activityGenerationRef.current;
+      let next = await fetchSnapshot(bridge.httpUrl);
+      while (resyncBarrierGenerationRef.current > refreshGeneration) {
+        refreshGeneration = activityGenerationRef.current;
+        next = await fetchSnapshot(bridge.httpUrl);
+      }
       if (!isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
         return false;
       }
-      setSnapshot(next);
+      const patched = replayActivityMessages(next, activityLogRef.current, refreshGeneration);
+      snapshotRef.current = patched;
+      setSnapshot(patched);
       setSnapshotConnectionKey(requestConnectionKey);
       setLoadState("ready");
       if (selectCreated) {
         const paneId = createdPaneId(result);
-        const created = paneId ? next.panes.find((pane) => pane.pane_id === paneId) : undefined;
+        const created = paneId ? patched.panes.find((pane) => pane.pane_id === paneId) : undefined;
         if (created) {
           setSelectedPaneId(created.pane_id);
           setActiveSpaceId(created.workspace_id);
@@ -2391,25 +2468,6 @@ async function syncSelectedPane(
   }
 }
 
-async function refreshSnapshot(
-  httpUrl: (path: string, query?: URLSearchParams) => string,
-  setSnapshot: (snapshot: Snapshot) => void,
-  setLoadState: (state: LoadState) => void,
-  isDisposed: () => boolean,
-) {
-  try {
-    const next = await fetchSnapshot(httpUrl);
-    if (!isDisposed()) {
-      setSnapshot(next);
-      setLoadState("ready");
-    }
-  } catch {
-    if (!isDisposed()) {
-      setLoadState("error");
-    }
-  }
-}
-
 function selectionPaneId(event: MessageEvent) {
   if (typeof event.data !== "string") {
     return null;
@@ -2443,6 +2501,7 @@ function openEventsSocket(
   wsUrl: (path: string, query?: URLSearchParams) => string,
   path: string,
   onEvent: (event: MessageEvent) => void,
+  options: { onOpen?: () => void } = {},
 ) {
   const url = wsUrl(path);
   let socket: WebSocket | null = null;
@@ -2458,6 +2517,7 @@ function openEventsSocket(
     socket = next;
     next.addEventListener("open", () => {
       attempts = 0;
+      options.onOpen?.();
     });
     next.addEventListener("message", onEvent);
     next.addEventListener("close", () => {

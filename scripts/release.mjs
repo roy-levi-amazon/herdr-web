@@ -17,6 +17,7 @@ const version = match[1];
 const tag = `v${version}`;
 const today = new Date().toISOString().slice(0, 10);
 const notesFile = join(process.cwd(), ".release-notes-tmp.md");
+const changelogSubsections = ["Breaking Changes", "Added", "Changed", "Fixed", "Removed"];
 
 function run(command, args, options = {}) {
   return execFileSync(command, args, {
@@ -81,12 +82,34 @@ function readChangelogForRelease() {
 }
 
 function stampChangelog(changelog) {
-  const released = changelog.replace("## [Unreleased]", `## [${version}] - ${today}`);
-  if (released === changelog) {
+  const stamped = changelog.replace("## [Unreleased]", `## [${version}] - ${today}`);
+  const released = removeEmptyReleaseSubsections(stamped);
+  if (stamped === changelog) {
     fail("CHANGELOG.md is missing an Unreleased section");
   }
   writeFileSync("CHANGELOG.md", released);
   return released;
+}
+
+function removeEmptyReleaseSubsections(changelog) {
+  const releasePattern = new RegExp(
+    `(## \\[${escapeRegex(version)}\\] - [^\\n]+\\n)([\\s\\S]*?)(?=\\n## \\[|$)`,
+  );
+  return changelog.replace(releasePattern, (_match, heading, body) => {
+    return `${heading}${removeEmptyChangelogSubsections(body)}`;
+  });
+}
+
+function removeEmptyChangelogSubsections(body) {
+  let cleaned = body;
+  for (const subsection of changelogSubsections) {
+    cleaned = cleaned.replace(
+      new RegExp(`(^|\\n)### ${escapeRegex(subsection)}\\n\\n*(?=### |$)`, "g"),
+      "$1",
+    );
+  }
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trimEnd();
+  return cleaned ? `\n${cleaned.trimStart()}\n` : "\n";
 }
 
 function extractReleaseNotes(changelog) {

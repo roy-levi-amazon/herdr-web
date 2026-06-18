@@ -52,8 +52,11 @@ This is a lightweight internal onboarding note for agents working in this repo.
 - Add user-facing changes to `CHANGELOG.md` under `## [Unreleased]`.
 - Use these subsections when applicable: Breaking Changes, Added, Changed, Fixed, Removed.
 - Add the needed subsection under `## [Unreleased]` if it is missing; do not create duplicate subsection headings.
+- After opening a PR and before merging it, update each relevant changelog entry with the PR number
+  or link.
 - Include bridge compatibility and vendored Herdr refresh notes when protocol or overlay compatibility changes.
-- When cutting a release, remove empty unused subsections from the released version section; keep the fresh `## [Unreleased]` template headings intact.
+- When cutting a release, the release script removes empty unused subsections from the released
+  version section; keep the fresh `## [Unreleased]` template headings intact.
 
 ## Release
 

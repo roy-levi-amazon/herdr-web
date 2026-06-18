@@ -15,6 +15,8 @@ They do not publish npm packages, and the package versions are not release versi
 ## Prepare
 
 1. Confirm the changelog has user-facing notes under `## [Unreleased]`.
+   Entries merged through pull requests should include the PR number or link before the PR is
+   merged.
 2. Confirm the vendored Herdr compatibility crate is intentional and clean:
 
 ```bash
@@ -111,6 +113,7 @@ The script:
 
 - requires a clean `main` branch
 - promotes `CHANGELOG.md` from `Unreleased` to the release version/date
+- removes empty unused subsections from the released version notes
 - runs `npm run check`
 - commits `Release vX.Y.Z`
 - tags `vX.Y.Z`
