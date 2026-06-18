@@ -8,6 +8,7 @@
 
 - Added a bridge-owned agent activity stream so pane status, title, display agent, and custom
   status updates reach connected browsers without waiting for a full snapshot refresh.
+- Added a Shift-Tab key to the expanded mobile terminal key panel.
 
 ### Changed
 
