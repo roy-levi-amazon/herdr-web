@@ -22,10 +22,15 @@ let ghosttyModule: Promise<GhosttyModule> | null = null;
 
 async function loadGhosttyModule() {
   if (!ghosttyModule) {
-    ghosttyModule = import("ghostty-web").then(async (module) => {
-      await module.init();
-      return module;
-    });
+    ghosttyModule = import("ghostty-web")
+      .then(async (module) => {
+        await module.init();
+        return module;
+      })
+      .catch((error) => {
+        ghosttyModule = null;
+        throw error;
+      });
   }
   return ghosttyModule;
 }
