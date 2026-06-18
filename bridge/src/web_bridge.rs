@@ -1933,10 +1933,11 @@ fn run_agent_activity_subscription(
 ) -> Result<(), BridgeError> {
     drain_resubscribe_signals(resubscribe_rx);
     let panes = current_panes(&state.api)?;
-    let pane_ids = panes
-        .iter()
-        .map(|pane| pane.pane_id.clone())
-        .collect::<Vec<_>>();
+    let pane_ids = sorted_pane_ids(&panes);
+    if pane_ids.is_empty() {
+        wait_for_resubscribe_signal(resubscribe_rx)?;
+        return Ok(());
+    }
     let request = Request {
         id: "herdr-web:activity".to_string(),
         method: Method::EventsSubscribe(EventsSubscribeParams {
@@ -1955,6 +1956,10 @@ fn run_agent_activity_subscription(
 
     loop {
         if drain_resubscribe_signals(resubscribe_rx) {
+            let next_pane_ids = sorted_pane_ids(&current_panes(&state.api)?);
+            if next_pane_ids == pane_ids {
+                continue;
+            }
             return Ok(());
         }
         match stream.next_value() {
@@ -1972,6 +1977,23 @@ fn run_agent_activity_subscription(
             Err(err) => return Err(err.into()),
         }
     }
+}
+
+fn sorted_pane_ids(panes: &[PaneInfo]) -> Vec<String> {
+    let mut pane_ids = panes
+        .iter()
+        .map(|pane| pane.pane_id.clone())
+        .collect::<Vec<_>>();
+    pane_ids.sort();
+    pane_ids.dedup();
+    pane_ids
+}
+
+fn wait_for_resubscribe_signal(resubscribe_rx: &mpsc::Receiver<()>) -> Result<(), BridgeError> {
+    resubscribe_rx
+        .recv()
+        .map(|_| ())
+        .map_err(|_| BridgeError::Protocol("activity resubscribe channel closed".to_string()))
 }
 
 fn activity_subscriptions(pane_ids: &[String]) -> Vec<Subscription> {

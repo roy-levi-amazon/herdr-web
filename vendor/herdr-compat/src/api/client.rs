@@ -104,7 +104,13 @@ impl ApiClient {
 
         let mut reader = BufReader::new(stream);
         let ack = read_json_line(&mut reader)?;
-        Ok((ack, EventStream { reader }))
+        Ok((
+            ack,
+            EventStream {
+                reader,
+                pending_line: String::new(),
+            },
+        ))
     }
 
     pub fn status_with_timeout(
@@ -171,6 +177,7 @@ fn set_timeout_best_effort(
 
 pub struct EventStream {
     reader: BufReader<LocalStream>,
+    pending_line: String,
 }
 
 impl EventStream {
@@ -180,7 +187,7 @@ impl EventStream {
     }
 
     pub fn next_value(&mut self) -> Result<Option<serde_json::Value>, ApiClientError> {
-        read_optional_json_line(&mut self.reader)
+        read_optional_json_line(&mut self.reader, &mut self.pending_line)
     }
 }
 
@@ -239,9 +246,17 @@ fn read_json_line<T: DeserializeOwned>(
 
 fn read_optional_json_line<T: DeserializeOwned>(
     reader: &mut BufReader<LocalStream>,
+    pending_line: &mut String,
 ) -> Result<Option<T>, ApiClientError> {
-    let mut line = String::new();
-    let read = reader.read_line(&mut line)?;
+    let mut line = std::mem::take(pending_line);
+    let read = match reader.read_line(&mut line) {
+        Ok(read) => read,
+        Err(err) if is_timeout_error(&err) => {
+            *pending_line = line;
+            return Err(ApiClientError::Io(err));
+        }
+        Err(err) => return Err(ApiClientError::Io(err)),
+    };
     if read == 0 {
         return Ok(None);
     }
@@ -251,6 +266,13 @@ fn read_optional_json_line<T: DeserializeOwned>(
     serde_json::from_str(&line)
         .map(Some)
         .map_err(ApiClientError::Json)
+}
+
+fn is_timeout_error(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
 }
 
 #[derive(serde::Deserialize)]

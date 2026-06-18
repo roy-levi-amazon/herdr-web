@@ -10,7 +10,8 @@ import {
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { AgentIcon, agentIconKind } from "./AgentIcon";
-import { applyActivityMessage, parseActivityEventData } from "./activity";
+import { applyActivityMessage, parseActivityEventData, replayActivityMessages } from "./activity";
+import type { ActivityLogEntry } from "./activity";
 import { BackendSettingsDialog } from "./BackendSettingsDialog";
 import { useBridge } from "./bridge";
 import { createCommands, createdPaneId } from "./commands";
@@ -54,7 +55,6 @@ import {
   statusLabel,
 } from "./state";
 import type {
-  ActivityMessage,
   AgentStatus,
   PaneInfo,
   Snapshot,
@@ -96,11 +96,6 @@ type DisplayPrefs = {
   mobileTouchSelection: boolean;
   mobileKeyboardHideRefit: boolean;
 };
-type ActivityLogEntry = {
-  generation: number;
-  message: ActivityMessage;
-};
-
 const COMPACT_LAYOUT_QUERY = "(max-width: 820px)";
 const TOUCH_INPUT_QUERY = "(hover: none) and (pointer: coarse)";
 const DISPLAY_PREFS_KEY = "herdr.mobileWeb.displayPrefs.v1";
@@ -534,31 +529,36 @@ export function App() {
     refresh();
     const interval = window.setInterval(refresh, 10000);
     const events = openEventsSocket(bridge.wsUrl, "/ws/events", refresh);
-    const activity = openEventsSocket(bridge.wsUrl, "/ws/activity", (event) => {
-      if (!isCurrentConnection()) {
-        return;
-      }
-      const parsed = parseActivityEventData(event.data);
-      if (parsed.status === "ignored") {
-        return;
-      }
-      if (parsed.status === "invalid_known") {
-        requestActivityResync();
-        return;
-      }
-      const result = applyActivityMessage(snapshotRef.current, parsed.message);
-      if (result.status === "applied") {
-        activityGenerationRef.current += 1;
-        activityLogRef.current = [
-          ...activityLogRef.current,
-          { generation: activityGenerationRef.current, message: parsed.message },
-        ].slice(-100);
-        snapshotRef.current = result.snapshot;
-        setSnapshot(result.snapshot);
-      } else if (result.status === "resync") {
-        requestActivityResync();
-      }
-    });
+    const activity = openEventsSocket(
+      bridge.wsUrl,
+      "/ws/activity",
+      (event) => {
+        if (!isCurrentConnection()) {
+          return;
+        }
+        const parsed = parseActivityEventData(event.data);
+        if (parsed.status === "ignored") {
+          return;
+        }
+        if (parsed.status === "invalid_known") {
+          requestActivityResync();
+          return;
+        }
+        const result = applyActivityMessage(snapshotRef.current, parsed.message);
+        if (result.status === "applied") {
+          activityGenerationRef.current += 1;
+          activityLogRef.current = [
+            ...activityLogRef.current,
+            { generation: activityGenerationRef.current, message: parsed.message },
+          ].slice(-100);
+          snapshotRef.current = result.snapshot;
+          setSnapshot(result.snapshot);
+        } else if (result.status === "resync") {
+          requestActivityResync();
+        }
+      },
+      { onOpen: refresh },
+    );
     const uiEvents = openEventsSocket(bridge.wsUrl, "/ws/ui-events", (event) => {
       if (!isCurrentConnection()) {
         return;
@@ -2485,20 +2485,6 @@ async function fetchSnapshot(httpUrl: (path: string, query?: URLSearchParams) =>
   return (await response.json()) as Snapshot;
 }
 
-function replayActivityMessages(
-  snapshot: Snapshot,
-  log: readonly ActivityLogEntry[],
-  afterGeneration: number,
-) {
-  return log.reduce((current, entry) => {
-    if (entry.generation <= afterGeneration) {
-      return current;
-    }
-    const result = applyActivityMessage(current, entry.message);
-    return result.status === "applied" ? result.snapshot : current;
-  }, snapshot);
-}
-
 async function syncSelectedPane(
   httpUrl: (path: string, query?: URLSearchParams) => string,
   paneId: string,
@@ -2546,6 +2532,7 @@ function openEventsSocket(
   wsUrl: (path: string, query?: URLSearchParams) => string,
   path: string,
   onEvent: (event: MessageEvent) => void,
+  options: { onOpen?: () => void } = {},
 ) {
   const url = wsUrl(path);
   let socket: WebSocket | null = null;
@@ -2561,6 +2548,7 @@ function openEventsSocket(
     socket = next;
     next.addEventListener("open", () => {
       attempts = 0;
+      options.onOpen?.();
     });
     next.addEventListener("message", onEvent);
     next.addEventListener("close", () => {

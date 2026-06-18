@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { applyActivityMessage, parseActivityEventData, parseActivityMessage } from "./activity";
+import {
+  applyActivityMessage,
+  parseActivityEventData,
+  parseActivityMessage,
+  replayActivityMessages,
+} from "./activity";
 import type { PaneInfo, Snapshot } from "./types";
 
 const pane = (pane_id: string, tab_id = "tab-1", agent_status: PaneInfo["agent_status"] = "idle") =>
@@ -172,5 +177,95 @@ describe("applyActivityMessage", () => {
     expect(applyActivityMessage(data, { type: "resync_required", reason: "lagged" }).status).toBe(
       "resync",
     );
+  });
+});
+
+describe("replayActivityMessages", () => {
+  it("replays only messages newer than the fetched snapshot generation", () => {
+    const data = snapshot([pane("pane-1")]);
+    const replayed = replayActivityMessages(
+      data,
+      [
+        {
+          generation: 2,
+          message: {
+            type: "pane.agent_status_changed",
+            pane_id: "pane-1",
+            workspace_id: "workspace-1",
+            agent_status: "done",
+            agent: null,
+            title: "old",
+            display_agent: null,
+            custom_status: null,
+            state_labels: {},
+          },
+        },
+        {
+          generation: 3,
+          message: {
+            type: "pane.agent_status_changed",
+            pane_id: "pane-1",
+            workspace_id: "workspace-1",
+            agent_status: "working",
+            agent: "codex",
+            title: "new",
+            display_agent: "Codex",
+            custom_status: "running",
+            state_labels: { working: "Running" },
+          },
+        },
+      ],
+      2,
+    );
+
+    expect(replayed.panes[0]).toMatchObject({
+      agent_status: "working",
+      title: "new",
+      custom_status: "running",
+    });
+  });
+
+  it("skips replay entries that require a full resync", () => {
+    const data = snapshot([pane("pane-1")]);
+    const replayed = replayActivityMessages(
+      data,
+      [
+        {
+          generation: 3,
+          message: {
+            type: "pane.agent_status_changed",
+            pane_id: "missing",
+            workspace_id: "workspace-1",
+            agent_status: "working",
+            agent: null,
+            title: "missing",
+            display_agent: null,
+            custom_status: null,
+            state_labels: {},
+          },
+        },
+        { generation: 4, message: { type: "resync_required", reason: "lagged" } },
+        {
+          generation: 5,
+          message: {
+            type: "pane.agent_status_changed",
+            pane_id: "pane-1",
+            workspace_id: "workspace-1",
+            agent_status: "blocked",
+            agent: null,
+            title: "blocked",
+            display_agent: null,
+            custom_status: null,
+            state_labels: {},
+          },
+        },
+      ],
+      2,
+    );
+
+    expect(replayed.panes[0]).toMatchObject({
+      agent_status: "blocked",
+      title: "blocked",
+    });
   });
 });

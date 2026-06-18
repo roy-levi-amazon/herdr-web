@@ -1,6 +1,11 @@
 import { aggregateStatus } from "./state";
 import type { ActivityMessage, AgentStatus, PaneAgentStatusChangedMessage, Snapshot } from "./types";
 
+export type ActivityLogEntry = {
+  generation: number;
+  message: ActivityMessage;
+};
+
 export type ActivityApplyResult =
   | { status: "ignored"; snapshot: Snapshot | null }
   | { status: "applied"; snapshot: Snapshot }
@@ -78,6 +83,20 @@ export function applyActivityMessage(
     return { status: "resync", snapshot };
   }
   return applyPaneAgentStatusChanged(snapshot, message);
+}
+
+export function replayActivityMessages(
+  snapshot: Snapshot,
+  log: readonly ActivityLogEntry[],
+  afterGeneration: number,
+) {
+  return log.reduce((current, entry) => {
+    if (entry.generation <= afterGeneration) {
+      return current;
+    }
+    const result = applyActivityMessage(current, entry.message);
+    return result.status === "applied" ? result.snapshot : current;
+  }, snapshot);
 }
 
 function applyPaneAgentStatusChanged(
