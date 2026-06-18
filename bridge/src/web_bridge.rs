@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -50,9 +50,6 @@ const DEFAULT_STATIC_DIR: &str = "web/dist";
 const MIN_TERMINAL_ATTACH_PROTOCOL: u32 = 13;
 const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 const MAX_TERMINAL_INPUT_CHUNK_BYTES: usize = 768 * 1024;
-const TERMINAL_IO_DIAGNOSTIC_MIN_INPUT_BYTES: usize = 64 * 1024;
-const TERMINAL_IO_DIAGNOSTIC_WINDOW: Duration = Duration::from_secs(30);
-const TERMINAL_IO_DIAGNOSTIC_REPORT_INTERVAL: Duration = Duration::from_secs(1);
 const DAEMON_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const ACTIVITY_WATCHER_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const ACTIVITY_WATCHER_MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -1684,7 +1681,6 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
 
     let write_tx = session.write_tx.clone();
     let mut terminal_rx = session.output_tx.subscribe();
-    let mut output_diagnostic: Option<TerminalOutputDiagnostic> = None;
     let _ = write_tx.send(ClientMessage::Resize {
         cols,
         rows,
@@ -1698,16 +1694,9 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
                 match output {
                     Ok(output) => match output {
                     TerminalOutput::Bytes(bytes) => {
-                        let bytes_len = bytes.len();
-                        let send_started = Instant::now();
                         if ws_sender.send(Message::Binary(bytes.into())).await.is_err() {
                             break;
                         }
-                        record_terminal_output_diagnostic(
-                            &mut output_diagnostic,
-                            bytes_len,
-                            send_started.elapsed(),
-                        );
                     }
                     TerminalOutput::Close(reason) => {
                         let _ = ws_sender.send(Message::Text(close_message(&reason).into())).await;
@@ -1721,43 +1710,13 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
             Some(message) = ws_receiver.next() => {
                 match message {
                     Ok(Message::Text(text)) => {
-                        match handle_terminal_text_frame(&write_tx, text.as_str()) {
-                            Ok(Some(input)) => {
-                                start_terminal_output_diagnostic(&mut output_diagnostic, input);
-                            }
-                            Ok(None) => {}
-                            Err(_) => break,
+                        if handle_terminal_text_frame(&write_tx, text.as_str()).is_err() {
+                            break;
                         }
                     }
                     Ok(Message::Binary(bytes)) => {
-                        let started = Instant::now();
-                        let bytes_len = bytes.len();
-                        let send_result = send_terminal_input_chunks(&write_tx, &bytes);
-                        let forward_duration_us = started.elapsed().as_micros();
-                        info!(
-                            bytes = bytes_len,
-                            chunks = send_result
-                                .as_ref()
-                                .map(|stats| stats.chunks)
-                                .unwrap_or_default(),
-                            max_chunk_bytes = send_result
-                                .as_ref()
-                                .map(|stats| stats.max_chunk_bytes)
-                                .unwrap_or_default(),
-                            forward_duration_us,
-                            forwarded = send_result.is_ok(),
-                            "terminal binary input frame received"
-                        );
-                        match send_result {
-                            Ok(stats) => start_terminal_output_diagnostic(
-                                &mut output_diagnostic,
-                                TerminalInputForwardStats {
-                                    bytes: bytes_len,
-                                    chunks: stats.chunks,
-                                    max_chunk_bytes: stats.max_chunk_bytes,
-                                },
-                            ),
-                            Err(_) => break,
+                        if send_terminal_input_chunks(&write_tx, &bytes).is_err() {
+                            break;
                         }
                     }
                     Ok(Message::Close(_)) => break,
@@ -2171,126 +2130,6 @@ struct TerminalInputChunkStats {
     max_chunk_bytes: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TerminalInputForwardStats {
-    bytes: usize,
-    chunks: usize,
-    max_chunk_bytes: usize,
-}
-
-#[derive(Debug)]
-struct TerminalOutputDiagnostic {
-    started_at: Instant,
-    report_at: Instant,
-    input: TerminalInputForwardStats,
-    output_frames: usize,
-    output_bytes: usize,
-    max_frame_bytes: usize,
-    total_send_duration_us: u128,
-    max_send_duration_us: u128,
-    first_output_us: Option<u128>,
-}
-
-fn start_terminal_output_diagnostic(
-    diagnostic: &mut Option<TerminalOutputDiagnostic>,
-    input: TerminalInputForwardStats,
-) {
-    if input.bytes < TERMINAL_IO_DIAGNOSTIC_MIN_INPUT_BYTES {
-        return;
-    }
-    let now = Instant::now();
-    *diagnostic = Some(TerminalOutputDiagnostic {
-        started_at: now,
-        report_at: now + TERMINAL_IO_DIAGNOSTIC_REPORT_INTERVAL,
-        input,
-        output_frames: 0,
-        output_bytes: 0,
-        max_frame_bytes: 0,
-        total_send_duration_us: 0,
-        max_send_duration_us: 0,
-        first_output_us: None,
-    });
-    info!(
-        input_bytes = input.bytes,
-        input_chunks = input.chunks,
-        max_chunk_bytes = input.max_chunk_bytes,
-        window_ms = TERMINAL_IO_DIAGNOSTIC_WINDOW.as_millis(),
-        "terminal output diagnostic started"
-    );
-}
-
-fn record_terminal_output_diagnostic(
-    diagnostic: &mut Option<TerminalOutputDiagnostic>,
-    bytes: usize,
-    send_duration: Duration,
-) {
-    let Some(active) = diagnostic.as_mut() else {
-        return;
-    };
-    let now = Instant::now();
-    if now.duration_since(active.started_at) > TERMINAL_IO_DIAGNOSTIC_WINDOW {
-        finish_terminal_output_diagnostic(diagnostic, now);
-        return;
-    }
-
-    active.output_frames += 1;
-    active.output_bytes += bytes;
-    active.max_frame_bytes = active.max_frame_bytes.max(bytes);
-    let send_duration_us = send_duration.as_micros();
-    active.total_send_duration_us += send_duration_us;
-    active.max_send_duration_us = active.max_send_duration_us.max(send_duration_us);
-
-    if active.first_output_us.is_none() {
-        let first_output_us = now.duration_since(active.started_at).as_micros();
-        active.first_output_us = Some(first_output_us);
-        info!(
-            input_bytes = active.input.bytes,
-            input_chunks = active.input.chunks,
-            first_output_us,
-            frame_bytes = bytes,
-            send_duration_us,
-            "terminal first output after input"
-        );
-    }
-
-    if now >= active.report_at {
-        active.report_at = now + TERMINAL_IO_DIAGNOSTIC_REPORT_INTERVAL;
-        info!(
-            input_bytes = active.input.bytes,
-            input_chunks = active.input.chunks,
-            output_frames = active.output_frames,
-            output_bytes = active.output_bytes,
-            max_frame_bytes = active.max_frame_bytes,
-            total_send_duration_us = active.total_send_duration_us,
-            max_send_duration_us = active.max_send_duration_us,
-            first_output_us = active.first_output_us.unwrap_or_default(),
-            elapsed_ms = now.duration_since(active.started_at).as_millis(),
-            "terminal output diagnostic"
-        );
-    }
-}
-
-fn finish_terminal_output_diagnostic(
-    diagnostic: &mut Option<TerminalOutputDiagnostic>,
-    now: Instant,
-) {
-    let Some(active) = diagnostic.take() else {
-        return;
-    };
-    info!(
-        input_bytes = active.input.bytes,
-        input_chunks = active.input.chunks,
-        output_frames = active.output_frames,
-        output_bytes = active.output_bytes,
-        max_frame_bytes = active.max_frame_bytes,
-        total_send_duration_us = active.total_send_duration_us,
-        max_send_duration_us = active.max_send_duration_us,
-        first_output_us = active.first_output_us.unwrap_or_default(),
-        elapsed_ms = now.duration_since(active.started_at).as_millis(),
-        "terminal output diagnostic finished"
-    );
-}
-
 fn send_terminal_input_chunks(
     write_tx: &mpsc::Sender<ClientMessage>,
     data: &[u8],
@@ -2324,43 +2163,12 @@ fn send_terminal_input_chunks(
 fn handle_terminal_text_frame(
     write_tx: &mpsc::Sender<ClientMessage>,
     text: &str,
-) -> Result<Option<TerminalInputForwardStats>, String> {
-    let parse_started = Instant::now();
+) -> Result<(), String> {
     let frame = parse_terminal_client_frame(text)?;
-    let parse_duration_us = parse_started.elapsed().as_micros();
     match frame {
         TerminalClientFrame::Input { data } => {
-            let chars = data.chars().count();
-            let bytes = data.len();
-            let forward_started = Instant::now();
-            let send_result = send_terminal_input_chunks(write_tx, data.as_bytes());
-            let forward_duration_us = forward_started.elapsed().as_micros();
-            let total_duration_us = parse_started.elapsed().as_micros();
-            info!(
-                chars,
-                bytes,
-                text_frame_bytes = text.len(),
-                chunks = send_result
-                    .as_ref()
-                    .map(|stats| stats.chunks)
-                    .unwrap_or_default(),
-                max_chunk_bytes = send_result
-                    .as_ref()
-                    .map(|stats| stats.max_chunk_bytes)
-                    .unwrap_or_default(),
-                parse_duration_us,
-                forward_duration_us,
-                total_duration_us,
-                forwarded = send_result.is_ok(),
-                "terminal text input frame received"
-            );
-            send_result.map(|stats| {
-                Some(TerminalInputForwardStats {
-                    bytes,
-                    chunks: stats.chunks,
-                    max_chunk_bytes: stats.max_chunk_bytes,
-                })
-            })
+            send_terminal_input_chunks(write_tx, data.as_bytes())?;
+            Ok(())
         }
         TerminalClientFrame::Resize {
             cols,
@@ -2374,7 +2182,7 @@ fn handle_terminal_text_frame(
                 cell_width_px,
                 cell_height_px,
             })
-            .map(|_| None)
+            .map(|_| ())
             .map_err(|_| "terminal writer closed".to_string()),
         TerminalClientFrame::Scroll { direction, lines } => write_tx
             .send(ClientMessage::AttachScroll {
@@ -2388,7 +2196,7 @@ fn handle_terminal_text_frame(
                 row: None,
                 modifiers: 0,
             })
-            .map(|_| None)
+            .map(|_| ())
             .map_err(|_| "terminal writer closed".to_string()),
     }
 }
