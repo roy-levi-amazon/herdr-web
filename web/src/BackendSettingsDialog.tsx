@@ -32,6 +32,7 @@ import {
 import type { MobileTerminalTapTarget } from "./mobileTerminalPrefs";
 import { TERMINAL_INPUT_BATCH_DELAY_OPTIONS_MS } from "./terminalInputTransport";
 import type { TerminalInputTransport } from "./terminalInputTransport";
+import { TERMINAL_OUTPUT_COALESCE_OPTIONS_MS } from "./terminalOutputCoalescing";
 
 type Props = {
   showMobileTerminalSettings: boolean;
@@ -39,6 +40,8 @@ type Props = {
   onTerminalInputTransport: (transport: TerminalInputTransport) => void;
   terminalInputBatchDelayMs: number;
   onTerminalInputBatchDelayMs: (delayMs: number) => void;
+  terminalOutputCoalesceMs: number;
+  onTerminalOutputCoalesceMs: (delayMs: number) => void;
   contentInsetTopPx: number;
   onContentInsetTopPx: (value: number) => void;
   contentInsetBottomPx: number;
@@ -76,6 +79,8 @@ export function BackendSettingsDialog({
   onTerminalInputTransport,
   terminalInputBatchDelayMs,
   onTerminalInputBatchDelayMs,
+  terminalOutputCoalesceMs,
+  onTerminalOutputCoalesceMs,
   contentInsetTopPx,
   onContentInsetTopPx,
   contentInsetBottomPx,
@@ -513,7 +518,7 @@ export function BackendSettingsDialog({
                   </div>
                 </div>
                 <div className="settings-row">
-                  <span>Input batching</span>
+                  <span>Input batching (ms)</span>
                   <div className="segmented-control" role="group" aria-label="Terminal input batching">
                     {TERMINAL_INPUT_BATCH_DELAY_OPTIONS_MS.map((delayMs) => (
                       <button
@@ -523,7 +528,23 @@ export function BackendSettingsDialog({
                         aria-pressed={terminalInputBatchDelayMs === delayMs}
                         onClick={() => onTerminalInputBatchDelayMs(delayMs)}
                       >
-                        {delayMs === 0 ? "Off" : `${delayMs}ms`}
+                        {delayMs === 0 ? "Off" : delayMs}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="settings-row">
+                  <span>Output batching (ms)</span>
+                  <div className="segmented-control" role="group" aria-label="Terminal output batching">
+                    {TERMINAL_OUTPUT_COALESCE_OPTIONS_MS.map((delayMs) => (
+                      <button
+                        key={delayMs}
+                        type="button"
+                        data-on={terminalOutputCoalesceMs === delayMs}
+                        aria-pressed={terminalOutputCoalesceMs === delayMs}
+                        onClick={() => onTerminalOutputCoalesceMs(delayMs)}
+                      >
+                        {delayMs === 0 ? "Off" : delayMs}
                       </button>
                     ))}
                   </div>

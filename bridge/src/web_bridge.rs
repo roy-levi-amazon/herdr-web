@@ -51,10 +51,10 @@ const DEFAULT_STATIC_DIR: &str = "web/dist";
 const MIN_TERMINAL_ATTACH_PROTOCOL: u32 = 13;
 const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 const MAX_TERMINAL_INPUT_CHUNK_BYTES: usize = 768 * 1024;
-const TERMINAL_OUTPUT_COALESCE_WINDOW: Duration = Duration::from_millis(8);
+const DEFAULT_TERMINAL_OUTPUT_COALESCE_MS: u64 = 16;
+const MAX_TERMINAL_OUTPUT_COALESCE_MS: u64 = 256;
 const TERMINAL_OUTPUT_COALESCE_MAX_BYTES: usize = 32 * 1024;
 const TERMINAL_OUTPUT_COALESCE_MAX_CHUNKS: usize = 256;
-const TERMINAL_OUTPUT_STATS_INTERVAL: Duration = Duration::from_secs(10);
 const DAEMON_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const ACTIVITY_WATCHER_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const ACTIVITY_WATCHER_MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -143,6 +143,7 @@ struct TerminalQuery {
     terminal_id: String,
     cols: Option<u16>,
     rows: Option<u16>,
+    coalesce_ms: Option<u64>,
     #[serde(default)]
     takeover: bool,
 }
@@ -200,6 +201,7 @@ enum TerminalOutputCoalescingDecision {
     FlushPending(TerminalOutputFlushReason),
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct TerminalOutputCoalescingStats {
     source_frames: u64,
@@ -222,6 +224,7 @@ struct TerminalOutputCoalescingStats {
     max_flush_latency_us: u128,
 }
 
+#[cfg(test)]
 impl TerminalOutputCoalescingStats {
     fn record_source(&mut self, bytes: usize) {
         self.source_frames += 1;
@@ -269,18 +272,12 @@ impl TerminalOutputCoalescingStats {
         self.lagged_frames += frames;
     }
 
-    fn has_activity(&self) -> bool {
-        self.source_frames > 0 || self.lagged_events > 0
-    }
-
-    fn has_source_frames(&self) -> bool {
-        self.source_frames > 0
-    }
-
+    #[cfg(test)]
     fn frames_saved(&self) -> u64 {
         self.source_frames.saturating_sub(self.sent_frames)
     }
 
+    #[cfg(test)]
     fn coalescing_ratio(&self) -> f64 {
         if self.sent_frames == 0 {
             return 0.0;
@@ -288,6 +285,7 @@ impl TerminalOutputCoalescingStats {
         self.source_frames as f64 / self.sent_frames as f64
     }
 
+    #[cfg(test)]
     fn avg_source_frame_bytes(&self) -> f64 {
         if self.source_frames == 0 {
             return 0.0;
@@ -295,6 +293,7 @@ impl TerminalOutputCoalescingStats {
         self.source_bytes as f64 / self.source_frames as f64
     }
 
+    #[cfg(test)]
     fn avg_sent_frame_bytes(&self) -> f64 {
         if self.sent_frames == 0 {
             return 0.0;
@@ -302,6 +301,7 @@ impl TerminalOutputCoalescingStats {
         self.sent_bytes as f64 / self.sent_frames as f64
     }
 
+    #[cfg(test)]
     fn avg_flush_latency_us(&self) -> f64 {
         if self.coalesced_sent_frames == 0 {
             return 0.0;
@@ -310,27 +310,26 @@ impl TerminalOutputCoalescingStats {
     }
 }
 
-#[derive(Debug)]
 struct TerminalOutputCoalescer {
+    window: Duration,
     pending: Vec<Bytes>,
     pending_bytes: usize,
     pending_started_at: Option<Instant>,
     deadline: Option<Instant>,
-    interval_stats: TerminalOutputCoalescingStats,
+    #[cfg(test)]
     lifetime_stats: TerminalOutputCoalescingStats,
-    last_stats_log_at: Instant,
 }
 
 impl TerminalOutputCoalescer {
-    fn new(now: Instant) -> Self {
+    fn new(window: Duration) -> Self {
         Self {
+            window,
             pending: Vec::new(),
             pending_bytes: 0,
             pending_started_at: None,
             deadline: None,
-            interval_stats: TerminalOutputCoalescingStats::default(),
+            #[cfg(test)]
             lifetime_stats: TerminalOutputCoalescingStats::default(),
-            last_stats_log_at: now,
         }
     }
 
@@ -342,8 +341,13 @@ impl TerminalOutputCoalescer {
         let byte_count = bytes.len();
         self.record_source(byte_count);
 
+        if self.window.is_zero() {
+            self.record_immediate_send(byte_count);
+            return TerminalOutputCoalescingDecision::SendNow(bytes);
+        }
+
         if self.deadline.is_none() {
-            self.deadline = Some(now + TERMINAL_OUTPUT_COALESCE_WINDOW);
+            self.deadline = Some(now + self.window);
             self.record_immediate_send(byte_count);
             return TerminalOutputCoalescingDecision::SendNow(bytes);
         }
@@ -401,70 +405,62 @@ impl TerminalOutputCoalescer {
         if matches!(reason, TerminalOutputFlushReason::Close) {
             self.deadline = None;
         } else {
-            self.deadline = Some(now + TERMINAL_OUTPUT_COALESCE_WINDOW);
+            // Keep a trailing window warm so sustained redraws continue batching between flushes.
+            self.deadline = Some(now + self.window);
         }
         self.record_coalesced_send(source_chunks, bytes.len(), latency);
         Some(bytes)
     }
 
+    #[cfg(test)]
     fn record_lagged(&mut self, frames: u64) {
-        self.interval_stats.record_lagged(frames);
         self.lifetime_stats.record_lagged(frames);
     }
 
-    fn maybe_log_interval(&mut self, terminal_id: &str, now: Instant) {
-        if now.duration_since(self.last_stats_log_at) < TERMINAL_OUTPUT_STATS_INTERVAL {
-            return;
-        }
+    #[cfg(not(test))]
+    fn record_lagged(&mut self, _frames: u64) {}
 
-        if self.interval_stats.has_source_frames() {
-            log_terminal_output_coalescing_stats(terminal_id, "interval", &self.interval_stats);
-            self.interval_stats = TerminalOutputCoalescingStats::default();
-        }
-        self.last_stats_log_at = now;
-    }
-
-    fn log_final(&self, terminal_id: &str) {
-        if self.interval_stats.has_activity() {
-            log_terminal_output_coalescing_stats(
-                terminal_id,
-                "final_interval",
-                &self.interval_stats,
-            );
-        }
-        if self.lifetime_stats.has_activity() {
-            log_terminal_output_coalescing_stats(terminal_id, "lifetime", &self.lifetime_stats);
-        }
-    }
-
+    #[cfg(test)]
     fn record_source(&mut self, bytes: usize) {
-        self.interval_stats.record_source(bytes);
         self.lifetime_stats.record_source(bytes);
     }
 
+    #[cfg(not(test))]
+    fn record_source(&mut self, _bytes: usize) {}
+
+    #[cfg(test)]
     fn record_immediate_send(&mut self, bytes: usize) {
-        self.interval_stats.record_immediate_send(bytes);
         self.lifetime_stats.record_immediate_send(bytes);
     }
 
+    #[cfg(not(test))]
+    fn record_immediate_send(&mut self, _bytes: usize) {}
+
+    #[cfg(test)]
     fn record_pending(&mut self) {
-        self.interval_stats
-            .record_pending(self.pending_bytes, self.pending.len());
         self.lifetime_stats
             .record_pending(self.pending_bytes, self.pending.len());
     }
 
+    #[cfg(not(test))]
+    fn record_pending(&mut self) {}
+
+    #[cfg(test)]
     fn record_flush_reason(&mut self, reason: TerminalOutputFlushReason) {
-        self.interval_stats.record_flush_reason(reason);
         self.lifetime_stats.record_flush_reason(reason);
     }
 
+    #[cfg(not(test))]
+    fn record_flush_reason(&mut self, _reason: TerminalOutputFlushReason) {}
+
+    #[cfg(test)]
     fn record_coalesced_send(&mut self, chunks: usize, bytes: usize, latency: Duration) {
-        self.interval_stats
-            .record_coalesced_send(chunks, bytes, latency);
         self.lifetime_stats
             .record_coalesced_send(chunks, bytes, latency);
     }
+
+    #[cfg(not(test))]
+    fn record_coalesced_send(&mut self, _chunks: usize, _bytes: usize, _latency: Duration) {}
 }
 
 fn drain_terminal_output_pending(
@@ -489,39 +485,12 @@ fn drain_terminal_output_pending(
     Some(Bytes::from(output))
 }
 
-fn log_terminal_output_coalescing_stats(
-    terminal_id: &str,
-    scope: &str,
-    stats: &TerminalOutputCoalescingStats,
-) {
-    debug!(
-        terminal_id = %terminal_id,
-        scope = %scope,
-        source_frames = stats.source_frames,
-        source_bytes = stats.source_bytes,
-        sent_frames = stats.sent_frames,
-        sent_bytes = stats.sent_bytes,
-        immediate_frames = stats.immediate_frames,
-        coalesced_source_frames = stats.coalesced_source_frames,
-        coalesced_sent_frames = stats.coalesced_sent_frames,
-        timer_flushes = stats.timer_flushes,
-        byte_flushes = stats.byte_flushes,
-        chunk_flushes = stats.chunk_flushes,
-        single_chunk_flushes = stats.single_chunk_flushes,
-        merged_flushes = stats.merged_flushes,
-        lagged_events = stats.lagged_events,
-        lagged_frames = stats.lagged_frames,
-        max_pending_bytes = stats.max_pending_bytes,
-        max_pending_chunks = stats.max_pending_chunks,
-        total_flush_latency_us = stats.total_flush_latency_us,
-        max_flush_latency_us = stats.max_flush_latency_us,
-        coalescing_ratio = stats.coalescing_ratio(),
-        frames_saved = stats.frames_saved(),
-        avg_source_frame_bytes = stats.avg_source_frame_bytes(),
-        avg_sent_frame_bytes = stats.avg_sent_frame_bytes(),
-        avg_flush_latency_us = stats.avg_flush_latency_us(),
-        "terminal output coalescing stats"
-    );
+fn terminal_output_coalesce_window(coalesce_ms: Option<u64>) -> Duration {
+    Duration::from_millis(
+        coalesce_ms
+            .unwrap_or(DEFAULT_TERMINAL_OUTPUT_COALESCE_MS)
+            .min(MAX_TERMINAL_OUTPUT_COALESCE_MS),
+    )
 }
 
 #[derive(Clone)]
@@ -2003,6 +1972,7 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
     let terminal_id = query.terminal_id.clone();
     let cols = query.cols.unwrap_or(DEFAULT_COLS);
     let rows = query.rows.unwrap_or(DEFAULT_ROWS);
+    let coalesce_window = terminal_output_coalesce_window(query.coalesce_ms);
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let session = match acquire_terminal_session(
         state.clone(),
@@ -2025,7 +1995,7 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
 
     let write_tx = session.write_tx.clone();
     let mut terminal_rx = session.output_tx.subscribe();
-    let mut output_coalescer = TerminalOutputCoalescer::new(Instant::now());
+    let mut output_coalescer = TerminalOutputCoalescer::new(coalesce_window);
     let _ = write_tx.send(ClientMessage::Resize {
         cols,
         rows,
@@ -2039,7 +2009,6 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
                 biased;
                 _ = tokio::time::sleep_until(deadline) => {
                     if !handle_terminal_output_deadline(
-                        &terminal_id,
                         &mut ws_sender,
                         &mut output_coalescer,
                     )
@@ -2055,7 +2024,6 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
                 }
                 output = terminal_rx.recv() => {
                     if !handle_terminal_output_message(
-                        &terminal_id,
                         output,
                         &mut ws_sender,
                         &mut output_coalescer,
@@ -2071,7 +2039,6 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
             tokio::select! {
                 output = terminal_rx.recv() => {
                     if !handle_terminal_output_message(
-                        &terminal_id,
                         output,
                         &mut ws_sender,
                         &mut output_coalescer,
@@ -2091,12 +2058,10 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
         }
     }
 
-    output_coalescer.log_final(&terminal_id);
     release_terminal_session(&state, &terminal_id, &session);
 }
 
 async fn handle_terminal_output_deadline(
-    terminal_id: &str,
     ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     output_coalescer: &mut TerminalOutputCoalescer,
 ) -> bool {
@@ -2109,12 +2074,10 @@ async fn handle_terminal_output_deadline(
     if ws_sender.send(Message::Binary(bytes)).await.is_err() {
         return false;
     }
-    output_coalescer.maybe_log_interval(terminal_id, Instant::now());
     true
 }
 
 async fn handle_terminal_output_message(
-    terminal_id: &str,
     output: Result<TerminalOutput, tokio::sync::broadcast::error::RecvError>,
     ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     output_coalescer: &mut TerminalOutputCoalescer,
@@ -2127,7 +2090,6 @@ async fn handle_terminal_output_message(
                     if ws_sender.send(Message::Binary(bytes)).await.is_err() {
                         return false;
                     }
-                    output_coalescer.maybe_log_interval(terminal_id, Instant::now());
                 }
                 TerminalOutputCoalescingDecision::Pending => {}
                 TerminalOutputCoalescingDecision::FlushPending(reason) => {
@@ -2137,7 +2099,6 @@ async fn handle_terminal_output_message(
                     if ws_sender.send(Message::Binary(bytes)).await.is_err() {
                         return false;
                     }
-                    output_coalescer.maybe_log_interval(terminal_id, Instant::now());
                 }
             }
             true
@@ -2149,7 +2110,6 @@ async fn handle_terminal_output_message(
                 if ws_sender.send(Message::Binary(bytes)).await.is_err() {
                     return false;
                 }
-                output_coalescer.maybe_log_interval(terminal_id, Instant::now());
             }
             let _ = ws_sender
                 .send(Message::Text(close_message(&reason).into()))
@@ -2804,7 +2764,7 @@ mod tests {
     #[test]
     fn coalescer_sends_first_output_immediately() {
         let now = Instant::now();
-        let mut coalescer = TerminalOutputCoalescer::new(now);
+        let mut coalescer = TerminalOutputCoalescer::new(terminal_output_coalesce_window(None));
 
         assert_eq!(
             coalescer.push_bytes(Bytes::from_static(b"first"), now),
@@ -2812,7 +2772,7 @@ mod tests {
         );
         assert_eq!(
             coalescer.deadline(),
-            Some(now + TERMINAL_OUTPUT_COALESCE_WINDOW)
+            Some(now + terminal_output_coalesce_window(None))
         );
         assert_eq!(coalescer.lifetime_stats.source_frames, 1);
         assert_eq!(coalescer.lifetime_stats.sent_frames, 1);
@@ -2820,9 +2780,45 @@ mod tests {
     }
 
     #[test]
+    fn coalescer_can_disable_output_coalescing() {
+        let now = Instant::now();
+        let mut coalescer = TerminalOutputCoalescer::new(Duration::ZERO);
+
+        assert_eq!(
+            coalescer.push_bytes(Bytes::from_static(b"first"), now),
+            TerminalOutputCoalescingDecision::SendNow(Bytes::from_static(b"first"))
+        );
+        assert_eq!(
+            coalescer.push_bytes(Bytes::from_static(b"second"), now),
+            TerminalOutputCoalescingDecision::SendNow(Bytes::from_static(b"second"))
+        );
+        assert_eq!(coalescer.deadline(), None);
+        assert_eq!(coalescer.lifetime_stats.source_frames, 2);
+        assert_eq!(coalescer.lifetime_stats.sent_frames, 2);
+        assert_eq!(coalescer.lifetime_stats.coalesced_sent_frames, 0);
+    }
+
+    #[test]
+    fn terminal_output_coalesce_window_defaults_and_clamps() {
+        assert_eq!(
+            terminal_output_coalesce_window(None),
+            Duration::from_millis(DEFAULT_TERMINAL_OUTPUT_COALESCE_MS)
+        );
+        assert_eq!(terminal_output_coalesce_window(Some(0)), Duration::ZERO);
+        assert_eq!(
+            terminal_output_coalesce_window(Some(128)),
+            Duration::from_millis(128)
+        );
+        assert_eq!(
+            terminal_output_coalesce_window(Some(999)),
+            Duration::from_millis(MAX_TERMINAL_OUTPUT_COALESCE_MS)
+        );
+    }
+
+    #[test]
     fn coalescer_pends_output_inside_active_window() {
         let now = Instant::now();
-        let mut coalescer = TerminalOutputCoalescer::new(now);
+        let mut coalescer = TerminalOutputCoalescer::new(terminal_output_coalesce_window(None));
         let _ = coalescer.push_bytes(Bytes::from_static(b"first"), now);
 
         assert_eq!(
@@ -2838,7 +2834,7 @@ mod tests {
     #[test]
     fn coalescer_flushes_when_byte_threshold_is_reached() {
         let now = Instant::now();
-        let mut coalescer = TerminalOutputCoalescer::new(now);
+        let mut coalescer = TerminalOutputCoalescer::new(terminal_output_coalesce_window(None));
         let _ = coalescer.push_bytes(Bytes::from_static(b"first"), now);
 
         let decision = coalescer.push_bytes(
@@ -2865,7 +2861,7 @@ mod tests {
     #[test]
     fn coalescer_deadline_returns_to_idle_when_nothing_pending() {
         let now = Instant::now();
-        let mut coalescer = TerminalOutputCoalescer::new(now);
+        let mut coalescer = TerminalOutputCoalescer::new(terminal_output_coalesce_window(None));
         let _ = coalescer.push_bytes(Bytes::from_static(b"first"), now);
 
         assert_eq!(coalescer.handle_deadline(), None);
@@ -2875,8 +2871,8 @@ mod tests {
     #[test]
     fn coalescer_deadline_flushes_pending_and_rearms_window() {
         let now = Instant::now();
-        let flush_at = now + TERMINAL_OUTPUT_COALESCE_WINDOW;
-        let mut coalescer = TerminalOutputCoalescer::new(now);
+        let flush_at = now + terminal_output_coalesce_window(None);
+        let mut coalescer = TerminalOutputCoalescer::new(terminal_output_coalesce_window(None));
         let _ = coalescer.push_bytes(Bytes::from_static(b"first"), now);
         let _ = coalescer.push_bytes(Bytes::from_static(b"second"), now);
 
@@ -2890,7 +2886,7 @@ mod tests {
         );
         assert_eq!(
             coalescer.deadline(),
-            Some(flush_at + TERMINAL_OUTPUT_COALESCE_WINDOW)
+            Some(flush_at + terminal_output_coalesce_window(None))
         );
         assert_eq!(coalescer.lifetime_stats.timer_flushes, 1);
     }
@@ -2898,7 +2894,7 @@ mod tests {
     #[test]
     fn coalescer_keeps_spaced_output_immediate() {
         let now = Instant::now();
-        let mut coalescer = TerminalOutputCoalescer::new(now);
+        let mut coalescer = TerminalOutputCoalescer::new(terminal_output_coalesce_window(None));
 
         assert_eq!(
             coalescer.push_bytes(Bytes::from_static(b"one"), now),
@@ -2908,7 +2904,7 @@ mod tests {
         assert_eq!(
             coalescer.push_bytes(
                 Bytes::from_static(b"two"),
-                now + TERMINAL_OUTPUT_COALESCE_WINDOW + Duration::from_millis(1),
+                now + terminal_output_coalesce_window(None) + Duration::from_millis(1),
             ),
             TerminalOutputCoalescingDecision::SendNow(Bytes::from_static(b"two"))
         );
@@ -2916,7 +2912,7 @@ mod tests {
         assert_eq!(
             coalescer.push_bytes(
                 Bytes::from_static(b"three"),
-                now + TERMINAL_OUTPUT_COALESCE_WINDOW * 2 + Duration::from_millis(2),
+                now + terminal_output_coalesce_window(None) * 2 + Duration::from_millis(2),
             ),
             TerminalOutputCoalescingDecision::SendNow(Bytes::from_static(b"three"))
         );
@@ -2932,9 +2928,9 @@ mod tests {
     #[test]
     fn coalescer_keeps_continuous_stream_in_active_window() {
         let now = Instant::now();
-        let first_flush = now + TERMINAL_OUTPUT_COALESCE_WINDOW;
-        let second_flush = first_flush + TERMINAL_OUTPUT_COALESCE_WINDOW;
-        let mut coalescer = TerminalOutputCoalescer::new(now);
+        let first_flush = now + terminal_output_coalesce_window(None);
+        let second_flush = first_flush + terminal_output_coalesce_window(None);
+        let mut coalescer = TerminalOutputCoalescer::new(terminal_output_coalesce_window(None));
 
         let _ = coalescer.push_bytes(Bytes::from_static(b"one"), now);
         let _ = coalescer.push_bytes(Bytes::from_static(b"two"), now + Duration::from_millis(1));

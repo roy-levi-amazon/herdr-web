@@ -53,6 +53,10 @@ import {
 } from "./terminalInputTransport";
 import type { TerminalInputTransport } from "./terminalInputTransport";
 import {
+  DEFAULT_TERMINAL_OUTPUT_COALESCE_MS,
+  parseTerminalOutputCoalesceMs,
+} from "./terminalOutputCoalescing";
+import {
   aggregateStatus,
   canClearTabName,
   canClearWorkspaceName,
@@ -110,6 +114,7 @@ type DisplayPrefs = {
   selectedPaneId: string | null;
   terminalInputTransport: TerminalInputTransport;
   terminalInputBatchDelayMs: number;
+  terminalOutputCoalesceMs: number;
   contentInsetTopPx: number;
   contentInsetBottomPx: number;
   mobileControlsScalePercent: number;
@@ -138,6 +143,7 @@ function readDisplayPrefs(): DisplayPrefs {
     selectedPaneId: null,
     terminalInputTransport: DEFAULT_TERMINAL_INPUT_TRANSPORT,
     terminalInputBatchDelayMs: DEFAULT_TERMINAL_INPUT_BATCH_DELAY_MS,
+    terminalOutputCoalesceMs: DEFAULT_TERMINAL_OUTPUT_COALESCE_MS,
     contentInsetTopPx: DEFAULT_CONTENT_INSET_TOP_PX,
     contentInsetBottomPx: DEFAULT_CONTENT_INSET_BOTTOM_PX,
     mobileControlsScalePercent: DEFAULT_MOBILE_CONTROLS_SCALE_PERCENT,
@@ -179,6 +185,9 @@ function readDisplayPrefs(): DisplayPrefs {
         typeof parsed.selectedPaneId === "string" ? parsed.selectedPaneId : fallback.selectedPaneId,
       terminalInputTransport: parseTerminalInputTransport(parsed.terminalInputTransport),
       terminalInputBatchDelayMs: parseTerminalInputBatchDelayMs(parsed.terminalInputBatchDelayMs),
+      terminalOutputCoalesceMs: parseTerminalOutputCoalesceMs(
+        parsed.terminalOutputCoalesceMs,
+      ),
       contentInsetTopPx: parseContentInsetTopPx(parsed.contentInsetTopPx),
       contentInsetBottomPx: parseContentInsetBottomPx(parsed.contentInsetBottomPx),
       mobileControlsScalePercent: parseMobileControlsScalePercent(
@@ -273,6 +282,9 @@ export function App() {
   );
   const [terminalInputBatchDelayMs, setTerminalInputBatchDelayMs] = useState(
     initialPrefs.terminalInputBatchDelayMs,
+  );
+  const [terminalOutputCoalesceMs, setTerminalOutputCoalesceMs] = useState(
+    initialPrefs.terminalOutputCoalesceMs,
   );
   const [contentInsetTopPx, setContentInsetTopPx] = useState(initialPrefs.contentInsetTopPx);
   const [contentInsetBottomPx, setContentInsetBottomPx] = useState(
@@ -404,6 +416,7 @@ export function App() {
       selectedPaneId,
       terminalInputTransport,
       terminalInputBatchDelayMs,
+      terminalOutputCoalesceMs,
       contentInsetTopPx,
       contentInsetBottomPx,
       mobileControlsScalePercent,
@@ -422,6 +435,7 @@ export function App() {
     selectedPaneId,
     terminalInputTransport,
     terminalInputBatchDelayMs,
+    terminalOutputCoalesceMs,
     contentInsetTopPx,
     contentInsetBottomPx,
     mobileControlsScalePercent,
@@ -1343,6 +1357,7 @@ export function App() {
             mobileTouchSelection={mobileTouchSelection}
             terminalInputTransport={terminalInputTransport}
             terminalInputBatchDelayMs={terminalInputBatchDelayMs}
+            terminalOutputCoalesceMs={terminalOutputCoalesceMs}
             connectionKey={bridge.connectionKey}
             resumeToken={bridge.resumeToken}
             httpUrl={bridge.httpUrl}
@@ -1362,6 +1377,7 @@ export function App() {
             mobileTouchSelection={mobileTouchSelection}
             terminalInputTransport={terminalInputTransport}
             terminalInputBatchDelayMs={terminalInputBatchDelayMs}
+            terminalOutputCoalesceMs={terminalOutputCoalesceMs}
             refitToken={refitToken}
             focusToken={terminalFocusToken}
           />
@@ -1420,6 +1436,8 @@ export function App() {
           onTerminalInputTransport={setTerminalInputTransport}
           terminalInputBatchDelayMs={terminalInputBatchDelayMs}
           onTerminalInputBatchDelayMs={setTerminalInputBatchDelayMs}
+          terminalOutputCoalesceMs={terminalOutputCoalesceMs}
+          onTerminalOutputCoalesceMs={setTerminalOutputCoalesceMs}
           contentInsetTopPx={contentInsetTopPx}
           onContentInsetTopPx={setContentInsetTopPx}
           contentInsetBottomPx={contentInsetBottomPx}
@@ -1592,6 +1610,7 @@ function SplitGrid({
   mobileTouchSelection,
   terminalInputTransport,
   terminalInputBatchDelayMs,
+  terminalOutputCoalesceMs,
   connectionKey,
   resumeToken,
   httpUrl,
@@ -1607,6 +1626,7 @@ function SplitGrid({
   mobileTouchSelection: boolean;
   terminalInputTransport: TerminalInputTransport;
   terminalInputBatchDelayMs: number;
+  terminalOutputCoalesceMs: number;
   connectionKey: string;
   resumeToken: number;
   httpUrl: (path: string, query?: URLSearchParams) => string;
@@ -1637,6 +1657,7 @@ function SplitGrid({
               mobileTouchSelection={mobileTouchSelection}
               terminalInputTransport={terminalInputTransport}
               terminalInputBatchDelayMs={terminalInputBatchDelayMs}
+              terminalOutputCoalesceMs={terminalOutputCoalesceMs}
               refitToken={selected ? refitToken : 0}
               focusToken={selected ? focusToken : 0}
             />
