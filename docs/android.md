@@ -30,7 +30,7 @@ Run `npm run android:sync` before opening or building Android from a fresh check
 
 The browser-served web app still defaults to the bridge that served the page. The bundled Android
 app has no serving bridge origin, so it starts disconnected until the user adds and activates a
-saved bridge in `Bridges` settings.
+saved bridge in the Bridge area of Settings.
 
 Supported backend examples:
 
@@ -83,6 +83,12 @@ store-distributed build, prefer HTTPS bridge URLs and revisit whether cleartext 
 
 Android cloud auto-backup is disabled for the shell, so saved bridge profiles are not copied into
 device backup storage.
+
+## Settings On Android
+
+The Android shell uses the same area-based Settings UI described in the project README. Android
+starts disconnected, so the Bridge area is required for selecting a backend. On narrow screens the
+area selector appears as horizontal tabs. Android-specific touch behavior lives in the Mobile area.
 
 ## Build Prerequisites
 
@@ -175,15 +181,18 @@ On a trusted LAN:
 
 2. Install the debug APK on an Android device.
 3. Open the app and confirm the shell loads without network access.
-4. Open `Bridges` settings.
+4. Open Settings and select the Bridge area.
 5. Add a backend such as `http://192.168.1.20:4000`.
 6. Use `Test` and confirm it reports reachable.
 7. Use `Save & use`.
 8. Confirm snapshot, event updates, terminal attach, text input, stage-only input, uploads, and pane controls work.
-9. Toggle the mobile terminal tap setting and confirm terminal taps can focus either the text input or terminal.
-10. Force-close and reopen the app; confirm the active backend persists.
-11. Test Android back behavior from the mobile sidebar/detail views.
-12. Test an unreachable backend and confirm the app stays usable enough to edit settings.
+9. Open the Terminal area, change input transport and batching delay, and confirm terminal input
+   still works.
+10. Open the Mobile area, toggle the mobile terminal tap setting, and confirm terminal taps can
+    focus either the text input or terminal.
+11. Force-close and reopen the app; confirm the active backend and settings persist.
+12. Test Android back behavior from the mobile sidebar/detail views.
+13. Test an unreachable backend and confirm the app stays usable enough to edit settings.
 
 ## Release Notes
 

@@ -16,6 +16,13 @@ import { shellQuote } from "./shell";
 import { findFirstUrlInSelection, openableHttpUrl } from "./terminalSelection";
 import { GhosttyRenderer } from "./terminalRenderer";
 import type { TerminalRenderer, TerminalSize } from "./terminalRenderer";
+import {
+  appendTerminalInputBatch,
+  drainTerminalInputBatch,
+  emptyTerminalInputBatch,
+  shouldSendTerminalInputImmediately,
+} from "./terminalInputTransport";
+import type { TerminalInputTransport } from "./terminalInputTransport";
 import type { MobileTerminalTapTarget } from "./mobileTerminalPrefs";
 import type { PaneInfo } from "./types";
 
@@ -35,6 +42,10 @@ type Props = {
   mobileTapTarget?: MobileTerminalTapTarget;
   /** Enables long-press drag selection on touch terminals. */
   mobileTouchSelection?: boolean;
+  /** Browser-to-bridge transport for terminal input payloads. */
+  terminalInputTransport?: TerminalInputTransport;
+  /** Delay for coalescing short terminal input payloads. Zero disables batching. */
+  terminalInputBatchDelayMs?: number;
   /** Incrementing token from the parent that requests an immediate fit+resize. */
   refitToken?: number;
   /** Incrementing token from the parent that requests focus on the preferred terminal input. */
@@ -76,6 +87,8 @@ export function TerminalView({
   mobileControls = false,
   mobileTapTarget = "command-input",
   mobileTouchSelection = false,
+  terminalInputTransport = "json",
+  terminalInputBatchDelayMs = 0,
   refitToken = 0,
   focusToken = 0,
 }: Props) {
@@ -88,6 +101,9 @@ export function TerminalView({
   const sendResizeRef = useRef<(size: TerminalSize) => void>(() => {});
   const inputQueueRef = useRef<string[]>([]);
   const inputFlushTimerRef = useRef<number | null>(null);
+  const batchedInputRef = useRef(emptyTerminalInputBatch());
+  const batchedInputFlushTimerRef = useRef<number | null>(null);
+  const terminalInputEncoderRef = useRef(new TextEncoder());
   const uploadStatusTimerRef = useRef<number | null>(null);
   const uploadInFlightRef = useRef(false);
   const uploadConflictRef = useRef<UploadConflictState | null>(null);
@@ -111,6 +127,10 @@ export function TerminalView({
   mobileTapTargetRef.current = mobileTapTarget;
   const mobileTouchSelectionRef = useRef(mobileTouchSelection);
   mobileTouchSelectionRef.current = mobileTouchSelection;
+  const terminalInputTransportRef = useRef(terminalInputTransport);
+  terminalInputTransportRef.current = terminalInputTransport;
+  const terminalInputBatchDelayMsRef = useRef(terminalInputBatchDelayMs);
+  terminalInputBatchDelayMsRef.current = terminalInputBatchDelayMs;
   connectionKeyRef.current = connectionKey;
   terminalIdRef.current = pane?.terminal_id ?? null;
 
@@ -213,6 +233,82 @@ export function TerminalView({
     [measureTerminal],
   );
 
+  const sendTerminalInputFrame = useCallback(
+    (socket: WebSocket, data: string) => {
+      if (terminalInputTransportRef.current === "binary") {
+        const encoded = terminalInputEncoderRef.current.encode(data);
+        socket.send(encoded);
+        return;
+      }
+      const payload = JSON.stringify({ type: "input", data });
+      socket.send(payload);
+    },
+    [],
+  );
+
+  const clearBatchedInputTimer = useCallback(() => {
+    if (batchedInputFlushTimerRef.current !== null) {
+      window.clearTimeout(batchedInputFlushTimerRef.current);
+      batchedInputFlushTimerRef.current = null;
+    }
+  }, []);
+
+  const flushBatchedTerminalInput = useCallback(() => {
+    clearBatchedInputTimer();
+    const pending = batchedInputRef.current;
+    if (pending.parts.length === 0) {
+      batchedInputRef.current = emptyTerminalInputBatch();
+      return;
+    }
+    const socket = socketRef.current;
+    if (socket?.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const drained = drainTerminalInputBatch(pending);
+    batchedInputRef.current = drained.batch;
+    if (drained.data !== null) {
+      sendTerminalInputFrame(socket, drained.data);
+    }
+  }, [clearBatchedInputTimer, sendTerminalInputFrame]);
+
+  const scheduleBatchedTerminalInputFlush = useCallback(() => {
+    clearBatchedInputTimer();
+    const delayMs = terminalInputBatchDelayMsRef.current;
+    batchedInputFlushTimerRef.current = window.setTimeout(flushBatchedTerminalInput, delayMs);
+  }, [clearBatchedInputTimer, flushBatchedTerminalInput]);
+
+  const sendTerminalInputData = useCallback(
+    (data: string) => {
+      const socket = socketRef.current;
+      if (socket?.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      const delayMs = terminalInputBatchDelayMsRef.current;
+      const bytes = terminalInputEncoderRef.current.encode(data).byteLength;
+      if (shouldSendTerminalInputImmediately(bytes, delayMs)) {
+        flushBatchedTerminalInput();
+        sendTerminalInputFrame(socket, data);
+        return;
+      }
+      const result = appendTerminalInputBatch(batchedInputRef.current, data, bytes);
+      batchedInputRef.current = result.batch;
+      if (result.shouldFlush) {
+        flushBatchedTerminalInput();
+        return;
+      }
+      if (batchedInputFlushTimerRef.current === null) {
+        scheduleBatchedTerminalInputFlush();
+      }
+    },
+    [flushBatchedTerminalInput, scheduleBatchedTerminalInputFlush, sendTerminalInputFrame],
+  );
+
+  useEffect(() => {
+    if (terminalInputBatchDelayMs <= 0) {
+      flushBatchedTerminalInput();
+    }
+  }, [flushBatchedTerminalInput, terminalInputBatchDelayMs]);
+
   // Re-apply scroll tuning live when crossing the desktop/mobile breakpoint,
   // without tearing down the socket.
   useEffect(() => {
@@ -283,9 +379,7 @@ export function TerminalView({
         );
 
         disposeInput = renderer.onInput((data) => {
-          if (socket?.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: "input", data }));
-          }
+          sendTerminalInputData(data);
         });
         disposeScroll = renderer.onScroll((lines) => {
           if (socket?.readyState !== WebSocket.OPEN || lines === 0) {
@@ -391,6 +485,7 @@ export function TerminalView({
               if (autoFocusRef.current) {
                 window.setTimeout(() => renderer.focus(), 0);
               }
+              flushBatchedTerminalInput();
             }
           });
           nextSocket.addEventListener("message", (event) => {
@@ -443,6 +538,8 @@ export function TerminalView({
 
     return () => {
       disposed = true;
+      flushBatchedTerminalInput();
+      batchedInputRef.current = emptyTerminalInputBatch();
       inputQueueRef.current = [];
       if (inputFlushTimerRef.current !== null) {
         window.clearTimeout(inputFlushTimerRef.current);
@@ -468,7 +565,16 @@ export function TerminalView({
       rendererRef.current = null;
       host.replaceChildren();
     };
-  }, [connectionKey, measureTerminal, pane?.terminal_id, resumeToken, wsUrl]);
+  }, [
+    connectionKey,
+    measureTerminal,
+    pane?.terminal_id,
+    resumeToken,
+    flushBatchedTerminalInput,
+    sendTerminalInputData,
+    sendTerminalInputFrame,
+    wsUrl,
+  ]);
 
   useEffect(() => {
     rendererRef.current?.setTapFocusHandler(
@@ -526,10 +632,7 @@ export function TerminalView({
   }, [mobileControls, pane?.terminal_id, resizeTerminal]);
 
   const sendTerminalInput = (data: string) => {
-    const socket = socketRef.current;
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: "input", data }));
-    }
+    sendTerminalInputData(data);
   };
   const uploadDisabled = !pane || uploading;
 
@@ -682,7 +785,7 @@ export function TerminalView({
       retryCount = 0;
       const next = inputQueueRef.current.shift();
       if (next !== undefined) {
-        socket.send(JSON.stringify({ type: "input", data: next }));
+        sendTerminalInputFrame(socket, next);
       }
       if (inputQueueRef.current.length > 0) {
         inputFlushTimerRef.current = window.setTimeout(flush, 35);

@@ -9,4 +9,5 @@
 /dist-packages/
 .specs/
 *.log
+*.swp
 .DS_Store

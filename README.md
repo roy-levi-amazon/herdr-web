@@ -94,8 +94,8 @@ http://127.0.0.1:8787
 The desktop tarball includes the web assets and `herdr-web-bridge`; it does not include Herdr.
 Start or attach Herdr separately before running the bridge.
 
-For Android, install the APK from the same release and add the bridge URL in Bridges settings. LAN
-bridges must allow Android's app origin:
+For Android, install the APK from the same release and add the bridge URL in the Bridge area of
+Settings. LAN bridges must allow Android's app origin:
 
 ```bash
 bin/herdr-web --host 0.0.0.0 --port 4000 --allow-origin http://localhost
@@ -135,9 +135,22 @@ scripts/check-vendor.sh
 ```
 
 The Android app is a Capacitor shell around the bundled `web/dist` assets. It starts disconnected
-and uses the same Bridges settings UI to save one or more Herdr bridge URLs. Browser-served builds
+and uses the Bridge area in Settings to save one or more Herdr bridge URLs. Browser-served builds
 still default to the same-origin bridge that served the page. See [docs/android.md](docs/android.md)
 for HTTP/cleartext behavior, Android SDK setup, and APK verification notes.
+
+## Settings
+
+Settings are grouped by area:
+
+- Bridge: same-origin or saved bridge profiles, reachability testing, and the active backend.
+- Terminal: browser-to-bridge terminal input transport and input batching delay.
+- Mobile: touch-specific terminal behavior when running on a coarse pointer device.
+
+Terminal input payloads can be sent as JSON or binary WebSocket frames. JSON remains the default;
+binary is available for comparing terminal input performance. Terminal input batching is off by
+default. When enabled, short input chunks are coalesced for `32`, `64`, `128`, or `256` ms and are
+flushed early once the pending UTF-8 input reaches 32 bytes, so paste-like input bypasses the delay.
 
 ## Run Locally
 
@@ -219,6 +232,7 @@ The bridge exposes:
 - `POST /api/command`: allow-listed workspace/tab/pane commands
 - `POST /api/selection`: bridge-owned selected pane for syncing browser clients
 - `POST /api/uploads`: save uploaded files into the configured upload directory
+- `GET /ws/activity`: bridge-owned pane activity deltas
 - `GET /ws/events`: Herdr structural events
 - `GET /ws/ui-events`: bridge-local UI events such as selection changes
 - `GET /ws/terminal`: terminal attach stream

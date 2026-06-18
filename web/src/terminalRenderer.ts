@@ -248,11 +248,29 @@ export class GhosttyRenderer implements TerminalRenderer {
     return this.#terminal;
   }
 
+  #isCurrentTerminal(terminal: Terminal) {
+    return this.#terminal === terminal;
+  }
+
+  #hasMouseTracking(terminal: Terminal) {
+    if (!this.#isCurrentTerminal(terminal)) {
+      return true;
+    }
+    try {
+      return terminal.hasMouseTracking();
+    } catch (error) {
+      if (isGhosttyDisposedError(error)) {
+        return true;
+      }
+      throw error;
+    }
+  }
+
   #installScrollHandlers() {
     const terminal = this.#requireTerminal();
 
     terminal.attachCustomWheelEventHandler((event) => {
-      if (terminal.hasMouseTracking()) {
+      if (!this.#isCurrentTerminal(terminal) || this.#hasMouseTracking(terminal)) {
         return false;
       }
       event.preventDefault();
@@ -334,7 +352,7 @@ export class GhosttyRenderer implements TerminalRenderer {
       selectionTimer = null;
       if (
         !this.#mobileTouchSelectionEnabled ||
-        terminal.hasMouseTracking() ||
+        this.#hasMouseTracking(terminal) ||
         touchStartX === null ||
         touchStartY === null
       ) {
@@ -379,7 +397,7 @@ export class GhosttyRenderer implements TerminalRenderer {
       ) {
         return null;
       }
-      if (terminal.hasMouseTracking()) {
+      if (this.#hasMouseTracking(terminal)) {
         return null;
       }
       const touch = event.changedTouches[0];
@@ -408,7 +426,7 @@ export class GhosttyRenderer implements TerminalRenderer {
     const onTouchStart = (event: TouchEvent) => {
       clearSelectionTimer();
       if (event.touches.length === 1) {
-        const mouseTracking = terminal.hasMouseTracking();
+        const mouseTracking = this.#hasMouseTracking(terminal);
         if (this.#mobileTouchSelectionEnabled && !mouseTracking) {
           preventTouchEvent(event);
           suppressMouseEvents(TOUCH_SELECTION_LONG_PRESS_MS + TOUCH_COMPAT_MOUSE_SUPPRESS_MS);
@@ -446,7 +464,7 @@ export class GhosttyRenderer implements TerminalRenderer {
         preventTouchEvent(event);
         return;
       }
-      if (terminal.hasMouseTracking() || event.touches.length !== 1 || lastTouchY === null) {
+      if (this.#hasMouseTracking(terminal) || event.touches.length !== 1 || lastTouchY === null) {
         return;
       }
       const currentY = event.touches[0].clientY;
@@ -479,7 +497,7 @@ export class GhosttyRenderer implements TerminalRenderer {
     };
     const onTouchEnd = (event: TouchEvent) => {
       clearSelectionTimer();
-      if (terminal.hasMouseTracking()) {
+      if (this.#hasMouseTracking(terminal)) {
         lastTouchY = null;
         touchStartX = null;
         touchStartY = null;
@@ -551,7 +569,7 @@ export class GhosttyRenderer implements TerminalRenderer {
       return false;
     };
     const onMouseDown = (event: MouseEvent) => {
-      if (terminal.hasMouseTracking()) {
+      if (this.#hasMouseTracking(terminal)) {
         return;
       }
       if (suppressCompatMouseEvent(event)) {
@@ -722,6 +740,10 @@ function hideGhosttyTextarea(textarea: HTMLTextAreaElement) {
   textarea.style.background = "transparent";
   textarea.style.caretColor = "transparent";
   textarea.style.overflow = "hidden";
+}
+
+function isGhosttyDisposedError(error: unknown) {
+  return error instanceof Error && error.message === "Terminal has been disposed";
 }
 
 function cleanupEditableArtifacts(container: HTMLElement | null) {

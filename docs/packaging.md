@@ -131,7 +131,7 @@ bin/herdr-web --host 0.0.0.0 --port 4000 \
   --allow-host herdr-host.local
 ```
 
-Then install the Android APK and add the bridge URL in Bridges settings.
+Then install the Android APK and add the bridge URL in the Bridge area of Settings.
 
 ## Manual Release Upload
 

@@ -49,6 +49,7 @@ const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_STATIC_DIR: &str = "web/dist";
 const MIN_TERMINAL_ATTACH_PROTOCOL: u32 = 13;
 const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
+const MAX_TERMINAL_INPUT_CHUNK_BYTES: usize = 768 * 1024;
 const DAEMON_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const ACTIVITY_WATCHER_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const ACTIVITY_WATCHER_MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -1714,7 +1715,9 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
                         }
                     }
                     Ok(Message::Binary(bytes)) => {
-                        let _ = write_tx.send(ClientMessage::Input { data: bytes.to_vec() });
+                        if send_terminal_input_chunks(&write_tx, &bytes).is_err() {
+                            break;
+                        }
                     }
                     Ok(Message::Close(_)) => break,
                     Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
@@ -2121,16 +2124,52 @@ fn open_event_subscription(
     Ok(event_rx)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalInputChunkStats {
+    chunks: usize,
+    max_chunk_bytes: usize,
+}
+
+fn send_terminal_input_chunks(
+    write_tx: &mpsc::Sender<ClientMessage>,
+    data: &[u8],
+) -> Result<TerminalInputChunkStats, String> {
+    if data.is_empty() {
+        write_tx
+            .send(ClientMessage::Input { data: Vec::new() })
+            .map_err(|_| "terminal writer closed".to_string())?;
+        return Ok(TerminalInputChunkStats {
+            chunks: 1,
+            max_chunk_bytes: 0,
+        });
+    }
+
+    let mut stats = TerminalInputChunkStats {
+        chunks: 0,
+        max_chunk_bytes: 0,
+    };
+    for chunk in data.chunks(MAX_TERMINAL_INPUT_CHUNK_BYTES) {
+        stats.chunks += 1;
+        stats.max_chunk_bytes = stats.max_chunk_bytes.max(chunk.len());
+        write_tx
+            .send(ClientMessage::Input {
+                data: chunk.to_vec(),
+            })
+            .map_err(|_| "terminal writer closed".to_string())?;
+    }
+    Ok(stats)
+}
+
 fn handle_terminal_text_frame(
     write_tx: &mpsc::Sender<ClientMessage>,
     text: &str,
 ) -> Result<(), String> {
-    match parse_terminal_client_frame(text)? {
-        TerminalClientFrame::Input { data } => write_tx
-            .send(ClientMessage::Input {
-                data: data.into_bytes(),
-            })
-            .map_err(|_| "terminal writer closed".to_string()),
+    let frame = parse_terminal_client_frame(text)?;
+    match frame {
+        TerminalClientFrame::Input { data } => {
+            send_terminal_input_chunks(write_tx, data.as_bytes())?;
+            Ok(())
+        }
         TerminalClientFrame::Resize {
             cols,
             rows,
@@ -2143,6 +2182,7 @@ fn handle_terminal_text_frame(
                 cell_width_px,
                 cell_height_px,
             })
+            .map(|_| ())
             .map_err(|_| "terminal writer closed".to_string()),
         TerminalClientFrame::Scroll { direction, lines } => write_tx
             .send(ClientMessage::AttachScroll {
@@ -2156,6 +2196,7 @@ fn handle_terminal_text_frame(
                 row: None,
                 modifiers: 0,
             })
+            .map(|_| ())
             .map_err(|_| "terminal writer closed".to_string()),
     }
 }
@@ -2321,6 +2362,53 @@ mod tests {
             TerminalClientFrame::Input {
                 data: "ls\n".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn chunks_terminal_input_below_daemon_limit() {
+        let (tx, rx) = mpsc::channel();
+        let data = vec![b'x'; MAX_TERMINAL_INPUT_CHUNK_BYTES * 2 + 17];
+
+        let stats = send_terminal_input_chunks(&tx, &data).unwrap();
+
+        assert_eq!(
+            stats,
+            TerminalInputChunkStats {
+                chunks: 3,
+                max_chunk_bytes: MAX_TERMINAL_INPUT_CHUNK_BYTES
+            }
+        );
+        let chunks: Vec<Vec<u8>> = rx
+            .try_iter()
+            .map(|message| match message {
+                ClientMessage::Input { data } => data,
+                other => panic!("unexpected terminal message: {other:?}"),
+            })
+            .collect();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].len(), MAX_TERMINAL_INPUT_CHUNK_BYTES);
+        assert_eq!(chunks[1].len(), MAX_TERMINAL_INPUT_CHUNK_BYTES);
+        assert_eq!(chunks[2].len(), 17);
+        assert_eq!(chunks.concat(), data);
+    }
+
+    #[test]
+    fn forwards_empty_terminal_input_as_one_message() {
+        let (tx, rx) = mpsc::channel();
+
+        let stats = send_terminal_input_chunks(&tx, &[]).unwrap();
+
+        assert_eq!(
+            stats,
+            TerminalInputChunkStats {
+                chunks: 1,
+                max_chunk_bytes: 0
+            }
+        );
+        assert_eq!(
+            rx.recv().unwrap(),
+            ClientMessage::Input { data: Vec::new() }
         );
     }
 
