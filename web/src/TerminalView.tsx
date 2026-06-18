@@ -23,6 +23,7 @@ import {
   shouldSendTerminalInputImmediately,
 } from "./terminalInputTransport";
 import type { TerminalInputTransport } from "./terminalInputTransport";
+import { DEFAULT_TERMINAL_OUTPUT_COALESCE_MS } from "./terminalOutputCoalescing";
 import type { MobileTerminalTapTarget } from "./mobileTerminalPrefs";
 import type { PaneInfo } from "./types";
 
@@ -46,6 +47,8 @@ type Props = {
   terminalInputTransport?: TerminalInputTransport;
   /** Delay for coalescing short terminal input payloads. Zero disables batching. */
   terminalInputBatchDelayMs?: number;
+  /** Delay for coalescing terminal output frames. Zero disables output batching. */
+  terminalOutputCoalesceMs?: number;
   /** Incrementing token from the parent that requests an immediate fit+resize. */
   refitToken?: number;
   /** Incrementing token from the parent that requests focus on the preferred terminal input. */
@@ -89,6 +92,7 @@ export function TerminalView({
   mobileTouchSelection = false,
   terminalInputTransport = "json",
   terminalInputBatchDelayMs = 0,
+  terminalOutputCoalesceMs = DEFAULT_TERMINAL_OUTPUT_COALESCE_MS,
   refitToken = 0,
   focusToken = 0,
 }: Props) {
@@ -461,7 +465,7 @@ export function TerminalView({
             return;
           }
           const nextSocket = new WebSocket(
-            terminalSocketUrl(wsUrl, pane.terminal_id, initialSize),
+            terminalSocketUrl(wsUrl, pane.terminal_id, initialSize, terminalOutputCoalesceMs),
           );
           socket = nextSocket;
           socketRef.current = nextSocket;
@@ -573,6 +577,7 @@ export function TerminalView({
     flushBatchedTerminalInput,
     sendTerminalInputData,
     sendTerminalInputFrame,
+    terminalOutputCoalesceMs,
     wsUrl,
   ]);
 
@@ -1165,12 +1170,14 @@ function terminalSocketUrl(
   wsUrl: (path: string, query?: URLSearchParams) => string,
   terminalId: string,
   size: TerminalSize,
+  coalesceMs: number,
 ) {
   const params = new URLSearchParams({
     terminal_id: terminalId,
     cols: String(size.cols),
     rows: String(size.rows),
     takeover: "false",
+    coalesce_ms: String(coalesceMs),
   });
   return wsUrl("/ws/terminal", params);
 }
