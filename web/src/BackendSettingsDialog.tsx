@@ -1,4 +1,4 @@
-import { Check, Plus, X } from "lucide-react";
+import { Check, Plus, Server, Smartphone, SquareTerminal, X } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   duplicateBackend,
@@ -7,9 +7,15 @@ import {
 } from "./bridge";
 import type { BridgeBackendProfile } from "./bridge";
 import type { MobileTerminalTapTarget } from "./mobileTerminalPrefs";
+import { TERMINAL_INPUT_BATCH_DELAY_OPTIONS_MS } from "./terminalInputTransport";
+import type { TerminalInputTransport } from "./terminalInputTransport";
 
 type Props = {
   showMobileTerminalSettings: boolean;
+  terminalInputTransport: TerminalInputTransport;
+  onTerminalInputTransport: (transport: TerminalInputTransport) => void;
+  terminalInputBatchDelayMs: number;
+  onTerminalInputBatchDelayMs: (delayMs: number) => void;
   mobileTerminalTapTarget: MobileTerminalTapTarget;
   onMobileTerminalTapTarget: (target: MobileTerminalTapTarget) => void;
   mobileTouchSelection: boolean;
@@ -27,6 +33,7 @@ type FormState = {
 };
 
 type SelectionMode = "same-origin" | "new" | "backend";
+type SettingsArea = "bridge" | "terminal" | "mobile";
 
 const emptyForm: FormState = {
   id: null,
@@ -36,6 +43,10 @@ const emptyForm: FormState = {
 
 export function BackendSettingsDialog({
   showMobileTerminalSettings,
+  terminalInputTransport,
+  onTerminalInputTransport,
+  terminalInputBatchDelayMs,
+  onTerminalInputBatchDelayMs,
   mobileTerminalTapTarget,
   onMobileTerminalTapTarget,
   mobileTouchSelection,
@@ -56,6 +67,7 @@ export function BackendSettingsDialog({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [duplicate, setDuplicate] = useState<BridgeBackendProfile | null>(null);
+  const [activeArea, setActiveArea] = useState<SettingsArea>("bridge");
 
   const activeBackend = bridge.activeBackend;
   const selectedBackend = useMemo(
@@ -64,12 +76,21 @@ export function BackendSettingsDialog({
   );
 
   useEffect(() => {
+    if (activeArea !== "bridge") {
+      return;
+    }
     if (selectionMode === "same-origin") {
       closeButtonRef.current?.focus();
       return;
     }
     nameInputRef.current?.focus();
-  }, [selectionMode]);
+  }, [activeArea, selectionMode]);
+
+  useEffect(() => {
+    if (activeArea === "mobile" && !showMobileTerminalSettings) {
+      setActiveArea("terminal");
+    }
+  }, [activeArea, showMobileTerminalSettings]);
 
   useEffect(() => {
     if (selectionMode !== "backend" || form.id || bridge.store.backends.length === 0) {
@@ -184,6 +205,13 @@ export function BackendSettingsDialog({
   const editingBackend = selectionMode !== "same-origin";
   const sameOriginUrl = sameOriginDisplayUrl();
   const showSameOrigin = bridge.sameOriginAvailable;
+  const areas: { id: SettingsArea; label: string; icon: typeof Server }[] = [
+    { id: "bridge", label: "Bridge", icon: Server },
+    { id: "terminal", label: "Terminal", icon: SquareTerminal },
+    ...(showMobileTerminalSettings
+      ? [{ id: "mobile" as const, label: "Mobile", icon: Smartphone }]
+      : []),
+  ];
 
   return (
     <div className="overlay-root">
@@ -202,7 +230,7 @@ export function BackendSettingsDialog({
         }}
         onSubmit={(event) => {
           event.preventDefault();
-          if (!editingBackend) {
+          if (activeArea !== "bridge" || !editingBackend) {
             return;
           }
           void saveBackend(true);
@@ -220,96 +248,208 @@ export function BackendSettingsDialog({
         </button>
         <div id={titleId} className="modal-title">Settings</div>
         <div className="backend-layout">
-          <div className="backend-list" role="list" aria-label="Saved bridges">
-            {showSameOrigin ? (
+          <div className="settings-area-list" role="tablist" aria-label="Settings areas">
+            {areas.map(({ id, label, icon: Icon }) => (
               <button
-                className="backend-row"
+                key={id}
+                className="settings-area-tab"
                 type="button"
-                data-active={selectionMode === "same-origin" ? "true" : undefined}
-                onClick={selectSameOrigin}
+                role="tab"
+                data-active={activeArea === id ? "true" : undefined}
+                aria-selected={activeArea === id}
+                onClick={() => setActiveArea(id)}
               >
-                {!bridge.store.activeBackendId ? <Check size={14} /> : <span />}
-                <span>
-                  <strong>Same origin</strong>
-                  <small>{sameOriginUrl}</small>
-                </span>
-              </button>
-            ) : null}
-            {bridge.store.backends.map((backend) => (
-              <button
-                key={backend.id}
-                className="backend-row"
-                type="button"
-                data-active={backend.id === form.id ? "true" : undefined}
-                onClick={() => editBackend(backend)}
-              >
-                {backend.id === bridge.store.activeBackendId ? <Check size={14} /> : <span />}
-                <span>
-                  <strong>{backend.name}</strong>
-                  <small>{backend.baseUrl}</small>
-                </span>
+                <Icon size={15} />
+                <span>{label}</span>
               </button>
             ))}
-            <button
-              className="backend-row"
-              type="button"
-              data-active={selectionMode === "new" ? "true" : undefined}
-              onClick={startNew}
-            >
-              <Plus size={14} />
-              <span>
-                <strong>Add bridge</strong>
-                <small>Save another bridge URL</small>
-              </span>
-            </button>
           </div>
-          <div className="backend-form">
-            {selectionMode === "same-origin" ? (
-              <div className="backend-static">
-                <strong>Same origin</strong>
-                <span>Uses the server that delivered this web app.</span>
-              </div>
-            ) : (
+
+          <div className="settings-panel" role="tabpanel">
+            {activeArea === "bridge" ? (
               <>
-                <label className="field-label">
-                  <span>Display name</span>
-                  <input
-                    ref={nameInputRef}
-                    className="field"
-                    value={form.name}
-                    placeholder="Home workstation"
-                    autoComplete="off"
-                    onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
-                  />
-                </label>
-                <label className="field-label">
-                  <span>Bridge URL</span>
-                  <input
-                    className="field"
-                    value={form.baseUrl}
-                    placeholder="http://192.168.1.20:4000"
-                    autoComplete="off"
-                    spellCheck={false}
-                    onBlur={validateDuplicate}
-                    onChange={(event) =>
-                      setForm((current) => ({ ...current, baseUrl: event.target.value }))
-                    }
-                  />
-                </label>
-                {selectedBackend?.lastConnectedAt ? (
-                  <div className="backend-note">Last used {formatDate(selectedBackend.lastConnectedAt)}</div>
-                ) : null}
+                <div className="bridge-settings-grid">
+                  <div className="backend-list" role="list" aria-label="Saved bridges">
+                    {showSameOrigin ? (
+                      <button
+                        className="backend-row"
+                        type="button"
+                        data-active={selectionMode === "same-origin" ? "true" : undefined}
+                        onClick={selectSameOrigin}
+                      >
+                        {!bridge.store.activeBackendId ? <Check size={14} /> : <span />}
+                        <span>
+                          <strong>Same origin</strong>
+                          <small>{sameOriginUrl}</small>
+                        </span>
+                      </button>
+                    ) : null}
+                    {bridge.store.backends.map((backend) => (
+                      <button
+                        key={backend.id}
+                        className="backend-row"
+                        type="button"
+                        data-active={backend.id === form.id ? "true" : undefined}
+                        onClick={() => editBackend(backend)}
+                      >
+                        {backend.id === bridge.store.activeBackendId ? <Check size={14} /> : <span />}
+                        <span>
+                          <strong>{backend.name}</strong>
+                          <small>{backend.baseUrl}</small>
+                        </span>
+                      </button>
+                    ))}
+                    <button
+                      className="backend-row"
+                      type="button"
+                      data-active={selectionMode === "new" ? "true" : undefined}
+                      onClick={startNew}
+                    >
+                      <Plus size={14} />
+                      <span>
+                        <strong>Add bridge</strong>
+                        <small>Save another bridge URL</small>
+                      </span>
+                    </button>
+                  </div>
+                  <div className="backend-form">
+                    {selectionMode === "same-origin" ? (
+                      <div className="backend-static">
+                        <strong>Same origin</strong>
+                        <span>Uses the server that delivered this web app.</span>
+                      </div>
+                    ) : (
+                      <>
+                        <label className="field-label">
+                          <span>Display name</span>
+                          <input
+                            ref={nameInputRef}
+                            className="field"
+                            value={form.name}
+                            placeholder="Home workstation"
+                            autoComplete="off"
+                            onChange={(event) =>
+                              setForm((current) => ({ ...current, name: event.target.value }))
+                            }
+                          />
+                        </label>
+                        <label className="field-label">
+                          <span>Bridge URL</span>
+                          <input
+                            className="field"
+                            value={form.baseUrl}
+                            placeholder="http://192.168.1.20:4000"
+                            autoComplete="off"
+                            spellCheck={false}
+                            onBlur={validateDuplicate}
+                            onChange={(event) =>
+                              setForm((current) => ({ ...current, baseUrl: event.target.value }))
+                            }
+                          />
+                        </label>
+                        {selectedBackend?.lastConnectedAt ? (
+                          <div className="backend-note">
+                            Last used {formatDate(selectedBackend.lastConnectedAt)}
+                          </div>
+                        ) : null}
+                      </>
+                    )}
+                    {selectionMode === "same-origin" && bridge.store.activeBackendId ? (
+                      <div className="backend-note">
+                        Use switches back from the active saved bridge.
+                      </div>
+                    ) : null}
+                    {duplicate ? (
+                      <div className="backend-warning">
+                        This URL is already saved as {duplicate.name}.
+                      </div>
+                    ) : null}
+                    {message ? <div className="modal-message">{message}</div> : null}
+                  </div>
+                </div>
+                <div className="modal-actions">
+                  {canDelete ? (
+                    <button type="button" className="btn btn-danger" disabled={busy} onClick={deleteBackend}>
+                      Delete
+                    </button>
+                  ) : null}
+                  {selectionMode === "same-origin" && bridge.store.activeBackendId ? (
+                    <button type="button" className="btn btn-primary" onClick={useSameOrigin}>
+                      Use
+                    </button>
+                  ) : null}
+                  {editingBackend ? (
+                    <>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy || !form.baseUrl.trim()}
+                        onClick={testBackend}
+                      >
+                        Test
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy || !form.baseUrl.trim()}
+                        onClick={() => void saveBackend(false)}
+                      >
+                        Save
+                      </button>
+                      <button type="submit" className="btn btn-primary" disabled={busy || !form.baseUrl.trim()}>
+                        Save & use
+                      </button>
+                    </>
+                  ) : null}
+                </div>
               </>
-            )}
-            {selectionMode === "same-origin" && bridge.store.activeBackendId ? (
-              <div className="backend-note">Use switches back from the active saved bridge.</div>
             ) : null}
-            {duplicate ? (
-              <div className="backend-warning">This URL is already saved as {duplicate.name}.</div>
+
+            {activeArea === "terminal" ? (
+              <div className="settings-section settings-section-flat">
+                <div className="settings-label">Terminal transport</div>
+                <div className="settings-row">
+                  <span>Input payloads</span>
+                  <div className="segmented-control" role="group" aria-label="Terminal input payloads">
+                    <button
+                      type="button"
+                      data-on={terminalInputTransport === "json"}
+                      aria-pressed={terminalInputTransport === "json"}
+                      onClick={() => onTerminalInputTransport("json")}
+                    >
+                      JSON
+                    </button>
+                    <button
+                      type="button"
+                      data-on={terminalInputTransport === "binary"}
+                      aria-pressed={terminalInputTransport === "binary"}
+                      onClick={() => onTerminalInputTransport("binary")}
+                    >
+                      Binary
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-row">
+                  <span>Input batching</span>
+                  <div className="segmented-control" role="group" aria-label="Terminal input batching">
+                    {TERMINAL_INPUT_BATCH_DELAY_OPTIONS_MS.map((delayMs) => (
+                      <button
+                        key={delayMs}
+                        type="button"
+                        data-on={terminalInputBatchDelayMs === delayMs}
+                        aria-pressed={terminalInputBatchDelayMs === delayMs}
+                        onClick={() => onTerminalInputBatchDelayMs(delayMs)}
+                      >
+                        {delayMs === 0 ? "Off" : `${delayMs}ms`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
             ) : null}
-            {message ? <div className="modal-message">{message}</div> : null}
-            {showMobileTerminalSettings ? (
-              <div className="settings-section">
+
+            {activeArea === "mobile" && showMobileTerminalSettings ? (
+              <div className="settings-section settings-section-flat">
                 <div className="settings-label">Mobile terminal</div>
                 <div className="settings-row">
                   <span>Terminal tap</span>
@@ -383,36 +523,6 @@ export function BackendSettingsDialog({
               </div>
             ) : null}
           </div>
-        </div>
-        <div className="modal-actions">
-          {canDelete ? (
-            <button type="button" className="btn btn-danger" disabled={busy} onClick={deleteBackend}>
-              Delete
-            </button>
-          ) : null}
-          {selectionMode === "same-origin" && bridge.store.activeBackendId ? (
-            <button type="button" className="btn btn-primary" onClick={useSameOrigin}>
-              Use
-            </button>
-          ) : null}
-          {editingBackend ? (
-            <>
-              <button type="button" className="btn" disabled={busy || !form.baseUrl.trim()} onClick={testBackend}>
-                Test
-              </button>
-              <button
-                type="button"
-                className="btn"
-                disabled={busy || !form.baseUrl.trim()}
-                onClick={() => void saveBackend(false)}
-              >
-                Save
-              </button>
-              <button type="submit" className="btn btn-primary" disabled={busy || !form.baseUrl.trim()}>
-                Save & use
-              </button>
-            </>
-          ) : null}
         </div>
       </form>
     </div>

@@ -35,6 +35,6 @@ bin/herdr-web --host 0.0.0.0 --port 4000 \
   --allow-host herdr-host.local
 ```
 
-Then add the bridge URL in the Android app's Bridges settings.
+Then add the bridge URL in the Android app's Bridge area of Settings.
 
 Only bind to non-loopback interfaces on networks you trust.

@@ -38,6 +38,13 @@ import type { MenuItem } from "./overlays";
 import { createSnapshotRefreshController } from "./refreshCoordinator";
 import { TerminalView } from "./TerminalView";
 import {
+  DEFAULT_TERMINAL_INPUT_BATCH_DELAY_MS,
+  DEFAULT_TERMINAL_INPUT_TRANSPORT,
+  parseTerminalInputBatchDelayMs,
+  parseTerminalInputTransport,
+} from "./terminalInputTransport";
+import type { TerminalInputTransport } from "./terminalInputTransport";
+import {
   aggregateStatus,
   canClearTabName,
   canClearWorkspaceName,
@@ -93,6 +100,8 @@ type DisplayPrefs = {
   sidebarOpen: boolean;
   activeSpaceId: string | null;
   selectedPaneId: string | null;
+  terminalInputTransport: TerminalInputTransport;
+  terminalInputBatchDelayMs: number;
   mobileTerminalTapTarget: MobileTerminalTapTarget;
   mobileTouchSelection: boolean;
   mobileKeyboardHideRefit: boolean;
@@ -116,6 +125,8 @@ function readDisplayPrefs(): DisplayPrefs {
     sidebarOpen: true,
     activeSpaceId: null,
     selectedPaneId: null,
+    terminalInputTransport: DEFAULT_TERMINAL_INPUT_TRANSPORT,
+    terminalInputBatchDelayMs: DEFAULT_TERMINAL_INPUT_BATCH_DELAY_MS,
     mobileTerminalTapTarget: DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
     mobileTouchSelection: DEFAULT_MOBILE_TOUCH_SELECTION,
     mobileKeyboardHideRefit: DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT,
@@ -152,6 +163,8 @@ function readDisplayPrefs(): DisplayPrefs {
         typeof parsed.activeSpaceId === "string" ? parsed.activeSpaceId : fallback.activeSpaceId,
       selectedPaneId:
         typeof parsed.selectedPaneId === "string" ? parsed.selectedPaneId : fallback.selectedPaneId,
+      terminalInputTransport: parseTerminalInputTransport(parsed.terminalInputTransport),
+      terminalInputBatchDelayMs: parseTerminalInputBatchDelayMs(parsed.terminalInputBatchDelayMs),
       mobileTerminalTapTarget: parseMobileTerminalTapTarget(parsed.mobileTerminalTapTarget),
       mobileTouchSelection: parseMobileTouchSelection(parsed.mobileTouchSelection),
       mobileKeyboardHideRefit: parseMobileKeyboardHideRefit(parsed.mobileKeyboardHideRefit),
@@ -236,6 +249,12 @@ export function App() {
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [backendSettingsOpen, setBackendSettingsOpen] = useState(false);
+  const [terminalInputTransport, setTerminalInputTransport] = useState(
+    initialPrefs.terminalInputTransport,
+  );
+  const [terminalInputBatchDelayMs, setTerminalInputBatchDelayMs] = useState(
+    initialPrefs.terminalInputBatchDelayMs,
+  );
   const [mobileTerminalTapTarget, setMobileTerminalTapTarget] = useState(
     initialPrefs.mobileTerminalTapTarget,
   );
@@ -357,6 +376,8 @@ export function App() {
       sidebarOpen,
       activeSpaceId,
       selectedPaneId,
+      terminalInputTransport,
+      terminalInputBatchDelayMs,
       mobileTerminalTapTarget,
       mobileTouchSelection,
       mobileKeyboardHideRefit,
@@ -370,6 +391,8 @@ export function App() {
     sidebarOpen,
     activeSpaceId,
     selectedPaneId,
+    terminalInputTransport,
+    terminalInputBatchDelayMs,
     mobileTerminalTapTarget,
     mobileTouchSelection,
     mobileKeyboardHideRefit,
@@ -1275,6 +1298,8 @@ export function App() {
             touchInput={isTouchInput}
             mobileTapTarget={mobileTerminalTapTarget}
             mobileTouchSelection={mobileTouchSelection}
+            terminalInputTransport={terminalInputTransport}
+            terminalInputBatchDelayMs={terminalInputBatchDelayMs}
             connectionKey={bridge.connectionKey}
             resumeToken={bridge.resumeToken}
             httpUrl={bridge.httpUrl}
@@ -1292,6 +1317,8 @@ export function App() {
             mobileControls={isTouchInput}
             mobileTapTarget={mobileTerminalTapTarget}
             mobileTouchSelection={mobileTouchSelection}
+            terminalInputTransport={terminalInputTransport}
+            terminalInputBatchDelayMs={terminalInputBatchDelayMs}
             refitToken={refitToken}
             focusToken={terminalFocusToken}
           />
@@ -1346,6 +1373,10 @@ export function App() {
       {backendSettingsOpen ? (
         <BackendSettingsDialog
           showMobileTerminalSettings={isTouchInput}
+          terminalInputTransport={terminalInputTransport}
+          onTerminalInputTransport={setTerminalInputTransport}
+          terminalInputBatchDelayMs={terminalInputBatchDelayMs}
+          onTerminalInputBatchDelayMs={setTerminalInputBatchDelayMs}
           mobileTerminalTapTarget={mobileTerminalTapTarget}
           onMobileTerminalTapTarget={setMobileTerminalTapTarget}
           mobileTouchSelection={mobileTouchSelection}
@@ -1510,6 +1541,8 @@ function SplitGrid({
   touchInput,
   mobileTapTarget,
   mobileTouchSelection,
+  terminalInputTransport,
+  terminalInputBatchDelayMs,
   connectionKey,
   resumeToken,
   httpUrl,
@@ -1523,6 +1556,8 @@ function SplitGrid({
   touchInput: boolean;
   mobileTapTarget: MobileTerminalTapTarget;
   mobileTouchSelection: boolean;
+  terminalInputTransport: TerminalInputTransport;
+  terminalInputBatchDelayMs: number;
   connectionKey: string;
   resumeToken: number;
   httpUrl: (path: string, query?: URLSearchParams) => string;
@@ -1551,6 +1586,8 @@ function SplitGrid({
               mobileControls={selected && touchInput}
               mobileTapTarget={mobileTapTarget}
               mobileTouchSelection={mobileTouchSelection}
+              terminalInputTransport={terminalInputTransport}
+              terminalInputBatchDelayMs={terminalInputBatchDelayMs}
               refitToken={selected ? refitToken : 0}
               focusToken={selected ? focusToken : 0}
             />

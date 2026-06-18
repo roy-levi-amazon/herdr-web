@@ -16,6 +16,8 @@ import { shellQuote } from "./shell";
 import { findFirstUrlInSelection, openableHttpUrl } from "./terminalSelection";
 import { GhosttyRenderer } from "./terminalRenderer";
 import type { TerminalRenderer, TerminalSize } from "./terminalRenderer";
+import { TERMINAL_INPUT_BATCH_MAX_BYTES } from "./terminalInputTransport";
+import type { TerminalInputTransport } from "./terminalInputTransport";
 import type { MobileTerminalTapTarget } from "./mobileTerminalPrefs";
 import type { PaneInfo } from "./types";
 
@@ -35,6 +37,10 @@ type Props = {
   mobileTapTarget?: MobileTerminalTapTarget;
   /** Enables long-press drag selection on touch terminals. */
   mobileTouchSelection?: boolean;
+  /** Browser-to-bridge transport for terminal input payloads. */
+  terminalInputTransport?: TerminalInputTransport;
+  /** Delay for coalescing short terminal input payloads. Zero disables batching. */
+  terminalInputBatchDelayMs?: number;
   /** Incrementing token from the parent that requests an immediate fit+resize. */
   refitToken?: number;
   /** Incrementing token from the parent that requests focus on the preferred terminal input. */
@@ -61,9 +67,24 @@ type MobileSelectionAction = {
   text: string;
   url: string;
 };
+type TerminalOutputDiagnostic = {
+  startedAt: number;
+  reportAfter: number;
+  inputBytes: number;
+  inputFrame: number;
+  outputFrames: number;
+  outputBytes: number;
+  maxFrameBytes: number;
+  totalWriteMs: number;
+  maxWriteMs: number;
+  firstOutputMs: number | null;
+};
 
 const MAX_UPLOAD_FILES = 8;
 const TERMINAL_CONNECT_TIMEOUT_MS = 3500;
+const TERMINAL_IO_DIAGNOSTIC_MIN_INPUT_BYTES = 64 * 1024;
+const TERMINAL_IO_DIAGNOSTIC_WINDOW_MS = 30_000;
+const TERMINAL_IO_DIAGNOSTIC_REPORT_MS = 1_000;
 
 export function TerminalView({
   pane,
@@ -76,6 +97,8 @@ export function TerminalView({
   mobileControls = false,
   mobileTapTarget = "command-input",
   mobileTouchSelection = false,
+  terminalInputTransport = "json",
+  terminalInputBatchDelayMs = 0,
   refitToken = 0,
   focusToken = 0,
 }: Props) {
@@ -88,6 +111,15 @@ export function TerminalView({
   const sendResizeRef = useRef<(size: TerminalSize) => void>(() => {});
   const inputQueueRef = useRef<string[]>([]);
   const inputFlushTimerRef = useRef<number | null>(null);
+  const batchedInputRef = useRef<{ parts: string[]; bytes: number; source: string | null }>({
+    parts: [],
+    bytes: 0,
+    source: null,
+  });
+  const batchedInputFlushTimerRef = useRef<number | null>(null);
+  const terminalInputEncoderRef = useRef(new TextEncoder());
+  const terminalInputLogRef = useRef({ frames: 0, chars: 0, bytes: 0, maxBytes: 0 });
+  const terminalOutputDiagnosticRef = useRef<TerminalOutputDiagnostic | null>(null);
   const uploadStatusTimerRef = useRef<number | null>(null);
   const uploadInFlightRef = useRef(false);
   const uploadConflictRef = useRef<UploadConflictState | null>(null);
@@ -111,6 +143,8 @@ export function TerminalView({
   mobileTapTargetRef.current = mobileTapTarget;
   const mobileTouchSelectionRef = useRef(mobileTouchSelection);
   mobileTouchSelectionRef.current = mobileTouchSelection;
+  const terminalInputBatchDelayMsRef = useRef(terminalInputBatchDelayMs);
+  terminalInputBatchDelayMsRef.current = terminalInputBatchDelayMs;
   connectionKeyRef.current = connectionKey;
   terminalIdRef.current = pane?.terminal_id ?? null;
 
@@ -213,6 +247,225 @@ export function TerminalView({
     [measureTerminal],
   );
 
+  const logTerminalInputFrame = useCallback((
+    source: string,
+    transport: string,
+    data: string,
+    bytes: number,
+    timings: {
+      encodeMs?: number;
+      stringifyMs?: number;
+      sendMs: number;
+      totalMs: number;
+      bufferedBefore: number;
+      bufferedAfter: number;
+    },
+  ) => {
+    const stats = terminalInputLogRef.current;
+    stats.frames += 1;
+    stats.chars += data.length;
+    stats.bytes += bytes;
+    stats.maxBytes = Math.max(stats.maxBytes, bytes);
+    console.info("[terminal input frame]", {
+      source,
+      transport,
+      frame: stats.frames,
+      chars: data.length,
+      bytes,
+      totalChars: stats.chars,
+      totalBytes: stats.bytes,
+      maxBytes: stats.maxBytes,
+      encodeMs: timings.encodeMs,
+      stringifyMs: timings.stringifyMs,
+      sendMs: timings.sendMs,
+      totalMs: timings.totalMs,
+      bufferedBefore: timings.bufferedBefore,
+      bufferedAfter: timings.bufferedAfter,
+      bufferedDelta: timings.bufferedAfter - timings.bufferedBefore,
+    });
+    if (bytes >= TERMINAL_IO_DIAGNOSTIC_MIN_INPUT_BYTES) {
+      terminalOutputDiagnosticRef.current = {
+        startedAt: performance.now(),
+        reportAfter: performance.now() + TERMINAL_IO_DIAGNOSTIC_REPORT_MS,
+        inputBytes: bytes,
+        inputFrame: stats.frames,
+        outputFrames: 0,
+        outputBytes: 0,
+        maxFrameBytes: 0,
+        totalWriteMs: 0,
+        maxWriteMs: 0,
+        firstOutputMs: null,
+      };
+      console.info("[terminal output diagnostic started]", {
+        source,
+        transport,
+        inputFrame: stats.frames,
+        inputBytes: bytes,
+        windowMs: TERMINAL_IO_DIAGNOSTIC_WINDOW_MS,
+      });
+    }
+  }, []);
+
+  const logTerminalOutputFrame = useCallback((bytes: number, writeMs: number) => {
+    const diagnostic = terminalOutputDiagnosticRef.current;
+    if (!diagnostic) {
+      return;
+    }
+    const now = performance.now();
+    if (now - diagnostic.startedAt > TERMINAL_IO_DIAGNOSTIC_WINDOW_MS) {
+      console.info("[terminal output diagnostic finished]", {
+        inputFrame: diagnostic.inputFrame,
+        inputBytes: diagnostic.inputBytes,
+        outputFrames: diagnostic.outputFrames,
+        outputBytes: diagnostic.outputBytes,
+        maxFrameBytes: diagnostic.maxFrameBytes,
+        totalWriteMs: diagnostic.totalWriteMs,
+        maxWriteMs: diagnostic.maxWriteMs,
+        firstOutputMs: diagnostic.firstOutputMs,
+        elapsedMs: now - diagnostic.startedAt,
+      });
+      terminalOutputDiagnosticRef.current = null;
+      return;
+    }
+    diagnostic.outputFrames += 1;
+    diagnostic.outputBytes += bytes;
+    diagnostic.maxFrameBytes = Math.max(diagnostic.maxFrameBytes, bytes);
+    diagnostic.totalWriteMs += writeMs;
+    diagnostic.maxWriteMs = Math.max(diagnostic.maxWriteMs, writeMs);
+    if (diagnostic.firstOutputMs === null) {
+      diagnostic.firstOutputMs = now - diagnostic.startedAt;
+      console.info("[terminal first output after input]", {
+        inputFrame: diagnostic.inputFrame,
+        inputBytes: diagnostic.inputBytes,
+        firstOutputMs: diagnostic.firstOutputMs,
+        frameBytes: bytes,
+        writeMs,
+      });
+    }
+    if (now >= diagnostic.reportAfter) {
+      diagnostic.reportAfter = now + TERMINAL_IO_DIAGNOSTIC_REPORT_MS;
+      console.info("[terminal output diagnostic]", {
+        inputFrame: diagnostic.inputFrame,
+        inputBytes: diagnostic.inputBytes,
+        outputFrames: diagnostic.outputFrames,
+        outputBytes: diagnostic.outputBytes,
+        maxFrameBytes: diagnostic.maxFrameBytes,
+        totalWriteMs: diagnostic.totalWriteMs,
+        maxWriteMs: diagnostic.maxWriteMs,
+        firstOutputMs: diagnostic.firstOutputMs,
+        elapsedMs: now - diagnostic.startedAt,
+      });
+    }
+  }, []);
+
+  const sendTerminalInputFrame = useCallback(
+    (socket: WebSocket, data: string, source: string) => {
+      const start = performance.now();
+      const bufferedBefore = socket.bufferedAmount;
+      if (terminalInputTransport === "binary") {
+        const encoded = terminalInputEncoderRef.current.encode(data);
+        const encodedAt = performance.now();
+        socket.send(encoded);
+        const sentAt = performance.now();
+        logTerminalInputFrame(source, terminalInputTransport, data, encoded.byteLength, {
+          encodeMs: encodedAt - start,
+          sendMs: sentAt - encodedAt,
+          totalMs: sentAt - start,
+          bufferedBefore,
+          bufferedAfter: socket.bufferedAmount,
+        });
+        return;
+      }
+      const bytes = terminalInputEncoderRef.current.encode(data).byteLength;
+      const encodedAt = performance.now();
+      const payload = JSON.stringify({ type: "input", data });
+      const stringifiedAt = performance.now();
+      socket.send(payload);
+      const sentAt = performance.now();
+      logTerminalInputFrame(source, terminalInputTransport, data, bytes, {
+        encodeMs: encodedAt - start,
+        stringifyMs: stringifiedAt - encodedAt,
+        sendMs: sentAt - stringifiedAt,
+        totalMs: sentAt - start,
+        bufferedBefore,
+        bufferedAfter: socket.bufferedAmount,
+      });
+    },
+    [logTerminalInputFrame, terminalInputTransport],
+  );
+
+  const clearBatchedInputTimer = useCallback(() => {
+    if (batchedInputFlushTimerRef.current !== null) {
+      window.clearTimeout(batchedInputFlushTimerRef.current);
+      batchedInputFlushTimerRef.current = null;
+    }
+  }, []);
+
+  const flushBatchedTerminalInput = useCallback(() => {
+    clearBatchedInputTimer();
+    const pending = batchedInputRef.current;
+    if (pending.parts.length === 0) {
+      pending.bytes = 0;
+      pending.source = null;
+      return;
+    }
+    const socket = socketRef.current;
+    const parts = pending.parts;
+    const source = pending.source ?? "renderer";
+    pending.parts = [];
+    pending.bytes = 0;
+    pending.source = null;
+    if (socket?.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    sendTerminalInputFrame(socket, parts.join(""), `${source}-batch`);
+  }, [clearBatchedInputTimer, sendTerminalInputFrame]);
+
+  const scheduleBatchedTerminalInputFlush = useCallback(() => {
+    clearBatchedInputTimer();
+    const delayMs = terminalInputBatchDelayMsRef.current;
+    batchedInputFlushTimerRef.current = window.setTimeout(flushBatchedTerminalInput, delayMs);
+  }, [clearBatchedInputTimer, flushBatchedTerminalInput]);
+
+  const sendTerminalInputData = useCallback(
+    (data: string, source: string) => {
+      const socket = socketRef.current;
+      if (socket?.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      const delayMs = terminalInputBatchDelayMsRef.current;
+      if (delayMs <= 0) {
+        flushBatchedTerminalInput();
+        sendTerminalInputFrame(socket, data, source);
+        return;
+      }
+      const bytes = terminalInputEncoderRef.current.encode(data).byteLength;
+      const pending = batchedInputRef.current;
+      if (bytes >= TERMINAL_INPUT_BATCH_MAX_BYTES) {
+        flushBatchedTerminalInput();
+        sendTerminalInputFrame(socket, data, source);
+        return;
+      }
+      pending.parts.push(data);
+      pending.bytes += bytes;
+      pending.source = pending.source === null ? source : pending.source;
+      if (pending.bytes >= TERMINAL_INPUT_BATCH_MAX_BYTES) {
+        flushBatchedTerminalInput();
+        return;
+      }
+      if (batchedInputFlushTimerRef.current === null) {
+        scheduleBatchedTerminalInputFlush();
+      }
+    },
+    [flushBatchedTerminalInput, scheduleBatchedTerminalInputFlush, sendTerminalInputFrame],
+  );
+
+  useEffect(() => {
+    if (terminalInputBatchDelayMs <= 0) {
+      flushBatchedTerminalInput();
+    }
+  }, [flushBatchedTerminalInput, terminalInputBatchDelayMs]);
+
   // Re-apply scroll tuning live when crossing the desktop/mobile breakpoint,
   // without tearing down the socket.
   useEffect(() => {
@@ -283,9 +536,7 @@ export function TerminalView({
         );
 
         disposeInput = renderer.onInput((data) => {
-          if (socket?.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: "input", data }));
-          }
+          sendTerminalInputData(data, "renderer");
         });
         disposeScroll = renderer.onScroll((lines) => {
           if (socket?.readyState !== WebSocket.OPEN || lines === 0) {
@@ -356,6 +607,12 @@ export function TerminalView({
           scheduleReconnect();
         };
 
+        const writeTerminalOutput = (data: Uint8Array) => {
+          const startedAt = performance.now();
+          renderer.write(data);
+          logTerminalOutputFrame(data.byteLength, performance.now() - startedAt);
+        };
+
         const connectSocket = () => {
           if (disposed) {
             return;
@@ -399,13 +656,13 @@ export function TerminalView({
               return;
             }
             if (event.data instanceof ArrayBuffer) {
-              renderer.write(new Uint8Array(event.data));
+              writeTerminalOutput(new Uint8Array(event.data));
               return;
             }
             if (event.data instanceof Blob) {
               void event.data.arrayBuffer().then((buffer) => {
                 if (!disposed && socket === nextSocket) {
-                  renderer.write(new Uint8Array(buffer));
+                  writeTerminalOutput(new Uint8Array(buffer));
                 }
               });
             }
@@ -443,6 +700,7 @@ export function TerminalView({
 
     return () => {
       disposed = true;
+      flushBatchedTerminalInput();
       inputQueueRef.current = [];
       if (inputFlushTimerRef.current !== null) {
         window.clearTimeout(inputFlushTimerRef.current);
@@ -468,7 +726,17 @@ export function TerminalView({
       rendererRef.current = null;
       host.replaceChildren();
     };
-  }, [connectionKey, measureTerminal, pane?.terminal_id, resumeToken, wsUrl]);
+  }, [
+    connectionKey,
+    logTerminalOutputFrame,
+    measureTerminal,
+    pane?.terminal_id,
+    resumeToken,
+    flushBatchedTerminalInput,
+    sendTerminalInputData,
+    sendTerminalInputFrame,
+    wsUrl,
+  ]);
 
   useEffect(() => {
     rendererRef.current?.setTapFocusHandler(
@@ -526,10 +794,7 @@ export function TerminalView({
   }, [mobileControls, pane?.terminal_id, resizeTerminal]);
 
   const sendTerminalInput = (data: string) => {
-    const socket = socketRef.current;
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: "input", data }));
-    }
+    sendTerminalInputData(data, "mobile-key");
   };
   const uploadDisabled = !pane || uploading;
 
@@ -682,7 +947,7 @@ export function TerminalView({
       retryCount = 0;
       const next = inputQueueRef.current.shift();
       if (next !== undefined) {
-        socket.send(JSON.stringify({ type: "input", data: next }));
+        sendTerminalInputFrame(socket, next, "queued");
       }
       if (inputQueueRef.current.length > 0) {
         inputFlushTimerRef.current = window.setTimeout(flush, 35);
