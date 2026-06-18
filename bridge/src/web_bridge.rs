@@ -31,9 +31,10 @@ use tracing::{debug, info, warn};
 
 use herdr_compat::api::client::{ApiClient, ApiClientError};
 use herdr_compat::api::schema::{
-    EmptyParams, EventsSubscribeParams, Method, PaneInfo, PaneLayoutParams, PaneLayoutSnapshot,
-    PaneListParams, PaneMoveDestination, Request, ResponseResult, SplitDirection, Subscription,
-    TabInfo, TabListParams, WorkspaceInfo,
+    AgentStatus, EmptyParams, EventsSubscribeParams, Method, PaneInfo, PaneLayoutParams,
+    PaneLayoutSnapshot, PaneListParams, PaneMoveDestination, Request, ResponseResult,
+    SplitDirection, Subscription, SubscriptionEventData, SubscriptionEventEnvelope,
+    SubscriptionEventKind, TabInfo, TabListParams, WorkspaceInfo,
 };
 use herdr_compat::protocol::{
     self, AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode,
@@ -49,6 +50,10 @@ const DEFAULT_STATIC_DIR: &str = "web/dist";
 const MIN_TERMINAL_ATTACH_PROTOCOL: u32 = 13;
 const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 const DAEMON_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+const ACTIVITY_WATCHER_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const ACTIVITY_WATCHER_MAX_BACKOFF: Duration = Duration::from_secs(30);
+const ACTIVITY_RESUBSCRIBE_DEBOUNCE: Duration = Duration::from_millis(100);
+const ACTIVITY_READ_TIMEOUT: Duration = Duration::from_millis(250);
 static UPLOAD_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone)]
@@ -69,6 +74,7 @@ struct BridgeState {
     terminal_sessions: Arc<Mutex<HashMap<String, SharedTerminalSession>>>,
     selected_pane_id: Arc<Mutex<Option<String>>>,
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
+    activity_tx: tokio::sync::broadcast::Sender<ActivityMessage>,
     upload_dir: PathBuf,
 }
 
@@ -106,6 +112,24 @@ struct SnapshotTabInfo {
 #[derive(Debug, Serialize)]
 struct Capabilities {
     commands: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum ActivityMessage {
+    #[serde(rename = "pane.agent_status_changed")]
+    PaneAgentStatusChanged {
+        pane_id: String,
+        workspace_id: String,
+        agent_status: AgentStatus,
+        agent: Option<String>,
+        title: Option<String>,
+        display_agent: Option<String>,
+        custom_status: Option<String>,
+        state_labels: HashMap<String, String>,
+    },
+    #[serde(rename = "resync_required")]
+    ResyncRequired { reason: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -416,8 +440,10 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
         selected_pane_id: Arc::new(Mutex::new(None)),
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
+        activity_tx: tokio::sync::broadcast::channel(512).0,
         upload_dir: options.upload_dir.clone(),
     };
+    spawn_agent_activity_watcher(state.clone());
     let app = Router::new()
         .route(
             "/api/snapshot",
@@ -440,6 +466,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             post(upload_handler).options(preflight_handler),
         )
         .route("/ws/events", get(events_ws_handler))
+        .route("/ws/activity", get(activity_ws_handler))
         .route("/ws/ui-events", get(ui_events_ws_handler))
         .route("/ws/terminal", get(terminal_ws_handler))
         .fallback_service(
@@ -1478,6 +1505,18 @@ async fn events_ws_handler(
         .into_response()
 }
 
+async fn activity_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(err) = ensure_allowed_request(&headers, &state.request_policy) {
+        return err.into_response();
+    }
+    ws.on_upgrade(move |socket| handle_activity_socket(socket, state))
+        .into_response()
+}
+
 async fn ui_events_ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<BridgeState>,
@@ -1533,6 +1572,52 @@ async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
             else => break,
         }
     }
+}
+
+async fn handle_activity_socket(socket: WebSocket, state: BridgeState) {
+    let mut activity_rx = state.activity_tx.subscribe();
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+    loop {
+        tokio::select! {
+            event = activity_rx.recv() => {
+                match event {
+                    Ok(event) => {
+                        if send_activity_message(&mut ws_sender, &event).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let event = ActivityMessage::ResyncRequired {
+                            reason: "activity receiver lagged".to_string(),
+                        };
+                        let _ = send_activity_message(&mut ws_sender, &event).await;
+                        break;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            Some(message) = ws_receiver.next() => {
+                match message {
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    Ok(Message::Text(_))
+                    | Ok(Message::Binary(_))
+                    | Ok(Message::Ping(_))
+                    | Ok(Message::Pong(_)) => {}
+                }
+            }
+            else => break,
+        }
+    }
+}
+
+async fn send_activity_message(
+    ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    event: &ActivityMessage,
+) -> Result<(), axum::Error> {
+    let text = serde_json::to_string(event).unwrap_or_else(|_| {
+        r#"{"type":"resync_required","reason":"activity serialization failed"}"#.to_string()
+    });
+    ws_sender.send(Message::Text(text.into())).await
 }
 
 async fn handle_ui_events_socket(socket: WebSocket, state: BridgeState) {
@@ -1763,29 +1848,218 @@ fn close_message(reason: &str) -> String {
     )
 }
 
+fn spawn_agent_activity_watcher(state: BridgeState) {
+    let (resubscribe_tx, resubscribe_rx) = mpsc::channel();
+    let structural_state = state.clone();
+    if let Err(err) = thread::Builder::new()
+        .name("herdr-web-activity-structural".to_string())
+        .spawn(move || agent_activity_structural_watcher_loop(structural_state, resubscribe_tx))
+    {
+        warn!(error = %err, "failed to start herdr-web activity structural watcher");
+    }
+    if let Err(err) = thread::Builder::new()
+        .name("herdr-web-activity".to_string())
+        .spawn(move || agent_activity_watcher_loop(state, resubscribe_rx))
+    {
+        warn!(error = %err, "failed to start herdr-web activity watcher");
+    }
+}
+
+fn agent_activity_structural_watcher_loop(state: BridgeState, resubscribe_tx: mpsc::Sender<()>) {
+    let mut backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
+    loop {
+        match run_agent_activity_structural_subscription(&state, &resubscribe_tx) {
+            Ok(()) => {
+                backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
+            }
+            Err(err) => {
+                warn!(error = %err, "herdr-web activity structural watcher will retry");
+                thread::sleep(backoff);
+                backoff = (backoff * 2).min(ACTIVITY_WATCHER_MAX_BACKOFF);
+            }
+        }
+    }
+}
+
+fn agent_activity_watcher_loop(state: BridgeState, resubscribe_rx: mpsc::Receiver<()>) {
+    let mut backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
+    loop {
+        match run_agent_activity_subscription(&state, &resubscribe_rx) {
+            Ok(()) => {
+                backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
+                thread::sleep(ACTIVITY_RESUBSCRIBE_DEBOUNCE);
+            }
+            Err(err) => {
+                warn!(error = %err, "herdr-web activity watcher will retry");
+                thread::sleep(backoff);
+                backoff = (backoff * 2).min(ACTIVITY_WATCHER_MAX_BACKOFF);
+            }
+        }
+    }
+}
+
+fn run_agent_activity_structural_subscription(
+    state: &BridgeState,
+    resubscribe_tx: &mpsc::Sender<()>,
+) -> Result<(), BridgeError> {
+    let request = Request {
+        id: "herdr-web:activity-structural".to_string(),
+        method: Method::EventsSubscribe(EventsSubscribeParams {
+            subscriptions: structural_event_subscriptions(),
+        }),
+    };
+    let (ack, mut stream) = state.api.subscribe_value(&request, None)?;
+    let response = herdr_compat::api::client::parse_response_value(ack)?;
+    if !matches!(response.result, ResponseResult::SubscriptionStarted {}) {
+        return Err(BridgeError::Protocol(format!(
+            "unexpected subscription response: {:?}",
+            response.result
+        )));
+    }
+
+    while let Some(value) = stream.next_value()? {
+        if is_structural_event_value(&value) && resubscribe_tx.send(()).is_err() {
+            return Ok(());
+        }
+    }
+    Err(BridgeError::Protocol(
+        "activity structural subscription ended".to_string(),
+    ))
+}
+
+fn run_agent_activity_subscription(
+    state: &BridgeState,
+    resubscribe_rx: &mpsc::Receiver<()>,
+) -> Result<(), BridgeError> {
+    drain_resubscribe_signals(resubscribe_rx);
+    let panes = current_panes(&state.api)?;
+    let pane_ids = panes
+        .iter()
+        .map(|pane| pane.pane_id.clone())
+        .collect::<Vec<_>>();
+    let request = Request {
+        id: "herdr-web:activity".to_string(),
+        method: Method::EventsSubscribe(EventsSubscribeParams {
+            subscriptions: activity_subscriptions(&pane_ids),
+        }),
+    };
+    let (ack, mut stream) = state.api.subscribe_value(&request, None)?;
+    let response = herdr_compat::api::client::parse_response_value(ack)?;
+    if !matches!(response.result, ResponseResult::SubscriptionStarted {}) {
+        return Err(BridgeError::Protocol(format!(
+            "unexpected subscription response: {:?}",
+            response.result
+        )));
+    }
+    stream.set_read_timeout(ACTIVITY_READ_TIMEOUT)?;
+
+    loop {
+        if drain_resubscribe_signals(resubscribe_rx) {
+            return Ok(());
+        }
+        match stream.next_value() {
+            Ok(Some(value)) => {
+                if let Some(message) = activity_message_from_subscription_value(value) {
+                    let _ = state.activity_tx.send(message);
+                }
+            }
+            Ok(None) => {
+                return Err(BridgeError::Protocol(
+                    "activity subscription ended".to_string(),
+                ))
+            }
+            Err(err) if is_timeout_error(&err) => continue,
+            Err(err) => return Err(err.into()),
+        }
+    }
+}
+
+fn activity_subscriptions(pane_ids: &[String]) -> Vec<Subscription> {
+    let mut pane_ids = pane_ids.to_vec();
+    pane_ids.sort();
+    pane_ids.dedup();
+    pane_ids
+        .into_iter()
+        .map(|pane_id| Subscription::PaneAgentStatusChanged {
+            pane_id,
+            agent_status: None,
+        })
+        .collect()
+}
+
+fn structural_event_subscriptions() -> Vec<Subscription> {
+    vec![
+        Subscription::WorkspaceCreated {},
+        Subscription::WorkspaceUpdated {},
+        Subscription::WorkspaceRenamed {},
+        Subscription::WorkspaceClosed {},
+        Subscription::WorkspaceFocused {},
+        Subscription::WorktreeCreated {},
+        Subscription::WorktreeOpened {},
+        Subscription::WorktreeRemoved {},
+        Subscription::TabCreated {},
+        Subscription::TabClosed {},
+        Subscription::TabFocused {},
+        Subscription::TabRenamed {},
+        Subscription::PaneCreated {},
+        Subscription::PaneClosed {},
+        Subscription::PaneFocused {},
+        Subscription::PaneMoved {},
+        Subscription::PaneExited {},
+        Subscription::PaneAgentDetected {},
+    ]
+}
+
+fn activity_message_from_subscription_value(value: serde_json::Value) -> Option<ActivityMessage> {
+    let envelope: SubscriptionEventEnvelope = serde_json::from_value(value).ok()?;
+    if envelope.event != SubscriptionEventKind::PaneAgentStatusChanged {
+        return None;
+    }
+    let SubscriptionEventData::PaneAgentStatusChanged(event) = envelope.data else {
+        return None;
+    };
+    Some(ActivityMessage::PaneAgentStatusChanged {
+        pane_id: event.pane_id,
+        workspace_id: event.workspace_id,
+        agent_status: event.agent_status,
+        agent: event.agent,
+        title: event.title,
+        display_agent: event.display_agent,
+        custom_status: event.custom_status,
+        state_labels: event.state_labels,
+    })
+}
+
+fn is_structural_event_value(value: &serde_json::Value) -> bool {
+    value
+        .get("event")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|event| event != "pane.agent_status_changed")
+}
+
+fn drain_resubscribe_signals(resubscribe_rx: &mpsc::Receiver<()>) -> bool {
+    let mut received = false;
+    while resubscribe_rx.try_recv().is_ok() {
+        received = true;
+    }
+    received
+}
+
+fn is_timeout_error(err: &ApiClientError) -> bool {
+    matches!(
+        err,
+        ApiClientError::Io(err)
+            if matches!(err.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock)
+    )
+}
+
 fn open_event_subscription(
     api: ApiClient,
 ) -> Result<tokio::sync::mpsc::UnboundedReceiver<String>, BridgeError> {
     let request = Request {
         id: "herdr-web:events".to_string(),
         method: Method::EventsSubscribe(EventsSubscribeParams {
-            subscriptions: vec![
-                Subscription::WorkspaceCreated {},
-                Subscription::WorkspaceUpdated {},
-                Subscription::WorkspaceRenamed {},
-                Subscription::WorkspaceClosed {},
-                Subscription::WorkspaceFocused {},
-                Subscription::TabCreated {},
-                Subscription::TabClosed {},
-                Subscription::TabFocused {},
-                Subscription::TabRenamed {},
-                Subscription::PaneCreated {},
-                Subscription::PaneClosed {},
-                Subscription::PaneFocused {},
-                Subscription::PaneMoved {},
-                Subscription::PaneExited {},
-                Subscription::PaneAgentDetected {},
-            ],
+            subscriptions: structural_event_subscriptions(),
         }),
     };
     let (ack, mut stream) = api.subscribe_value(&request, None)?;
@@ -2078,6 +2352,94 @@ mod tests {
         assert!(ALLOWED_COMMANDS.contains(&"pane.focus_direction"));
         assert!(ALLOWED_COMMANDS.contains(&"pane.move"));
         assert!(ALLOWED_COMMANDS.contains(&"agent.start"));
+    }
+
+    #[test]
+    fn activity_subscriptions_include_only_deduped_pane_activity() {
+        let subscriptions = activity_subscriptions(&[
+            "pane-2".to_string(),
+            "pane-1".to_string(),
+            "pane-2".to_string(),
+        ]);
+
+        let pane_subscriptions = subscriptions
+            .iter()
+            .filter_map(|subscription| match subscription {
+                Subscription::PaneAgentStatusChanged {
+                    pane_id,
+                    agent_status,
+                } => {
+                    assert_eq!(*agent_status, None);
+                    Some(pane_id.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pane_subscriptions, vec!["pane-1", "pane-2"]);
+        assert_eq!(subscriptions.len(), pane_subscriptions.len());
+    }
+
+    #[test]
+    fn structural_subscriptions_are_separate_from_activity_subscriptions() {
+        let subscriptions = structural_event_subscriptions();
+
+        assert!(subscriptions
+            .iter()
+            .any(|subscription| matches!(subscription, Subscription::WorkspaceCreated {})));
+        assert!(subscriptions
+            .iter()
+            .any(|subscription| matches!(subscription, Subscription::PaneMoved {})));
+        assert!(!subscriptions.iter().any(|subscription| matches!(
+            subscription,
+            Subscription::PaneAgentStatusChanged { .. }
+        )));
+    }
+
+    #[test]
+    fn activity_message_decodes_and_serializes_explicit_nulls() {
+        let message = activity_message_from_subscription_value(serde_json::json!({
+            "event": "pane.agent_status_changed",
+            "data": {
+                "pane_id": "pane-1",
+                "workspace_id": "workspace-1",
+                "agent_status": "working",
+                "agent": "codex",
+                "state_labels": {}
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            message,
+            ActivityMessage::PaneAgentStatusChanged {
+                pane_id: "pane-1".to_string(),
+                workspace_id: "workspace-1".to_string(),
+                agent_status: AgentStatus::Working,
+                agent: Some("codex".to_string()),
+                title: None,
+                display_agent: None,
+                custom_status: None,
+                state_labels: HashMap::new(),
+            }
+        );
+
+        let json = serde_json::to_value(&message).unwrap();
+        assert_eq!(json["title"], serde_json::Value::Null);
+        assert_eq!(json["display_agent"], serde_json::Value::Null);
+        assert_eq!(json["custom_status"], serde_json::Value::Null);
+        assert_eq!(json["state_labels"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn structural_event_values_trigger_activity_resubscribe() {
+        assert!(is_structural_event_value(&serde_json::json!({
+            "event": "pane.created",
+            "data": { "pane_id": "pane-1" }
+        })));
+        assert!(!is_structural_event_value(&serde_json::json!({
+            "event": "pane.agent_status_changed",
+            "data": { "pane_id": "pane-1" }
+        })));
     }
 
     #[test]

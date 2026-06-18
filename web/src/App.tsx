@@ -10,6 +10,7 @@ import {
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { AgentIcon, agentIconKind } from "./AgentIcon";
+import { applyActivityMessage, parseActivityEventData } from "./activity";
 import { BackendSettingsDialog } from "./BackendSettingsDialog";
 import { useBridge } from "./bridge";
 import { createCommands, createdPaneId } from "./commands";
@@ -52,7 +53,14 @@ import {
   spaceSubtitle,
   statusLabel,
 } from "./state";
-import type { AgentStatus, PaneInfo, Snapshot, TabInfo, WorkspaceInfo } from "./types";
+import type {
+  ActivityMessage,
+  AgentStatus,
+  PaneInfo,
+  Snapshot,
+  TabInfo,
+  WorkspaceInfo,
+} from "./types";
 
 type LoadState = "loading" | "ready" | "error";
 type Scope = "space" | "all";
@@ -87,6 +95,10 @@ type DisplayPrefs = {
   mobileTerminalTapTarget: MobileTerminalTapTarget;
   mobileTouchSelection: boolean;
   mobileKeyboardHideRefit: boolean;
+};
+type ActivityLogEntry = {
+  generation: number;
+  message: ActivityMessage;
 };
 
 const COMPACT_LAYOUT_QUERY = "(max-width: 820px)";
@@ -249,6 +261,9 @@ export function App() {
   const isCompactLayoutRef = useRef(isCompactLayout);
   const showDetailRef = useRef(showDetail);
   const connectionKeyRef = useRef(bridge.connectionKey);
+  const activityGenerationRef = useRef(0);
+  const resyncBarrierGenerationRef = useRef(0);
+  const activityLogRef = useRef<ActivityLogEntry[]>([]);
   const mobileSidebarHistoryRef = useRef(false);
   const mobileDetailHistoryRef = useRef(false);
   const sidebarResizePressRef = useRef<{
@@ -441,12 +456,17 @@ export function App() {
     let disposed = false;
     if (connectionKeyRef.current !== bridge.connectionKey) {
       connectionKeyRef.current = bridge.connectionKey;
+      activityGenerationRef.current += 1;
+      resyncBarrierGenerationRef.current = activityGenerationRef.current;
+      activityLogRef.current = [];
+      snapshotRef.current = null;
       setSnapshot(null);
       setSnapshotConnectionKey(bridge.connectionKey);
       setSelectedPaneId(null);
       setActiveSpaceId(null);
     }
     if (!bridge.canConnect) {
+      snapshotRef.current = null;
       setSnapshot(null);
       setSnapshotConnectionKey(bridge.connectionKey);
       setSelectedPaneId(null);
@@ -456,20 +476,93 @@ export function App() {
         disposed = true;
       };
     }
-    const refresh = () =>
-      refreshSnapshot(
-        bridge.httpUrl,
-        (next) => {
-          setSnapshot(next);
-          setSnapshotConnectionKey(bridge.connectionKey);
-        },
-        setLoadState,
-        () => disposed,
-      );
-    void refresh();
+    const requestConnectionKey = bridge.connectionKey;
+    let refreshInFlight = false;
+    let refreshPending = false;
+    const isCurrentConnection = () =>
+      !disposed && isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey);
+    const runRefresh = () => {
+      const refreshGeneration = activityGenerationRef.current;
+      refreshInFlight = true;
+      void fetchSnapshot(bridge.httpUrl)
+        .then((next) => {
+          if (!isCurrentConnection()) {
+            return;
+          }
+          if (resyncBarrierGenerationRef.current > refreshGeneration) {
+            refreshPending = true;
+            return;
+          }
+          const patched = replayActivityMessages(
+            next,
+            activityLogRef.current,
+            refreshGeneration,
+          );
+          snapshotRef.current = patched;
+          setSnapshot(patched);
+          setSnapshotConnectionKey(requestConnectionKey);
+          setLoadState("ready");
+        })
+        .catch(() => {
+          if (isCurrentConnection()) {
+            setLoadState("error");
+          }
+        })
+        .finally(() => {
+          refreshInFlight = false;
+          if (isCurrentConnection() && refreshPending) {
+            refreshPending = false;
+            runRefresh();
+          }
+        });
+    };
+    const refresh = () => {
+      if (!isCurrentConnection()) {
+        return;
+      }
+      if (refreshInFlight) {
+        refreshPending = true;
+        return;
+      }
+      runRefresh();
+    };
+    const requestActivityResync = () => {
+      activityGenerationRef.current += 1;
+      resyncBarrierGenerationRef.current = activityGenerationRef.current;
+      refresh();
+    };
+    refresh();
     const interval = window.setInterval(refresh, 10000);
-    const events = openEventsSocket(bridge.wsUrl, "/ws/events", () => void refresh());
+    const events = openEventsSocket(bridge.wsUrl, "/ws/events", refresh);
+    const activity = openEventsSocket(bridge.wsUrl, "/ws/activity", (event) => {
+      if (!isCurrentConnection()) {
+        return;
+      }
+      const parsed = parseActivityEventData(event.data);
+      if (parsed.status === "ignored") {
+        return;
+      }
+      if (parsed.status === "invalid_known") {
+        requestActivityResync();
+        return;
+      }
+      const result = applyActivityMessage(snapshotRef.current, parsed.message);
+      if (result.status === "applied") {
+        activityGenerationRef.current += 1;
+        activityLogRef.current = [
+          ...activityLogRef.current,
+          { generation: activityGenerationRef.current, message: parsed.message },
+        ].slice(-100);
+        snapshotRef.current = result.snapshot;
+        setSnapshot(result.snapshot);
+      } else if (result.status === "resync") {
+        requestActivityResync();
+      }
+    });
     const uiEvents = openEventsSocket(bridge.wsUrl, "/ws/ui-events", (event) => {
+      if (!isCurrentConnection()) {
+        return;
+      }
       const paneId = selectionPaneId(event);
       if (paneId) {
         setSelectedPaneId(paneId);
@@ -478,11 +571,12 @@ export function App() {
           setActiveSpaceId(pane.workspace_id);
         }
       }
-      void refresh();
+      refresh();
     });
     return () => {
       disposed = true;
       events?.close();
+      activity?.close();
       uiEvents?.close();
       window.clearInterval(interval);
     };
@@ -871,13 +965,20 @@ export function App() {
       return;
     }
     const requestConnectionKey = bridge.connectionKey;
+    const refreshGeneration = activityGenerationRef.current;
     setLoadState("loading");
     void fetchSnapshot(bridge.httpUrl)
       .then((next) => {
         if (!isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
           return;
         }
-        setSnapshot(next);
+        if (resyncBarrierGenerationRef.current > refreshGeneration) {
+          refreshNow();
+          return;
+        }
+        const patched = replayActivityMessages(next, activityLogRef.current, refreshGeneration);
+        snapshotRef.current = patched;
+        setSnapshot(patched);
         setSnapshotConnectionKey(requestConnectionKey);
         setLoadState("ready");
       })
@@ -893,16 +994,23 @@ export function App() {
     setBusy(true);
     try {
       const result = await action();
-      const next = await fetchSnapshot(bridge.httpUrl);
+      let refreshGeneration = activityGenerationRef.current;
+      let next = await fetchSnapshot(bridge.httpUrl);
+      while (resyncBarrierGenerationRef.current > refreshGeneration) {
+        refreshGeneration = activityGenerationRef.current;
+        next = await fetchSnapshot(bridge.httpUrl);
+      }
       if (!isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
         return false;
       }
-      setSnapshot(next);
+      const patched = replayActivityMessages(next, activityLogRef.current, refreshGeneration);
+      snapshotRef.current = patched;
+      setSnapshot(patched);
       setSnapshotConnectionKey(requestConnectionKey);
       setLoadState("ready");
       if (selectCreated) {
         const paneId = createdPaneId(result);
-        const created = paneId ? next.panes.find((pane) => pane.pane_id === paneId) : undefined;
+        const created = paneId ? patched.panes.find((pane) => pane.pane_id === paneId) : undefined;
         if (created) {
           setSelectedPaneId(created.pane_id);
           setActiveSpaceId(created.workspace_id);
@@ -2377,6 +2485,20 @@ async function fetchSnapshot(httpUrl: (path: string, query?: URLSearchParams) =>
   return (await response.json()) as Snapshot;
 }
 
+function replayActivityMessages(
+  snapshot: Snapshot,
+  log: readonly ActivityLogEntry[],
+  afterGeneration: number,
+) {
+  return log.reduce((current, entry) => {
+    if (entry.generation <= afterGeneration) {
+      return current;
+    }
+    const result = applyActivityMessage(current, entry.message);
+    return result.status === "applied" ? result.snapshot : current;
+  }, snapshot);
+}
+
 async function syncSelectedPane(
   httpUrl: (path: string, query?: URLSearchParams) => string,
   paneId: string,
@@ -2388,25 +2510,6 @@ async function syncSelectedPane(
   });
   if (!response.ok) {
     throw new Error(`selection failed: ${response.status}`);
-  }
-}
-
-async function refreshSnapshot(
-  httpUrl: (path: string, query?: URLSearchParams) => string,
-  setSnapshot: (snapshot: Snapshot) => void,
-  setLoadState: (state: LoadState) => void,
-  isDisposed: () => boolean,
-) {
-  try {
-    const next = await fetchSnapshot(httpUrl);
-    if (!isDisposed()) {
-      setSnapshot(next);
-      setLoadState("ready");
-    }
-  } catch {
-    if (!isDisposed()) {
-      setLoadState("error");
-    }
   }
 }
 

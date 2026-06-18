@@ -174,6 +174,11 @@ pub struct EventStream {
 }
 
 impl EventStream {
+    pub fn set_read_timeout(&self, timeout: Duration) -> Result<(), ApiClientError> {
+        set_timeout_best_effort(self.reader.get_ref(), TimeoutKind::Recv, timeout)
+            .map_err(ApiClientError::Io)
+    }
+
     pub fn next_value(&mut self) -> Result<Option<serde_json::Value>, ApiClientError> {
         read_optional_json_line(&mut self.reader)
     }

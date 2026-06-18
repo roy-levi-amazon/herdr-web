@@ -76,3 +76,22 @@ export type Snapshot = {
   layouts: LayoutSnapshot[];
   selected_pane_id?: string | null;
 };
+
+export type PaneAgentStatusChangedMessage = {
+  type: "pane.agent_status_changed";
+  pane_id: string;
+  workspace_id: string;
+  agent_status: AgentStatus;
+  agent: string | null;
+  title: string | null;
+  display_agent: string | null;
+  custom_status: string | null;
+  state_labels: Record<string, string>;
+};
+
+export type ActivityResyncRequiredMessage = {
+  type: "resync_required";
+  reason: string;
+};
+
+export type ActivityMessage = PaneAgentStatusChangedMessage | ActivityResyncRequiredMessage;

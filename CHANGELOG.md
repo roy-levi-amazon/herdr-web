@@ -6,6 +6,9 @@
 
 ### Added
 
+- Added a bridge-owned agent activity stream so pane status, title, display agent, and custom
+  status updates reach connected browsers without waiting for a full snapshot refresh.
+
 ### Changed
 
 - Improved browser startup by lazy-loading the terminal renderer with retry after load failures,
