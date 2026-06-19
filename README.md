@@ -34,6 +34,10 @@ navigation, multi-client viewing, mobile input controls, and synchronized pane s
 |:--:|:--:|
 | <img src="docs/images/android-phone-switcher.png" alt="herdr-web Android phone switcher" width="260"> | <img src="docs/images/android-phone-terminal.png" alt="herdr-web Android phone terminal" width="260"> |
 
+| Android bridge configuration |
+|:--:|
+| <img src="docs/images/android-phone-bridge-settings.png" alt="herdr-web Android bridge settings and color picker" width="260"> |
+
 ## Layout
 
 ```text
