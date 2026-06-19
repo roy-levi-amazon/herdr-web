@@ -3018,7 +3018,7 @@ function Switcher({
           aria-pressed={scope === "space"}
           onClick={() => onScope("space")}
         >
-          space
+          Space
         </button>
         <button
           type="button"
@@ -3026,7 +3026,7 @@ function Switcher({
           aria-pressed={scope === "all"}
           onClick={() => onScope("all")}
         >
-          all
+          All
         </button>
       </div>
 

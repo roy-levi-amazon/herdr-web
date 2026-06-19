@@ -1581,11 +1581,11 @@ button {
 
 .backend-row {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) 38px;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   width: 100%;
-  padding: 9px;
+  padding: 0;
   border: 1px solid transparent;
   border-radius: var(--r-sm);
   color: var(--subtext0);
@@ -1593,39 +1593,106 @@ button {
   text-align: left;
 }
 
-.backend-row:hover {
+.backend-row:hover,
+.backend-row-action:hover {
   color: var(--text);
   background: var(--row-hover);
 }
 
-.backend-row[data-active="true"] {
+.backend-row[data-active="true"],
+.backend-row-action[data-active="true"] {
   border-color: var(--line);
   color: var(--text);
   background: var(--row-active);
 }
 
-.backend-row span {
+.backend-row-main,
+.backend-row-action {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+  padding: 9px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+}
+
+.backend-row-action {
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  color: var(--subtext0);
+}
+
+.backend-row-text,
+.backend-row-action > span {
   min-width: 0;
 }
 
-.backend-row strong,
-.backend-row small {
+.backend-row-dot {
+  width: 9px;
+  height: 9px;
+  border: 1px solid color-mix(in srgb, var(--bridge-color) 78%, var(--crust));
+  border-radius: 50%;
+  background: var(--bridge-color);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--bridge-color) 14%, transparent);
+}
+
+.backend-row-text strong,
+.backend-row-text small,
+.backend-row-action strong,
+.backend-row-action small {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.backend-row strong {
+.backend-row-text strong,
+.backend-row-action strong {
   font-size: 12.5px;
   font-weight: 600;
 }
 
-.backend-row small {
+.backend-row-text small,
+.backend-row-action small {
   margin-top: 2px;
   color: var(--overlay0);
   font-family: var(--mono);
   font-size: 10.5px;
+}
+
+.backend-toggle {
+  position: relative;
+  width: 34px;
+  height: 22px;
+  border: 1px solid var(--surface1);
+  border-radius: 999px;
+  background: var(--surface0);
+}
+
+.backend-toggle span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--overlay1);
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+.backend-toggle[data-on="true"] {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--surface1));
+  background: var(--accent-soft);
+}
+
+.backend-toggle[data-on="true"] span {
+  background: var(--accent);
+  transform: translateX(12px);
 }
 
 .backend-form {

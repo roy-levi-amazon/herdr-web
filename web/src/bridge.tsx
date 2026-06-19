@@ -95,7 +95,7 @@ const STORE_KEY = "herdrWeb.bridgeBackends.v2";
 const LEGACY_STORE_KEY = "herdrWeb.bridgeBackends.v1";
 const STORE_VERSION = 2;
 const APP_MIN_WEB_COMPAT = 1;
-const SAME_ORIGIN_BRIDGE_COLOR = "#b4befe";
+export const SAME_ORIGIN_BRIDGE_COLOR = "#b4befe";
 const BACKEND_COLOR_PALETTE = [
   "#89b4fa",
   "#a6e3a1",
@@ -272,7 +272,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
     }));
   }, []);
 
-  const addBackend = useCallback(async (input: BackendInput, enable = true) => {
+  const addBackend = useCallback(async (input: BackendInput, enable = false) => {
     const baseUrl = normalizeBridgeBaseUrl(input.baseUrl);
     const id = createBackendId();
     const profile: BridgeBackendProfile = {

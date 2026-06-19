@@ -1,5 +1,4 @@
 import {
-  Check,
   Plus,
   RotateCcw,
   Server,
@@ -9,11 +8,13 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import {
   duplicateBackend,
   fallbackBackendColor,
   normalizeBridgeBaseUrl,
   SAME_ORIGIN_BRIDGE_ID,
+  SAME_ORIGIN_BRIDGE_COLOR,
   suggestBackendColor,
   useBridge,
 } from "./bridge";
@@ -190,7 +191,7 @@ export function BackendSettingsDialog({
     }
   };
 
-  const saveBackend = async (activate: boolean) => {
+  const saveBackend = async () => {
     setBusy(true);
     setMessage(null);
     try {
@@ -205,26 +206,14 @@ export function BackendSettingsDialog({
       try {
         await bridge.probeBackend(baseUrl);
       } catch (error) {
-        if (activate) {
-          throw error;
-        }
         probeWarning = error instanceof Error ? error.message : "Backend could not be reached.";
       }
       const profile = form.id
         ? await bridge.updateBackend(form.id, { name: form.name, baseUrl, color: form.color })
-        : await bridge.addBackend({ name: form.name, baseUrl, color: form.color }, activate);
-      if (activate) {
-        bridge.setBridgeEnabled(profile.id, true);
-      }
+        : await bridge.addBackend({ name: form.name, baseUrl, color: form.color }, false);
       setSelectionMode("backend");
       setForm(backendFormFromProfile(profile));
-      setMessage(
-        probeWarning
-          ? `Backend saved. ${probeWarning}`
-          : activate
-            ? "Backend saved and enabled."
-            : "Backend saved.",
-      );
+      setMessage(probeWarning ? `Backend saved. ${probeWarning}` : "Backend saved.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not save backend");
     } finally {
@@ -273,7 +262,7 @@ export function BackendSettingsDialog({
           if (activeArea !== "bridge" || !editingBackend) {
             return;
           }
-          void saveBackend(true);
+          void saveBackend();
         }}
       >
         <button
@@ -311,40 +300,35 @@ export function BackendSettingsDialog({
                 <div className="bridge-settings-grid">
                   <div className="backend-list" role="list" aria-label="Saved bridges">
                     {showSameOrigin ? (
-                      <button
-                        className="backend-row"
-                        type="button"
-                        data-active={selectionMode === "same-origin" ? "true" : undefined}
-                        onClick={selectSameOrigin}
-                      >
-                        {sameOriginEnabled ? <Check size={14} /> : <span />}
-                        <span>
-                          <strong>Same origin</strong>
-                          <small>{sameOriginUrl}</small>
-                        </span>
-                      </button>
+                      <BackendToggleRow
+                        active={selectionMode === "same-origin"}
+                        color={SAME_ORIGIN_BRIDGE_COLOR}
+                        enabled={sameOriginEnabled}
+                        title="Same origin"
+                        subtitle={sameOriginUrl}
+                        toggleLabel={`${sameOriginEnabled ? "Disable" : "Enable"} Same origin bridge`}
+                        onSelect={selectSameOrigin}
+                        onToggle={() => bridge.setBridgeEnabled(SAME_ORIGIN_BRIDGE_ID, !sameOriginEnabled)}
+                      />
                     ) : null}
-                    {bridge.store.backends.map((backend) => (
-                      <button
-                        key={backend.id}
-                        className="backend-row"
-                        type="button"
-                        data-active={backend.id === form.id ? "true" : undefined}
-                        onClick={() => editBackend(backend)}
-                      >
-                        {bridge.store.enabledBridgeIds.includes(backend.id) ? (
-                          <Check size={14} />
-                        ) : (
-                          <span />
-                        )}
-                        <span>
-                          <strong>{backend.name}</strong>
-                          <small>{backend.baseUrl}</small>
-                        </span>
-                      </button>
-                    ))}
+                    {bridge.store.backends.map((backend) => {
+                      const enabled = bridge.store.enabledBridgeIds.includes(backend.id);
+                      return (
+                        <BackendToggleRow
+                          key={backend.id}
+                          active={backend.id === form.id}
+                          color={backend.color ?? fallbackBackendColor(backend.id)}
+                          enabled={enabled}
+                          title={backend.name}
+                          subtitle={backend.baseUrl}
+                          toggleLabel={`${enabled ? "Disable" : "Enable"} ${backend.name}`}
+                          onSelect={() => editBackend(backend)}
+                          onToggle={() => bridge.setBridgeEnabled(backend.id, !enabled)}
+                        />
+                      );
+                    })}
                     <button
-                      className="backend-row"
+                      className="backend-row-action"
                       type="button"
                       data-active={selectionMode === "new" ? "true" : undefined}
                       onClick={startNew}
@@ -431,62 +415,31 @@ export function BackendSettingsDialog({
                     {message ? <div className="modal-message">{message}</div> : null}
                   </div>
                 </div>
-                <div className="modal-actions">
-                  {canDelete ? (
-                    <button type="button" className="btn btn-danger" disabled={busy} onClick={deleteBackend}>
-                      Delete
+                {editingBackend ? (
+                  <div className="modal-actions">
+                    {canDelete ? (
+                      <button type="button" className="btn btn-danger" disabled={busy} onClick={deleteBackend}>
+                        Delete
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={busy || !form.baseUrl.trim()}
+                      onClick={testBackend}
+                    >
+                      Test
                     </button>
-                  ) : null}
-                  {selectionMode === "same-origin" ? (
                     <button
                       type="button"
                       className="btn btn-primary"
-                      onClick={() => bridge.setBridgeEnabled(SAME_ORIGIN_BRIDGE_ID, !sameOriginEnabled)}
+                      disabled={busy || !form.baseUrl.trim()}
+                      onClick={() => void saveBackend()}
                     >
-                      {sameOriginEnabled ? "Disable" : "Enable"}
+                      Save
                     </button>
-                  ) : null}
-                  {editingBackend ? (
-                    <>
-                      <button
-                        type="button"
-                        className="btn"
-                        disabled={busy || !form.baseUrl.trim()}
-                        onClick={testBackend}
-                      >
-                        Test
-                      </button>
-                      <button
-                        type="button"
-                        className="btn"
-                        disabled={busy || !form.baseUrl.trim()}
-                        onClick={() => void saveBackend(false)}
-                      >
-                        Save
-                      </button>
-                      {form.id ? (
-                        <button
-                          type="button"
-                          className="btn"
-                          disabled={busy}
-                          onClick={() =>
-                            form.id
-                              ? bridge.setBridgeEnabled(
-                                  form.id,
-                                  !bridge.store.enabledBridgeIds.includes(form.id),
-                                )
-                              : undefined
-                          }
-                        >
-                          {bridge.store.enabledBridgeIds.includes(form.id) ? "Disable" : "Enable"}
-                        </button>
-                      ) : null}
-                      <button type="submit" className="btn btn-primary" disabled={busy || !form.baseUrl.trim()}>
-                        Save & enable
-                      </button>
-                    </>
-                  ) : null}
-                </div>
+                  </div>
+                ) : null}
               </>
             ) : null}
 
@@ -839,6 +792,54 @@ function ResetSettingButton({
     >
       <RotateCcw size={13} />
     </button>
+  );
+}
+
+function BackendToggleRow({
+  active,
+  color,
+  enabled,
+  title,
+  subtitle,
+  toggleLabel,
+  onSelect,
+  onToggle,
+}: {
+  active: boolean;
+  color: string;
+  enabled: boolean;
+  title: string;
+  subtitle: string;
+  toggleLabel: string;
+  onSelect: () => void;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="backend-row" data-active={active ? "true" : undefined} role="listitem">
+      <button className="backend-row-main" type="button" onClick={onSelect}>
+        <span
+          className="backend-row-dot"
+          style={{ "--bridge-color": color } as CSSProperties}
+          aria-hidden="true"
+        />
+        <span className="backend-row-text">
+          <strong>{title}</strong>
+          <small>{subtitle}</small>
+        </span>
+      </button>
+      <button
+        className="backend-toggle"
+        type="button"
+        role="switch"
+        aria-checked={enabled}
+        aria-label={toggleLabel}
+        title={toggleLabel}
+        data-on={enabled ? "true" : undefined}
+        onClick={onToggle}
+      >
+        <span aria-hidden="true" />
+      </button>
+    </div>
   );
 }
 
