@@ -116,7 +116,7 @@ type BridgeConnectionRef = {
   resyncBarrierGeneration: number;
   activityLog: ActivityLogEntry[];
 };
-type ScopedAgentPane = {
+export type ScopedAgentPane = {
   bridgeId: BridgeId;
   bridgeIndex: number;
   bridgeLabel: string;
@@ -681,10 +681,7 @@ export function App() {
     }
     const enabledIds = bridge.enabledBridgeIds;
     setSelectedBridgeId((current) => {
-      if (current && enabledIds.includes(current)) {
-        return current;
-      }
-      return bridge.lastSelectedBridgeId ?? enabledIds[0] ?? null;
+      return resolveInitialSelectedBridgeId(current, enabledIds, bridge.lastSelectedBridgeId);
     });
   }, [bridge.enabledBridgeIds, bridge.lastSelectedBridgeId, bridge.storeLoaded]);
 
@@ -2010,6 +2007,20 @@ export function App() {
 
 const SNAPSHOT_REFRESH_INTERVAL_MS = 10000;
 
+export function resolveInitialSelectedBridgeId(
+  currentBridgeId: BridgeId | null,
+  enabledBridgeIds: readonly BridgeId[],
+  lastSelectedBridgeId: BridgeId | null,
+) {
+  if (currentBridgeId && enabledBridgeIds.includes(currentBridgeId)) {
+    return currentBridgeId;
+  }
+  if (lastSelectedBridgeId && enabledBridgeIds.includes(lastSelectedBridgeId)) {
+    return lastSelectedBridgeId;
+  }
+  return enabledBridgeIds[0] ?? null;
+}
+
 function BridgeConnectionController({
   runtime,
   connectionRefs,
@@ -2207,7 +2218,7 @@ function BridgeConnectionController({
   return null;
 }
 
-function stableBridgeRefreshOffsetMs(bridgeId: BridgeId) {
+export function stableBridgeRefreshOffsetMs(bridgeId: BridgeId) {
   let hash = 0;
   for (let index = 0; index < bridgeId.length; index += 1) {
     hash = (hash * 31 + bridgeId.charCodeAt(index)) >>> 0;
@@ -3335,7 +3346,7 @@ function sortAgentPanes(panes: PaneInfo[], sort: AgentSort, snapshot: Snapshot) 
   });
 }
 
-function sortScopedAgentPanes(entries: ScopedAgentPane[], sort: AgentSort) {
+export function sortScopedAgentPanes(entries: ScopedAgentPane[], sort: AgentSort) {
   const statusOrder: Record<AgentStatus, number> = {
     blocked: 0,
     working: 1,
