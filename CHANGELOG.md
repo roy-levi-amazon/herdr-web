@@ -8,6 +8,8 @@
 
 - Added multi-bridge connections, allowing multiple saved bridges to stay enabled at once with
   server chips and an all-agents sidebar overview.
+- Added a bridge `--allow-connect-origin` option so bridge-served web pages can opt into connecting
+  to other trusted bridge origins without relaxing the default Content Security Policy.
 
 ### Changed
 

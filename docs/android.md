@@ -64,6 +64,11 @@ HOST=0.0.0.0 PORT=4000 scripts/run-bridge.sh \
   --allow-host herdr-host.local
 ```
 
+`--allow-origin` is the Android-relevant setting because the bundled WebView does not load its page
+from a bridge. Browser-served multi-bridge pages have an additional Content Security Policy gate on
+the bridge serving the page; use `--allow-connect-origin http://other-bridge:8787` there when that
+page should connect to another bridge.
+
 ## HTTP And Cleartext
 
 The Android shell currently enables Capacitor cleartext support:

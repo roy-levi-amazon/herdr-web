@@ -205,6 +205,24 @@ The bridge rejects cross-origin browser requests unless the request origin is ex
 The bundled Android app uses `http://localhost`, so LAN Android testing needs
 `--allow-origin http://localhost`. Bind to `0.0.0.0` only on trusted networks.
 
+For browser-served multi-bridge setups, configure both directions explicitly:
+
+- On the bridge being called, use `--allow-origin ORIGIN` for the web page origin that may call it.
+- On the bridge serving the web page, use `--allow-connect-origin ORIGIN` for each other bridge
+  origin that the page may connect to. This expands the served page's Content Security Policy for
+  both HTTP and WebSocket bridge traffic.
+
+For example, if the page is opened from `http://host-a:8787` and should connect to
+`http://host-b:8787`:
+
+```bash
+# host A, serving the web page
+HOST=0.0.0.0 scripts/run-bridge.sh --allow-host host-a --allow-connect-origin http://host-b:8787
+
+# host B, serving the backend being called
+HOST=0.0.0.0 scripts/run-bridge.sh --allow-host host-b --allow-origin http://host-a:8787
+```
+
 ## Keyboard Shortcuts
 
 These app shortcuts are ignored while dialogs, menus, and normal text inputs are active. They still
@@ -250,6 +268,11 @@ must also be same-origin with the bridge, an explicitly allowed origin such as A
 `http://localhost`, or a loopback development proxy origin allowed for Vite. Hostname backends must
 be explicitly allowed with `--allow-host HOSTNAME`. This is a DNS-rebinding/CSRF guard, not user
 authentication.
+
+Bridge-served pages also send a Content Security Policy. By default, `connect-src` allows only the
+serving bridge origin and `data:`. Use `--allow-connect-origin ORIGIN` on the serving bridge when
+that page should connect to another bridge; the bridge adds matching HTTP and WebSocket
+`connect-src` entries for that origin.
 
 Pane selection is bridge-owned. Selecting a pane in one browser updates `/api/selection`, broadcasts
 over `/ws/ui-events`, and other browsers switch to the same pane.
