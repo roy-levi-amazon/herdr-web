@@ -1,5 +1,10 @@
 import type { FitAddon, Terminal } from "ghostty-web";
-import { terminalSelectionRange, terminalUrlTapTarget, trimUrlPunctuation } from "./terminalSelection";
+import {
+  findFirstUrlInSelection,
+  terminalSelectionRange,
+  terminalUrlTapTarget,
+  trimUrlPunctuation,
+} from "./terminalSelection";
 import type { TerminalSelectionPoint } from "./terminalSelection";
 import { terminalTapFocusAction } from "./terminalTapFocus";
 import type { TerminalTapFocusResult } from "./terminalTapFocus";
@@ -746,11 +751,13 @@ export class GhosttyRenderer implements TerminalRenderer {
       terminal.textarea?.blur();
       if (selectedText.trim() && this.#mobileTouchSelectionHandler) {
         this.#mobileTouchSelectionHandler({ type: "selection", text: selectedText });
-        clearSelectionClearTimer();
-        selectionClearTimer = window.setTimeout(() => {
-          selectionClearTimer = null;
-          terminal.clearSelection();
-        }, TOUCH_SELECTION_CLEAR_DELAY_MS);
+        if (!findFirstUrlInSelection(selectedText.trim())) {
+          clearSelectionClearTimer();
+          selectionClearTimer = window.setTimeout(() => {
+            selectionClearTimer = null;
+            terminal.clearSelection();
+          }, TOUCH_SELECTION_CLEAR_DELAY_MS);
+        }
       }
     };
     const touchLinkText = (event: TouchEvent) => {

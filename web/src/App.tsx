@@ -245,7 +245,9 @@ function readDisplayPrefs(): DisplayPrefs {
     if (!raw) {
       return readLegacyDisplayPrefs(fallback);
     }
-    const parsed = JSON.parse(raw) as Partial<DisplayPrefs>;
+    const parsed = JSON.parse(raw) as Partial<DisplayPrefs> & {
+      mobileTouchSelection?: unknown;
+    };
     return parseDisplayPrefsValue(parsed, fallback);
   } catch {
     return fallback;
@@ -269,7 +271,7 @@ async function loadDisplayPrefs(): Promise<DisplayPrefs> {
 }
 
 function parseDisplayPrefsValue(
-  parsed: Partial<DisplayPrefs>,
+  parsed: Partial<DisplayPrefs> & { mobileTouchSelection?: unknown },
   fallback: DisplayPrefs,
 ): DisplayPrefs {
   return {
@@ -319,7 +321,7 @@ function parseDisplayPrefsValue(
       parsed.mobileControlsScalePercent,
     ),
     mobileTerminalTapTarget: parseMobileTerminalTapTarget(parsed.mobileTerminalTapTarget),
-    mobileLongPressBehavior: parseMobileLongPressBehavior(parsed.mobileLongPressBehavior),
+    mobileLongPressBehavior: parseStoredMobileLongPressBehavior(parsed),
     mobileTouchSelectionEndpointTimeoutMs: parseMobileTouchSelectionEndpointTimeoutMs(
       parsed.mobileTouchSelectionEndpointTimeoutMs,
     ),
@@ -352,6 +354,7 @@ function readLegacyDisplayPrefs(fallback: DisplayPrefs): DisplayPrefs {
     const parsed = JSON.parse(raw) as {
       activeSpaceId?: unknown;
       selectedPaneId?: unknown;
+      mobileTouchSelection?: unknown;
     } & Partial<DisplayPrefs>;
     return {
       ...fallback,
@@ -395,7 +398,7 @@ function readLegacyDisplayPrefs(fallback: DisplayPrefs): DisplayPrefs {
         parsed.mobileControlsScalePercent,
       ),
       mobileTerminalTapTarget: parseMobileTerminalTapTarget(parsed.mobileTerminalTapTarget),
-      mobileLongPressBehavior: parseMobileLongPressBehavior(parsed.mobileLongPressBehavior),
+      mobileLongPressBehavior: parseStoredMobileLongPressBehavior(parsed),
       mobileTouchSelectionEndpointTimeoutMs: parseMobileTouchSelectionEndpointTimeoutMs(
         parsed.mobileTouchSelectionEndpointTimeoutMs,
       ),
@@ -461,6 +464,21 @@ async function writeDisplayPrefs(prefs: DisplayPrefs) {
 
 function isNativeApp() {
   return Capacitor.isNativePlatform();
+}
+
+function parseStoredMobileLongPressBehavior(
+  parsed: Partial<DisplayPrefs> & { mobileTouchSelection?: unknown },
+): MobileLongPressBehavior {
+  if (parsed.mobileLongPressBehavior !== undefined) {
+    return parseMobileLongPressBehavior(parsed.mobileLongPressBehavior);
+  }
+  if (parsed.mobileTouchSelection === true) {
+    return "copy";
+  }
+  if (parsed.mobileTouchSelection === false) {
+    return "off";
+  }
+  return DEFAULT_MOBILE_LONG_PRESS_BEHAVIOR;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
