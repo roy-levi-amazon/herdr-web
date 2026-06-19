@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   resolveInitialSelectedBridgeId,
+  shouldCollapseHostScope,
   sortScopedAgentPanes,
   stableBridgeRefreshOffsetMs,
 } from "./App";
@@ -36,6 +37,13 @@ describe("App multi-bridge helpers", () => {
       "bridge-a",
     );
     expect(resolveInitialSelectedBridgeId(null, [], "bridge-a")).toBeNull();
+  });
+
+  it("does not collapse all-host scope before enabled bridges are loaded", () => {
+    expect(shouldCollapseHostScope("all", 1, false)).toBe(false);
+    expect(shouldCollapseHostScope("all", 1, true)).toBe(true);
+    expect(shouldCollapseHostScope("all", 2, true)).toBe(false);
+    expect(shouldCollapseHostScope("selected", 1, true)).toBe(false);
   });
 
   it("keeps bridge refresh offsets deterministic and inside the fallback interval", () => {

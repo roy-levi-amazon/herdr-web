@@ -722,10 +722,10 @@ export function App() {
   }, [bridge.enabledBridgeIds, bridge.lastSelectedBridgeId, bridge.storeLoaded]);
 
   useEffect(() => {
-    if (hostScope === "all" && bridge.enabledBridgeIds.length <= 1) {
+    if (shouldCollapseHostScope(hostScope, bridge.enabledBridgeIds.length, bridge.storeLoaded)) {
       setHostScope("selected");
     }
-  }, [bridge.enabledBridgeIds.length, hostScope]);
+  }, [bridge.enabledBridgeIds.length, bridge.storeLoaded, hostScope]);
 
   useEffect(() => {
     if (!bridge.storeLoaded) {
@@ -2081,6 +2081,14 @@ export function resolveInitialSelectedBridgeId(
     return lastSelectedBridgeId;
   }
   return enabledBridgeIds[0] ?? null;
+}
+
+export function shouldCollapseHostScope(
+  hostScope: HostScope,
+  enabledBridgeCount: number,
+  storeLoaded: boolean,
+) {
+  return storeLoaded && hostScope === "all" && enabledBridgeCount <= 1;
 }
 
 function BridgeConnectionController({
