@@ -1,7 +1,8 @@
 # herdr-web
 
-> W.I.P. prototype. This repository is experimental, Herdr compatibility code is vendored, and the
-> runtime/API shape is expected to change.
+> This repository is not associated with, endorsed by, or maintained by the official Herdr project.
+> It is experimental, Herdr compatibility code is vendored, and the runtime/API shape is expected to
+> change.
 
 Browser UI for Herdr workspaces and agent panes.
 
