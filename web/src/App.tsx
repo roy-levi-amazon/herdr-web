@@ -118,10 +118,12 @@ type BridgeConnectionRef = {
 };
 type ScopedAgentPane = {
   bridgeId: BridgeId;
+  bridgeIndex: number;
   bridgeLabel: string;
   pane: PaneInfo;
   snapshot: Snapshot;
   workspace?: WorkspaceInfo;
+  tabNumber?: number;
   tabLabel?: string;
 };
 type MenuState = {
@@ -1668,12 +1670,10 @@ export function App() {
       data-touch={isTouchInput ? "true" : "false"}
       data-detail={isCompactLayout && showDetail ? "true" : "false"}
     >
-      {bridge.enabledRuntimes.map((runtime, index) => (
+      {bridge.enabledRuntimes.map((runtime) => (
         <BridgeConnectionController
           key={runtime.id}
           runtime={runtime}
-          index={index}
-          total={bridge.enabledRuntimes.length}
           connectionRefs={connectionRefs}
           setConnectionStates={setConnectionStates}
           onPaneSelection={rememberPaneSelection}
@@ -1706,6 +1706,7 @@ export function App() {
           onSelectPane={openPane}
           onRefresh={refreshNow}
           onRefreshBridge={(bridgeId) => {
+            bridge.retryBridgeProbe(bridgeId);
             const runtime = bridge.getRuntime(bridgeId);
             if (runtime?.canConnect) {
               void refreshBridgeSnapshot(runtime, true);
@@ -2011,21 +2012,18 @@ const SNAPSHOT_REFRESH_INTERVAL_MS = 10000;
 
 function BridgeConnectionController({
   runtime,
-  index,
-  total,
   connectionRefs,
   setConnectionStates,
   onPaneSelection,
 }: {
   runtime: BridgeRuntime;
-  index: number;
-  total: number;
   connectionRefs: MutableRefObject<Record<string, BridgeConnectionRef>>;
   setConnectionStates: Dispatch<SetStateAction<Record<string, BridgeConnectionState>>>;
   onPaneSelection: (bridgeId: BridgeId, paneId: string, workspaceId?: string) => void;
 }) {
   const httpUrlRef = useRef(runtime.httpUrl);
   const wsUrlRef = useRef(runtime.wsUrl);
+  const refreshOffsetRef = useRef(stableBridgeRefreshOffsetMs(runtime.id));
 
   useEffect(() => {
     httpUrlRef.current = runtime.httpUrl;
@@ -2122,7 +2120,7 @@ function BridgeConnectionController({
     };
 
     refresh();
-    const refreshOffset = staggerRefreshDelayMs(index, total);
+    const refreshOffset = refreshOffsetRef.current;
     intervalStartTimer = window.setTimeout(() => {
       refresh();
       interval = window.setInterval(refresh, SNAPSHOT_REFRESH_INTERVAL_MS);
@@ -2198,24 +2196,23 @@ function BridgeConnectionController({
     };
   }, [
     connectionRefs,
-    index,
     onPaneSelection,
     runtime.canConnect,
     runtime.connectionKey,
     runtime.id,
     runtime.resumeToken,
     setConnectionStates,
-    total,
   ]);
 
   return null;
 }
 
-function staggerRefreshDelayMs(index: number, total: number) {
-  if (total <= 1) {
-    return 0;
+function stableBridgeRefreshOffsetMs(bridgeId: BridgeId) {
+  let hash = 0;
+  for (let index = 0; index < bridgeId.length; index += 1) {
+    hash = (hash * 31 + bridgeId.charCodeAt(index)) >>> 0;
   }
-  return Math.floor((SNAPSHOT_REFRESH_INTERVAL_MS / total) * index);
+  return hash % SNAPSHOT_REFRESH_INTERVAL_MS;
 }
 
 function ensureBridgeConnectionRef(
@@ -2607,7 +2604,7 @@ function Switcher({
   const agentPanes = useMemo<ScopedAgentPane[]>(() => {
     if (scope === "all") {
       return sortScopedAgentPanes(
-        bridgeViews.flatMap((view) => {
+        bridgeViews.flatMap((view, bridgeIndex) => {
           const viewSnapshot = view.snapshot;
           if (!viewSnapshot) {
             return [];
@@ -2624,10 +2621,12 @@ function Switcher({
             const tab = viewSnapshot.tabs.find((item) => item.tab_id === pane.tab_id);
             return {
               bridgeId: view.runtime.id,
+              bridgeIndex,
               bridgeLabel: view.runtime.label,
               pane,
               snapshot: viewSnapshot,
               workspace,
+              tabNumber: tab?.number,
               tabLabel: tab ? displayTabLabel(tab, viewSnapshot.panes) : undefined,
             };
           });
@@ -2646,10 +2645,12 @@ function Switcher({
       const tab = snapshot.tabs.find((item) => item.tab_id === pane.tab_id);
       return {
         bridgeId: selectedBridgeId,
+        bridgeIndex: Math.max(0, bridgeViews.findIndex((view) => view.runtime.id === selectedBridgeId)),
         bridgeLabel: bridgeLabel,
         pane,
         snapshot,
         workspace,
+        tabNumber: tab?.number,
         tabLabel: tab ? displayTabLabel(tab, snapshot.panes) : undefined,
       };
     });
@@ -2741,9 +2742,16 @@ function Switcher({
           <button
             key={view.runtime.id}
             type="button"
-            data-on={selectedBridgeId === view.runtime.id}
-            aria-pressed={selectedBridgeId === view.runtime.id}
-            onClick={() => onSelectBridge(view.runtime.id)}
+            data-on={
+              selectedBridgeId === view.runtime.id && !(scope === "all" && sidebarView === "agents")
+            }
+            aria-pressed={
+              selectedBridgeId === view.runtime.id && !(scope === "all" && sidebarView === "agents")
+            }
+            onClick={() => {
+              onSelectBridge(view.runtime.id);
+              onScope("space");
+            }}
           >
             {view.runtime.label}
           </button>
@@ -3361,7 +3369,7 @@ function sortScopedAgentPanes(entries: ScopedAgentPane[], sort: AgentSort) {
       }
     }
 
-    const bridge = a.bridgeLabel.localeCompare(b.bridgeLabel, undefined, { numeric: true });
+    const bridge = a.bridgeIndex - b.bridgeIndex;
     if (bridge !== 0) {
       return bridge;
     }
@@ -3370,6 +3378,12 @@ function sortScopedAgentPanes(entries: ScopedAgentPane[], sort: AgentSort) {
       (b.workspace?.number ?? Number.MAX_SAFE_INTEGER);
     if (workspace !== 0) {
       return workspace;
+    }
+    const tab =
+      (a.tabNumber ?? Number.MAX_SAFE_INTEGER) -
+      (b.tabNumber ?? Number.MAX_SAFE_INTEGER);
+    if (tab !== 0) {
+      return tab;
     }
     return `${a.bridgeId}:${a.pane.pane_id}`.localeCompare(
       `${b.bridgeId}:${b.pane.pane_id}`,

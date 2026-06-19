@@ -76,6 +76,7 @@ export type BridgeManager = {
   setBridgeEnabled: (bridgeId: BridgeId, enabled: boolean) => void;
   setLastSelectedBridgeId: (bridgeId: BridgeId | null) => void;
   markBridgeUsed: (bridgeId: BridgeId) => void;
+  retryBridgeProbe: (bridgeId: BridgeId) => void;
   addBackend: (input: BackendInput, enable?: boolean) => Promise<BridgeBackendProfile>;
   updateBackend: (id: string, input: BackendInput) => Promise<BridgeBackendProfile>;
   deleteBackend: (id: string) => void;
@@ -98,6 +99,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
   const [store, setStore] = useState<BridgeBackendStore>(() => fallbackStore());
   const [storeLoaded, setStoreLoaded] = useState(false);
   const [probeStates, setProbeStates] = useState<Record<string, BridgeProbeState>>({});
+  const [probeRetryTokens, setProbeRetryTokens] = useState<Record<string, number>>({});
   const [resumeToken, setResumeToken] = useState(0);
   const storeEditedRef = useRef(false);
 
@@ -249,6 +251,13 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  const retryBridgeProbe = useCallback((bridgeId: BridgeId) => {
+    setProbeRetryTokens((current) => ({
+      ...current,
+      [bridgeId]: (current[bridgeId] ?? 0) + 1,
+    }));
+  }, []);
+
   const addBackend = useCallback(async (input: BackendInput, enable = true) => {
     const baseUrl = normalizeBridgeBaseUrl(input.baseUrl);
     const profile: BridgeBackendProfile = {
@@ -342,6 +351,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
       setBridgeEnabled,
       setLastSelectedBridgeId,
       markBridgeUsed,
+      retryBridgeProbe,
       addBackend,
       updateBackend,
       deleteBackend,
@@ -356,6 +366,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
       getRuntime,
       markBridgeUsed,
       probeBackend,
+      retryBridgeProbe,
       sameOriginAvailable,
       setBridgeEnabled,
       setLastSelectedBridgeId,
@@ -372,6 +383,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
         <BridgeCapabilityProbe
           key={`${runtime.connectionKey}:${runtime.resumeToken}`}
           runtime={runtime}
+          retryToken={probeRetryTokens[runtime.id] ?? 0}
           onReach={markBridgeReachable}
           onState={(state) =>
             setProbeStates((current) => ({
@@ -387,10 +399,12 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
 
 function BridgeCapabilityProbe({
   runtime,
+  retryToken,
   onReach,
   onState,
 }: {
   runtime: BridgeRuntime;
+  retryToken: number;
   onReach: (bridgeId: BridgeId) => void;
   onState: (state: BridgeProbeState) => void;
 }) {
@@ -405,6 +419,10 @@ function BridgeCapabilityProbe({
   useEffect(() => {
     httpUrlRef.current = runtime.httpUrl;
   }, [runtime.httpUrl]);
+
+  useEffect(() => {
+    setCapabilityRetry(0);
+  }, [retryToken, runtime.connectionKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -458,7 +476,7 @@ function BridgeCapabilityProbe({
         window.clearTimeout(retryTimer);
       }
     };
-  }, [capabilityRetry, onReach, runtime.connectionKey, runtime.id]);
+  }, [capabilityRetry, onReach, retryToken, runtime.connectionKey, runtime.id]);
 
   return null;
 }
