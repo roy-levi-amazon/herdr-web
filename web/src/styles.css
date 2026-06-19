@@ -315,6 +315,10 @@ button {
   background: var(--mantle);
 }
 
+.host-scope {
+  grid-template-columns: repeat(auto-fit, minmax(82px, 1fr));
+}
+
 .sidebar-scope button {
   min-width: 0;
   height: 28px;
@@ -358,6 +362,11 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.grp-bridge-dot {
+  width: 9px;
+  height: 9px;
 }
 
 /* ----------------------------------------------------------------- list */

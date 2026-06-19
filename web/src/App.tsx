@@ -84,9 +84,10 @@ import type {
 
 type LoadState = "loading" | "ready" | "error";
 type Scope = "space" | "all";
+type HostScope = "selected" | "all";
 type SidebarView = "agents" | "tabs";
 type AgentSort = "attention" | "status" | "workspace";
-type AgentGroup = "none" | "workspace";
+type AgentGroup = "none" | "host" | "workspace";
 type MenuKind = "space" | "tab" | "pane";
 type ScopedPaneRef = {
   bridgeId: BridgeId;
@@ -120,11 +121,30 @@ export type ScopedAgentPane = {
   bridgeId: BridgeId;
   bridgeIndex: number;
   bridgeLabel: string;
+  bridgeColor: string;
   pane: PaneInfo;
   snapshot: Snapshot;
   workspace?: WorkspaceInfo;
   tabNumber?: number;
   tabLabel?: string;
+};
+type ScopedWorkspace = {
+  bridgeId: BridgeId;
+  bridgeIndex: number;
+  bridgeLabel: string;
+  bridgeColor: string;
+  snapshot: Snapshot;
+  workspace: WorkspaceInfo;
+};
+type ScopedTabWorkspace = ScopedWorkspace & {
+  tabs: { tab: TabInfo; panes: PaneInfo[] }[];
+};
+type ScopedAgentGroup = {
+  key: string;
+  label: string;
+  bridgeColor?: string;
+  status?: AgentStatus;
+  panes: ScopedAgentPane[];
 };
 type MenuState = {
   kind: MenuKind;
@@ -144,6 +164,7 @@ type DialogState = {
   clearable?: boolean;
 };
 type DisplayPrefs = {
+  hostScope: HostScope;
   scope: Scope;
   sidebarView: SidebarView;
   agentSort: AgentSort;
@@ -181,6 +202,7 @@ const MAX_SIDEBAR_WIDTH = 560;
 
 function readDisplayPrefs(): DisplayPrefs {
   const fallback: DisplayPrefs = {
+    hostScope: "selected",
     scope: "space",
     sidebarView: "agents",
     agentSort: "attention",
@@ -235,6 +257,10 @@ function parseDisplayPrefsValue(
   fallback: DisplayPrefs,
 ): DisplayPrefs {
   return {
+    hostScope:
+      parsed.hostScope === "selected" || parsed.hostScope === "all"
+        ? parsed.hostScope
+        : fallback.hostScope,
     scope: parsed.scope === "all" || parsed.scope === "space" ? parsed.scope : fallback.scope,
     sidebarView:
       parsed.sidebarView === "agents" || parsed.sidebarView === "tabs"
@@ -247,7 +273,9 @@ function parseDisplayPrefsValue(
         ? parsed.agentSort
         : fallback.agentSort,
     agentGroup:
-      parsed.agentGroup === "none" || parsed.agentGroup === "workspace"
+      parsed.agentGroup === "none" ||
+      parsed.agentGroup === "host" ||
+      parsed.agentGroup === "workspace"
         ? parsed.agentGroup
         : fallback.agentGroup,
     sidebarWidth:
@@ -306,6 +334,10 @@ function readLegacyDisplayPrefs(fallback: DisplayPrefs): DisplayPrefs {
     } & Partial<DisplayPrefs>;
     return {
       ...fallback,
+      hostScope:
+        parsed.hostScope === "selected" || parsed.hostScope === "all"
+          ? parsed.hostScope
+          : fallback.hostScope,
       scope: parsed.scope === "all" || parsed.scope === "space" ? parsed.scope : fallback.scope,
       sidebarView:
         parsed.sidebarView === "agents" || parsed.sidebarView === "tabs"
@@ -318,7 +350,9 @@ function readLegacyDisplayPrefs(fallback: DisplayPrefs): DisplayPrefs {
           ? parsed.agentSort
           : fallback.agentSort,
       agentGroup:
-        parsed.agentGroup === "none" || parsed.agentGroup === "workspace"
+        parsed.agentGroup === "none" ||
+        parsed.agentGroup === "host" ||
+        parsed.agentGroup === "workspace"
           ? parsed.agentGroup
           : fallback.agentGroup,
       sidebarWidth:
@@ -462,6 +496,7 @@ export function App() {
   const [activeWorkspacesByBridgeId, setActiveWorkspacesByBridgeId] = useState<Record<string, string>>(
     initialPrefs.activeWorkspacesByBridgeId,
   );
+  const [hostScope, setHostScope] = useState<HostScope>(initialPrefs.hostScope);
   const [scope, setScope] = useState<Scope>(initialPrefs.scope);
   const [sidebarView, setSidebarView] = useState<SidebarView>(initialPrefs.sidebarView);
   const [agentSort, setAgentSort] = useState<AgentSort>(initialPrefs.agentSort);
@@ -530,6 +565,7 @@ export function App() {
       if (cancelled) {
         return;
       }
+      setHostScope(prefs.hostScope);
       setScope(prefs.scope);
       setSidebarView(prefs.sidebarView);
       setAgentSort(prefs.agentSort);
@@ -686,6 +722,12 @@ export function App() {
   }, [bridge.enabledBridgeIds, bridge.lastSelectedBridgeId, bridge.storeLoaded]);
 
   useEffect(() => {
+    if (hostScope === "all" && bridge.enabledBridgeIds.length <= 1) {
+      setHostScope("selected");
+    }
+  }, [bridge.enabledBridgeIds.length, hostScope]);
+
+  useEffect(() => {
     if (!bridge.storeLoaded) {
       return;
     }
@@ -805,6 +847,7 @@ export function App() {
       return;
     }
     void writeDisplayPrefs({
+      hostScope,
       scope,
       sidebarView,
       agentSort,
@@ -828,6 +871,7 @@ export function App() {
     });
   }, [
     displayPrefsLoaded,
+    hostScope,
     scope,
     sidebarView,
     agentSort,
@@ -1153,21 +1197,35 @@ export function App() {
 
   const requestTerminalFocus = () => setTerminalFocusToken((token) => token + 1);
 
+  const snapshotForBridge = (bridgeId: BridgeId) => {
+    const runtime = bridge.getRuntime(bridgeId);
+    if (!runtime) {
+      return null;
+    }
+    const ref = connectionRefs.current[bridgeId];
+    if (ref?.connectionKey === runtime.connectionKey && ref.snapshot) {
+      return ref.snapshot;
+    }
+    const state = connectionStates[bridgeId];
+    return state?.connectionKey === runtime.connectionKey ? state.snapshot : null;
+  };
+
   const selectSpace = (bridgeId: BridgeId, workspaceId: string) => {
     const runtime = bridge.getRuntime(bridgeId);
     if (!runtime) {
       return;
     }
+    const bridgeSnapshot = snapshotForBridge(bridgeId);
     setSelectedBridgeId(bridgeId);
     bridge.markBridgeUsed(bridgeId);
     setActiveWorkspaceRefState({ bridgeId, workspaceId });
     setActiveWorkspacesByBridgeId((current) =>
       current[bridgeId] === workspaceId ? current : { ...current, [bridgeId]: workspaceId },
     );
-    if (!isCompactLayout && snapshot) {
-      const paneId = choosePaneForWorkspace(snapshot, workspaceId);
+    if (!isCompactLayout && bridgeSnapshot) {
+      const paneId = choosePaneForWorkspace(bridgeSnapshot, workspaceId);
       if (paneId) {
-        const pane = snapshot.panes.find((item) => item.pane_id === paneId);
+        const pane = bridgeSnapshot.panes.find((item) => item.pane_id === paneId);
         rememberPaneSelection(bridgeId, paneId, pane?.workspace_id ?? workspaceId);
         if (runtime.capabilityState === "ready") {
           void syncSelectedPane(runtime.httpUrl, paneId).catch(() => {});
@@ -1181,12 +1239,13 @@ export function App() {
   };
 
   const selectTab = (bridgeId: BridgeId, tabId: string) => {
-    if (!snapshot) {
+    const bridgeSnapshot = snapshotForBridge(bridgeId);
+    if (!bridgeSnapshot) {
       return;
     }
-    const paneId = choosePaneForTab(snapshot, tabId);
+    const paneId = choosePaneForTab(bridgeSnapshot, tabId);
     if (paneId) {
-      const pane = snapshot.panes.find((item) => item.pane_id === paneId);
+      const pane = bridgeSnapshot.panes.find((item) => item.pane_id === paneId);
       if (pane) {
         openPane(bridgeId, pane);
       }
@@ -1680,6 +1739,7 @@ export function App() {
         <Switcher
           bridgeViews={bridgeViews}
           selectedBridgeId={selectedRuntime?.id ?? null}
+          hostScope={hostScope}
           snapshot={snapshot}
           loadState={loadState}
           bridgeCanConnect={selectedRuntime?.canConnect ?? false}
@@ -1692,7 +1752,9 @@ export function App() {
           agentSort={agentSort}
           agentGroup={agentGroup}
           activeSpace={activeSpace}
+          activeWorkspacesByBridgeId={activeWorkspacesByBridgeId}
           selectedPane={selectedPane}
+          onHostScope={setHostScope}
           onScope={setScope}
           onSidebarView={setSidebarView}
           onAgentSort={setAgentSort}
@@ -2521,6 +2583,7 @@ function TabBar({
 function Switcher({
   bridgeViews,
   selectedBridgeId,
+  hostScope,
   snapshot,
   loadState,
   bridgeCanConnect,
@@ -2533,7 +2596,9 @@ function Switcher({
   agentSort,
   agentGroup,
   activeSpace,
+  activeWorkspacesByBridgeId,
   selectedPane,
+  onHostScope,
   onScope,
   onSidebarView,
   onAgentSort,
@@ -2552,6 +2617,7 @@ function Switcher({
 }: {
   bridgeViews: BridgeConnectionView[];
   selectedBridgeId: BridgeId | null;
+  hostScope: HostScope;
   snapshot: Snapshot | null;
   loadState: LoadState;
   bridgeCanConnect: boolean;
@@ -2564,7 +2630,9 @@ function Switcher({
   agentSort: AgentSort;
   agentGroup: AgentGroup;
   activeSpace: WorkspaceInfo | null;
+  activeWorkspacesByBridgeId: Record<string, string>;
   selectedPane: PaneInfo | null;
+  onHostScope: (scope: HostScope) => void;
   onScope: (scope: Scope) => void;
   onSidebarView: (view: SidebarView) => void;
   onAgentSort: (sort: AgentSort) => void;
@@ -2596,116 +2664,262 @@ function Switcher({
     clearable?: boolean,
   ) => void;
 }) {
-  const allPanes = bridgeViews.flatMap((view) => view.snapshot?.panes ?? []);
-  const panes = scope === "all" && sidebarView === "agents" ? allPanes : (snapshot?.panes ?? []);
+  const selectedBridgeView = selectedBridgeId
+    ? (bridgeViews.find((view) => view.runtime.id === selectedBridgeId) ?? null)
+    : null;
+  const hostBridgeViews =
+    hostScope === "all" ? bridgeViews : selectedBridgeView ? [selectedBridgeView] : [];
+  const activeWorkspaceForView = useCallback((view: BridgeConnectionView) => {
+    const viewSnapshot = view.snapshot;
+    if (!viewSnapshot || viewSnapshot.workspaces.length === 0) {
+      return null;
+    }
+    const preferredWorkspaceId =
+      view.runtime.id === selectedBridgeId
+        ? (activeSpace?.workspace_id ?? activeWorkspacesByBridgeId[view.runtime.id])
+        : activeWorkspacesByBridgeId[view.runtime.id];
+    return (
+      (preferredWorkspaceId &&
+        viewSnapshot.workspaces.find((workspace) => workspace.workspace_id === preferredWorkspaceId)) ||
+      viewSnapshot.workspaces.find((workspace) => workspace.focused) ||
+      viewSnapshot.workspaces[0] ||
+      null
+    );
+  }, [activeSpace?.workspace_id, activeWorkspacesByBridgeId, selectedBridgeId]);
+  const scopedWorkspaces = useMemo<ScopedWorkspace[]>(
+    () =>
+      hostBridgeViews.flatMap((view) => {
+        const viewSnapshot = view.snapshot;
+        if (!viewSnapshot) {
+          return [];
+        }
+        const bridgeIndex = Math.max(
+          0,
+          bridgeViews.findIndex((candidate) => candidate.runtime.id === view.runtime.id),
+        );
+        const workspaces =
+          scope === "all"
+            ? viewSnapshot.workspaces
+            : [activeWorkspaceForView(view)].filter(
+                (workspace): workspace is WorkspaceInfo => workspace !== null,
+              );
+        return workspaces.map((workspace) => ({
+          bridgeId: view.runtime.id,
+          bridgeIndex,
+          bridgeLabel: view.runtime.label,
+          bridgeColor: view.runtime.color,
+          snapshot: viewSnapshot,
+          workspace,
+        }));
+      }),
+    [
+      activeWorkspaceForView,
+      bridgeViews,
+      hostBridgeViews,
+      scope,
+    ],
+  );
+  const panes = scopedWorkspaces.flatMap((entry) =>
+    entry.snapshot.panes.filter((pane) => pane.workspace_id === entry.workspace.workspace_id),
+  );
   const roll = aggregateStatus(panes);
   const headerSummary = summary(panes);
-  const bridgeBlocked = !bridgeCanConnect || bridgeViews.length === 0;
-  const showingAgentOverview = sidebarView === "agents" && scope === "all";
-  const disconnectedBridgeViews = showingAgentOverview
-    ? bridgeViews.filter(
-        (view) =>
-          !view.snapshot && (!view.runtime.canConnect || view.loadState === "error"),
-      )
-    : [];
-  const hasListSnapshot = showingAgentOverview
-    ? bridgeViews.some((view) => view.snapshot) || disconnectedBridgeViews.length > 0
-    : Boolean(snapshot);
+  const bridgeBlocked =
+    bridgeViews.length === 0 ||
+    (hostScope === "selected" && (!selectedBridgeView || !bridgeCanConnect));
+  const disconnectedBridgeViews =
+    hostScope === "all"
+      ? bridgeViews.filter(
+          (view) => !view.snapshot && (!view.runtime.canConnect || view.loadState === "error"),
+        )
+      : [];
+  const hasListSnapshot =
+    hostScope === "all"
+      ? hostBridgeViews.some((view) => view.snapshot) || disconnectedBridgeViews.length > 0
+      : Boolean(snapshot);
 
   const agentPanes = useMemo<ScopedAgentPane[]>(() => {
-    if (scope === "all") {
-      return sortScopedAgentPanes(
-        bridgeViews.flatMap((view, bridgeIndex) => {
-          const viewSnapshot = view.snapshot;
-          if (!viewSnapshot) {
-            return [];
-          }
-          const sorted = sortAgentPanes(
-            viewSnapshot.panes.filter(isAgentPane),
-            agentSort,
-            viewSnapshot,
-          );
-          return sorted.map((pane) => {
-            const workspace = viewSnapshot.workspaces.find(
-              (item) => item.workspace_id === pane.workspace_id,
-            );
-            const tab = viewSnapshot.tabs.find((item) => item.tab_id === pane.tab_id);
-            return {
-              bridgeId: view.runtime.id,
-              bridgeIndex,
-              bridgeLabel: view.runtime.label,
-              pane,
-              snapshot: viewSnapshot,
-              workspace,
-              tabNumber: tab?.number,
-              tabLabel: tab ? displayTabLabel(tab, viewSnapshot.panes) : undefined,
-            };
-          });
-        }),
-        agentSort,
-      );
-    }
-    if (!snapshot || !selectedBridgeId) {
-      return [];
-    }
-    const scoped = snapshot.panes.filter(
-      (pane) => pane.workspace_id === activeSpace?.workspace_id,
+    return sortScopedAgentPanes(
+      scopedWorkspaces.flatMap((entry) => {
+        const sorted = sortAgentPanes(
+          entry.snapshot.panes.filter(
+            (pane) => pane.workspace_id === entry.workspace.workspace_id && isAgentPane(pane),
+          ),
+          agentSort,
+          entry.snapshot,
+        );
+        return sorted.map((pane) => {
+          const tab = entry.snapshot.tabs.find((item) => item.tab_id === pane.tab_id);
+          return {
+            bridgeId: entry.bridgeId,
+            bridgeIndex: entry.bridgeIndex,
+            bridgeLabel: entry.bridgeLabel,
+            bridgeColor: entry.bridgeColor,
+            pane,
+            snapshot: entry.snapshot,
+            workspace: entry.workspace,
+            tabNumber: tab?.number,
+            tabLabel: tab ? displayTabLabel(tab, entry.snapshot.panes) : undefined,
+          };
+        });
+      }),
+      agentSort,
     );
-    return sortAgentPanes(scoped.filter(isAgentPane), agentSort, snapshot).map((pane) => {
-      const workspace = snapshot.workspaces.find((item) => item.workspace_id === pane.workspace_id);
-      const tab = snapshot.tabs.find((item) => item.tab_id === pane.tab_id);
-      return {
-        bridgeId: selectedBridgeId,
-        bridgeIndex: Math.max(0, bridgeViews.findIndex((view) => view.runtime.id === selectedBridgeId)),
-        bridgeLabel: bridgeLabel,
-        pane,
-        snapshot,
-        workspace,
-        tabNumber: tab?.number,
-        tabLabel: tab ? displayTabLabel(tab, snapshot.panes) : undefined,
-      };
-    });
-  }, [activeSpace?.workspace_id, agentSort, bridgeLabel, bridgeViews, scope, selectedBridgeId, snapshot]);
+  }, [agentSort, scopedWorkspaces]);
 
   const agentGroups = useMemo(() => {
-    if (agentGroup !== "workspace") {
+    if (agentGroup === "none") {
       return [];
     }
-    const paneBuckets = new Map<string, ScopedAgentPane[]>();
+    const paneBuckets = new Map<string, ScopedAgentGroup>();
     for (const entry of agentPanes) {
-      const key = `${entry.bridgeId}:${entry.pane.workspace_id}`;
-      const panesForWorkspace = paneBuckets.get(key) ?? [];
-      panesForWorkspace.push(entry);
-      paneBuckets.set(key, panesForWorkspace);
+      const key =
+        agentGroup === "host" ? entry.bridgeId : `${entry.bridgeId}:${entry.pane.workspace_id}`;
+      const label =
+        agentGroup === "host"
+          ? entry.bridgeLabel
+          : hostScope === "all"
+            ? `${entry.bridgeLabel} / ${entry.workspace?.label ?? "workspace"}`
+            : (entry.workspace?.label ?? "workspace");
+      const existing =
+        paneBuckets.get(key) ??
+        {
+          key,
+          label,
+          bridgeColor: entry.bridgeColor,
+          status: agentGroup === "workspace" ? entry.workspace?.agent_status : undefined,
+          panes: [],
+        };
+      existing.panes.push(entry);
+      paneBuckets.set(key, existing);
     }
-    return [...paneBuckets.entries()].map(([key, entries]) => ({
-      key,
-      bridgeLabel: entries[0]?.bridgeLabel ?? "",
-      workspace: entries[0]?.workspace,
-      panes: entries,
+    return [...paneBuckets.values()].map((group) => ({
+      ...group,
+      status: group.status ?? aggregateStatus(group.panes.map((entry) => entry.pane)),
     }));
-  }, [agentGroup, agentPanes]);
+  }, [agentGroup, agentPanes, hostScope]);
 
-  const spaceGroups = useMemo(() => {
-    if (!snapshot) {
-      return [];
-    }
-    const spaces =
-      scope === "all"
-        ? snapshot.workspaces
-        : snapshot.workspaces.filter(
-            (workspace) => workspace.workspace_id === activeSpace?.workspace_id,
-          );
-    return spaces.map((workspace) => ({
-      workspace,
-      tabs: sortTabsForWorkspace(snapshot.tabs, workspace.workspace_id)
-        .map((tab) => ({ tab, panes: sortPanesForTab(snapshot.panes, tab.tab_id) }))
-        .filter((group) => group.panes.length > 0),
-    }));
-  }, [snapshot, scope, activeSpace?.workspace_id]);
+  const spaceGroups = useMemo<ScopedTabWorkspace[]>(
+    () =>
+      scopedWorkspaces.map((entry) => ({
+        ...entry,
+        tabs: sortTabsForWorkspace(entry.snapshot.tabs, entry.workspace.workspace_id)
+          .map((tab) => ({ tab, panes: sortPanesForTab(entry.snapshot.panes, tab.tab_id) }))
+          .filter((group) => group.panes.length > 0),
+      })),
+    [scopedWorkspaces],
+  );
+  const spaceCount = hostBridgeViews.reduce(
+    (count, view) => count + (view.snapshot?.workspaces.length ?? 0),
+    0,
+  );
+  const showGroupedHostContext = hostScope === "all";
+  const showGroupControl = sidebarView === "agents" || hostScope === "all" || scope === "all";
 
   let agentPaneIndex = 0;
   let paneIndex = 0;
+  const renderTabWorkspaceGroup = (
+    group: ScopedTabWorkspace,
+    showWorkspaceHeader: boolean,
+    showContextInTabLabel: boolean,
+  ) => (
+    <Fragment key={`${group.bridgeId}:${group.workspace.workspace_id}`}>
+      {showWorkspaceHeader ? (
+        <GroupHeader
+          label={
+            showGroupedHostContext
+              ? `${group.bridgeLabel} / ${group.workspace.label}`
+              : group.workspace.label
+          }
+          bridgeColor={showGroupedHostContext ? group.bridgeColor : undefined}
+          status={showGroupedHostContext ? undefined : group.workspace.agent_status}
+        />
+      ) : null}
+      {group.tabs.map(({ tab, panes: tabPanes }) => {
+        const tabLabel = displayTabLabel(tab, group.snapshot.panes);
+        const label = showContextInTabLabel
+          ? `${group.bridgeLabel} / ${group.workspace.label} / ${tabLabel}`
+          : tabLabel;
+        return (
+          <div className="tabgrp" key={`${group.bridgeId}:${tab.tab_id}`}>
+            {showContextInTabLabel || group.workspace.tab_count > 1 || tabPanes.length > 1 ? (
+              <TabDivider
+                label={label}
+                count={tabPanes.length}
+                onSelect={() => onSelectTab(group.bridgeId, tab.tab_id)}
+                onMenu={(x, y) =>
+                  onScopedMenu(
+                    "tab",
+                    group.bridgeId,
+                    tab.tab_id,
+                    tabLabel,
+                    x,
+                    y,
+                    canClearTabName(tab),
+                  )
+                }
+              />
+            ) : null}
+            {tabPanes.map((pane) => (
+              <PaneRow
+                key={`${group.bridgeId}:${pane.pane_id}`}
+                index={paneIndex++}
+                pane={pane}
+                active={group.bridgeId === selectedBridgeId && pane.pane_id === selectedPane?.pane_id}
+                onSelect={() => onSelectPane(group.bridgeId, pane)}
+                onMenu={(x, y) =>
+                  onScopedMenu("pane", group.bridgeId, pane.pane_id, paneTitle(pane), x, y)
+                }
+              />
+            ))}
+          </div>
+        );
+      })}
+    </Fragment>
+  );
+  const renderTabGroups = () => {
+    if (agentGroup === "host") {
+      return hostBridgeViews.map((view) => {
+        const groups = spaceGroups.filter(
+          (group) => group.bridgeId === view.runtime.id && group.tabs.length > 0,
+        );
+        if (groups.length === 0) {
+          return null;
+        }
+        return (
+          <Fragment key={view.runtime.id}>
+            <GroupHeader label={view.runtime.label} bridgeColor={view.runtime.color} />
+            {groups.map((group) => renderTabWorkspaceGroup(group, true, false))}
+          </Fragment>
+        );
+      });
+    }
+
+    if (agentGroup === "workspace") {
+      return spaceGroups.map((group) => renderTabWorkspaceGroup(group, true, false));
+    }
+
+    const showContextInTabLabel = hostScope === "all" || scope === "all";
+    return spaceGroups.map((group) =>
+      renderTabWorkspaceGroup(group, false, showContextInTabLabel),
+    );
+  };
+  const renderDisconnectedBridgeRows = () =>
+    disconnectedBridgeViews.map((view) => (
+      <DisconnectedBridgeRow
+        key={view.runtime.id}
+        label={view.runtime.label}
+        message={
+          view.runtime.capabilityError ||
+          (view.loadState === "error" ? "Could not reach bridge" : "Bridge disconnected")
+        }
+        onSelect={() => {
+          onSelectBridge(view.runtime.id);
+          onHostScope("selected");
+        }}
+        onRetry={() => onRefreshBridge(view.runtime.id)}
+      />
+    ));
 
   return (
     <>
@@ -2748,22 +2962,18 @@ function Switcher({
         </button>
       </header>
 
-      <div className="sidebar-scope" role="group" aria-label="Bridge">
+      <div className="sidebar-scope host-scope" role="group" aria-label="Host">
         {bridgeViews.map((view) => (
           <button
             key={view.runtime.id}
             className="bridge-chip"
             type="button"
             style={{ "--bridge-color": view.runtime.color } as CSSProperties}
-            data-on={
-              selectedBridgeId === view.runtime.id && !(scope === "all" && sidebarView === "agents")
-            }
-            aria-pressed={
-              selectedBridgeId === view.runtime.id && !(scope === "all" && sidebarView === "agents")
-            }
+            data-on={hostScope === "selected" && selectedBridgeId === view.runtime.id}
+            aria-pressed={hostScope === "selected" && selectedBridgeId === view.runtime.id}
             onClick={() => {
               onSelectBridge(view.runtime.id);
-              onScope("space");
+              onHostScope("selected");
             }}
           >
             <span className="bridge-chip-dot" aria-hidden="true" />
@@ -2772,15 +2982,13 @@ function Switcher({
         ))}
         {bridgeViews.length > 1 ? (
           <button
+            className="bridge-chip"
             type="button"
-            data-on={scope === "all" && sidebarView === "agents"}
-            aria-pressed={scope === "all" && sidebarView === "agents"}
-            onClick={() => {
-              onSidebarView("agents");
-              onScope("all");
-            }}
+            data-on={hostScope === "all"}
+            aria-pressed={hostScope === "all"}
+            onClick={() => onHostScope("all")}
           >
-            All agents
+            <span className="bridge-chip-label">All</span>
           </button>
         ) : null}
       </div>
@@ -2852,29 +3060,69 @@ function Switcher({
         ) : (
           <>
             {/* SPACES ---------------------------------------------------- */}
-            {scope === "space" && snapshot && selectedBridgeId ? (
+            {scope === "space" && hostBridgeViews.some((view) => view.snapshot) ? (
             <section className="sec">
               <div className="sec-head">
                 <span className="sec-label">spaces</span>
                 <span className="sec-rule" />
-                <span className="sec-count mono">{snapshot.workspaces.length}</span>
-                <button
-                  className="sec-add"
-                  type="button"
-                  aria-label="New space"
-                  title="New space"
-                  onClick={onCreateSpace}
-                >
-                  <Plus size={14} />
-                </button>
+                <span className="sec-count mono">{spaceCount}</span>
+                {hostScope === "selected" ? (
+                  <button
+                    className="sec-add"
+                    type="button"
+                    aria-label="New space"
+                    title="New space"
+                    onClick={onCreateSpace}
+                  >
+                    <Plus size={14} />
+                  </button>
+                ) : null}
               </div>
-              {snapshot.workspaces.length === 0 ? (
+              {spaceCount === 0 ? (
                 <div className="empty">
                   <strong>No spaces yet</strong>
-                  <span>Tap + to create one.</span>
+                  <span>{hostScope === "selected" ? "Tap + to create one." : "No enabled host has spaces."}</span>
                 </div>
+              ) : hostScope === "all" ? (
+                hostBridgeViews.map((view) => {
+                  const viewSnapshot = view.snapshot;
+                  if (!viewSnapshot) {
+                    return null;
+                  }
+                  const activeWorkspace = activeWorkspaceForView(view);
+                  return (
+                    <Fragment key={view.runtime.id}>
+                      <GroupHeader label={view.runtime.label} bridgeColor={view.runtime.color} />
+                      {viewSnapshot.workspaces.map((workspace, index) => (
+                        <SpaceRow
+                          key={`${view.runtime.id}:${workspace.workspace_id}`}
+                          index={index}
+                          workspace={workspace}
+                          active={workspace.workspace_id === activeWorkspace?.workspace_id}
+                          attention={countAttention(
+                            viewSnapshot.panes.filter(
+                              (pane) => pane.workspace_id === workspace.workspace_id,
+                            ),
+                          )}
+                          onSelect={() => onSelectSpace(view.runtime.id, workspace.workspace_id)}
+                          onMenu={(x, y) =>
+                            onScopedMenu(
+                              "space",
+                              view.runtime.id,
+                              workspace.workspace_id,
+                              workspace.label,
+                              x,
+                              y,
+                              canClearWorkspaceName(workspace, viewSnapshot.panes),
+                            )
+                          }
+                        />
+                      ))}
+                    </Fragment>
+                  );
+                })
               ) : (
-                snapshot.workspaces.map((workspace, index) => (
+                snapshot?.workspaces.map((workspace, index) => (
                   <SpaceRow
                     key={workspace.workspace_id}
                     index={index}
@@ -2883,7 +3131,9 @@ function Switcher({
                     attention={countAttention(
                       snapshot.panes.filter((pane) => pane.workspace_id === workspace.workspace_id),
                     )}
-                    onSelect={() => onSelectSpace(selectedBridgeId, workspace.workspace_id)}
+                    onSelect={() =>
+                      selectedBridgeId ? onSelectSpace(selectedBridgeId, workspace.workspace_id) : undefined
+                    }
                     onMenu={(x, y) =>
                       onMenu(
                         "space",
@@ -2895,13 +3145,13 @@ function Switcher({
                       )
                     }
                   />
-                ))
+                )) ?? null
               )}
             </section>
             ) : null}
 
             {/* PANES ----------------------------------------------------- */}
-            {(showingAgentOverview || (snapshot && snapshot.workspaces.length > 0)) ? (
+            {(hostScope === "all" ? hasListSnapshot : snapshot && snapshot.workspaces.length > 0) ? (
             <section className="sec">
               <div className="sec-head">
                 <span className="sec-label">
@@ -2911,7 +3161,9 @@ function Switcher({
                       : "space agents"
                     : scope === "all"
                       ? "all tabs"
-                      : (activeSpace?.label ?? "tabs")}
+                      : hostScope === "all"
+                        ? "space tabs"
+                        : (activeSpace?.label ?? "tabs")}
                 </span>
                 <span className="sec-rule" />
                 {sidebarView === "agents" ? (
@@ -2934,11 +3186,26 @@ function Switcher({
                         onChange={(event) => onAgentGroup(event.currentTarget.value as AgentGroup)}
                       >
                         <option value="none">none</option>
+                        <option value="host">host</option>
                         <option value="workspace">workspace</option>
                       </select>
                     </label>
                   </div>
-                ) : scope === "space" && activeSpace ? (
+                ) : showGroupControl ? (
+                  <div className="agent-list-controls">
+                    <label className="sort-control">
+                      <span>group</span>
+                      <select
+                        value={agentGroup}
+                        onChange={(event) => onAgentGroup(event.currentTarget.value as AgentGroup)}
+                      >
+                        <option value="none">none</option>
+                        <option value="host">host</option>
+                        <option value="workspace">workspace</option>
+                      </select>
+                    </label>
+                  </div>
+                ) : scope === "space" && activeSpace && selectedBridgeId ? (
                   <button
                     className="sec-add"
                     type="button"
@@ -2961,30 +3228,15 @@ function Switcher({
                   </div>
                 ) : (
                   <>
-                    {disconnectedBridgeViews.map((view) => (
-                      <DisconnectedBridgeRow
-                        key={view.runtime.id}
-                        label={view.runtime.label}
-                        message={
-                          view.runtime.capabilityError ||
-                          (view.loadState === "error" ? "Could not reach bridge" : "Bridge disconnected")
-                        }
-                        onSelect={() => onSelectBridge(view.runtime.id)}
-                        onRetry={() => onRefreshBridge(view.runtime.id)}
-                      />
-                    ))}
-                    {agentGroup === "workspace"
+                    {renderDisconnectedBridgeRows()}
+                    {agentGroup !== "none"
                       ? agentGroups.map((group) => (
                           <Fragment key={group.key}>
-                            <div className="grp-space">
-                              <span className="dot" data-status={group.workspace?.agent_status ?? "unknown"} />
-                              <span className="grp-space-name">
-                                {scope === "all" && group.bridgeLabel
-                                  ? `${group.bridgeLabel} / ${group.workspace?.label ?? "workspace"}`
-                                  : (group.workspace?.label ?? "workspace")}
-                              </span>
-                              <span className="grp-space-line" />
-                            </div>
+                            <GroupHeader
+                              label={group.label}
+                              bridgeColor={agentGroup === "host" ? group.bridgeColor : undefined}
+                              status={agentGroup === "workspace" ? group.status : undefined}
+                            />
                             {group.panes.map((entry) => (
                               <AgentRow
                                 key={`${entry.bridgeId}:${entry.pane.pane_id}`}
@@ -2992,7 +3244,7 @@ function Switcher({
                                 pane={entry.pane}
                                 workspace={entry.workspace}
                                 tabLabel={entry.tabLabel}
-                                bridgeLabel={scope === "all" ? entry.bridgeLabel : undefined}
+                                bridgeLabel={showGroupedHostContext ? entry.bridgeLabel : undefined}
                                 active={
                                   entry.bridgeId === selectedBridgeId &&
                                   entry.pane.pane_id === selectedPane?.pane_id
@@ -3019,7 +3271,7 @@ function Switcher({
                             pane={entry.pane}
                             workspace={entry.workspace}
                             tabLabel={entry.tabLabel}
-                            bridgeLabel={scope === "all" ? entry.bridgeLabel : undefined}
+                            bridgeLabel={showGroupedHostContext ? entry.bridgeLabel : undefined}
                             active={
                               entry.bridgeId === selectedBridgeId &&
                               entry.pane.pane_id === selectedPane?.pane_id
@@ -3039,54 +3291,17 @@ function Switcher({
                         ))}
                   </>
                 )
-              ) : !snapshot || spaceGroups.every((group) => group.tabs.length === 0) ? (
+              ) : spaceGroups.every((group) => group.tabs.length === 0) ? (
+                disconnectedBridgeViews.length > 0 ? (
+                  <>{renderDisconnectedBridgeRows()}</>
+                ) : (
                 <div className="empty">
                   <strong>No panes</strong>
-                  <span>This space has no panes yet.</span>
+                  <span>{scope === "space" ? "This space has no panes yet." : "No workspace has panes yet."}</span>
                 </div>
+                )
               ) : (
-                spaceGroups.map((group) => (
-                  <Fragment key={group.workspace.workspace_id}>
-                    {scope === "all" ? (
-                      <div className="grp-space">
-                        <span className="dot" data-status={group.workspace.agent_status} />
-                        <span className="grp-space-name">{group.workspace.label}</span>
-                        <span className="grp-space-line" />
-                      </div>
-                    ) : null}
-                    {group.tabs.map(({ tab, panes: tabPanes }) => {
-                      const label = displayTabLabel(tab, snapshot.panes);
-                      return (
-                        <div className="tabgrp" key={tab.tab_id}>
-                          {group.workspace.tab_count > 1 || tabPanes.length > 1 ? (
-                            <TabDivider
-                              label={label}
-                              count={tabPanes.length}
-                              onSelect={() =>
-                                selectedBridgeId ? onSelectTab(selectedBridgeId, tab.tab_id) : undefined
-                              }
-                              onMenu={(x, y) =>
-                                onMenu("tab", tab.tab_id, label, x, y, canClearTabName(tab))
-                              }
-                            />
-                          ) : null}
-                          {tabPanes.map((pane) => (
-                            <PaneRow
-                              key={pane.pane_id}
-                              index={paneIndex++}
-                              pane={pane}
-                              active={pane.pane_id === selectedPane?.pane_id}
-                              onSelect={() =>
-                                selectedBridgeId ? onSelectPane(selectedBridgeId, pane) : undefined
-                              }
-                              onMenu={(x, y) => onMenu("pane", pane.pane_id, paneTitle(pane), x, y)}
-                            />
-                          ))}
-                        </div>
-                      );
-                    })}
-                  </Fragment>
-                ))
+                renderTabGroups()
               )}
             </section>
             ) : null}
@@ -3094,6 +3309,32 @@ function Switcher({
         )}
       </div>
     </>
+  );
+}
+
+function GroupHeader({
+  label,
+  bridgeColor,
+  status = "unknown",
+}: {
+  label: string;
+  bridgeColor?: string;
+  status?: AgentStatus;
+}) {
+  return (
+    <div className="grp-space">
+      {bridgeColor ? (
+        <span
+          className="bridge-chip-dot grp-bridge-dot"
+          style={{ "--bridge-color": bridgeColor } as CSSProperties}
+          aria-hidden="true"
+        />
+      ) : (
+        <span className="dot" data-status={status} />
+      )}
+      <span className="grp-space-name">{label}</span>
+      <span className="grp-space-line" />
+    </div>
   );
 }
 

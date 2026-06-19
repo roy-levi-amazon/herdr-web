@@ -86,6 +86,7 @@ function entry(
     bridgeId,
     bridgeIndex,
     bridgeLabel: bridgeId,
+    bridgeColor: "#89b4fa",
     pane: paneInfo,
     snapshot,
     workspace: workspaceInfo,
