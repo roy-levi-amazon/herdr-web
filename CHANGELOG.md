@@ -6,7 +6,20 @@
 
 ### Added
 
+- Added multi-bridge connections, allowing multiple saved bridges to stay enabled at once with
+  server chips and an all-agents sidebar overview. [PR #17](https://github.com/kcosr/herdr-web/pull/17)
+- Added a bridge `--allow-connect-origin` option so bridge-served web pages can opt into connecting
+  to other trusted bridge origins without relaxing the default Content Security Policy.
+  [PR #17](https://github.com/kcosr/herdr-web/pull/17)
+- Added a Host + workspace grouping option for agent lists.
+  [PR #17](https://github.com/kcosr/herdr-web/pull/17)
+- Added configurable bridge colors with a mobile-friendly color picker.
+  [PR #17](https://github.com/kcosr/herdr-web/pull/17)
+
 ### Changed
+
+- Moved sidebar agent/tab sorting and grouping controls into a vertical options menu, and removed
+  redundant host prefixes from grouped tab labels. [PR #17](https://github.com/kcosr/herdr-web/pull/17)
 
 ### Fixed
 

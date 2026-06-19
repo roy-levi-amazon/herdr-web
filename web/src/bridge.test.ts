@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildHttpUrl,
   buildWsUrl,
@@ -6,11 +6,18 @@ import {
   capabilityProbeSuccess,
   capabilityRetryDelayMs,
   duplicateBackend,
+  loadBackendStore,
   normalizeBridgeBaseUrl,
+  normalizeBackendColor,
   parseBackendStore,
   parseCapabilities,
   probeBridgeBaseUrl,
+  SAME_ORIGIN_BRIDGE_ID,
 } from "./bridge";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("bridge URL normalization", () => {
   it("normalizes origin-only bridge URLs", () => {
@@ -40,6 +47,15 @@ describe("bridge URL normalization", () => {
   });
 });
 
+describe("backend colors", () => {
+  it("normalizes six-digit hex colors", () => {
+    expect(normalizeBackendColor("#A1b2C3")).toBe("#a1b2c3");
+    expect(normalizeBackendColor(" #89B4FA ")).toBe("#89b4fa");
+    expect(normalizeBackendColor("#fff")).toBeNull();
+    expect(normalizeBackendColor("red")).toBeNull();
+  });
+});
+
 describe("bridge URL builders", () => {
   it("builds same-origin HTTP and WebSocket URLs", () => {
     vi.stubGlobal("location", { protocol: "https:", host: "app.local:8787" });
@@ -63,7 +79,7 @@ describe("bridge URL builders", () => {
 });
 
 describe("backend store parsing", () => {
-  it("keeps valid profiles and clears invalid active ids", () => {
+  it("migrates valid v1 profiles and clears invalid active ids", () => {
     expect(
       parseBackendStore({
         version: 1,
@@ -74,8 +90,9 @@ describe("backend store parsing", () => {
         ],
       }),
     ).toEqual({
-      version: 1,
-      activeBackendId: null,
+      version: 2,
+      enabledBridgeIds: [SAME_ORIGIN_BRIDGE_ID],
+      lastSelectedBridgeId: SAME_ORIGIN_BRIDGE_ID,
       backends: [
         {
           id: "one",
@@ -85,6 +102,148 @@ describe("backend store parsing", () => {
         },
       ],
     });
+  });
+
+  it("migrates a v1 active backend into the enabled bridge list", () => {
+    expect(
+      parseBackendStore({
+        version: 1,
+        activeBackendId: "one",
+        backends: [{ id: "one", name: "Home", baseUrl: "http://192.168.1.20:4000" }],
+      }),
+    ).toEqual({
+      version: 2,
+      enabledBridgeIds: ["one"],
+      lastSelectedBridgeId: "one",
+      backends: [
+        {
+          id: "one",
+          name: "Home",
+          baseUrl: "http://192.168.1.20:4000",
+          lastConnectedAt: undefined,
+        },
+      ],
+    });
+  });
+
+  it("keeps valid v2 enabled bridge ids only", () => {
+    expect(
+      parseBackendStore({
+        version: 2,
+        enabledBridgeIds: ["one", "missing", "one", SAME_ORIGIN_BRIDGE_ID],
+        lastSelectedBridgeId: "missing",
+        backends: [{ id: "one", name: "Home", baseUrl: "http://192.168.1.20:4000" }],
+      }),
+    ).toEqual({
+      version: 2,
+      enabledBridgeIds: ["one", SAME_ORIGIN_BRIDGE_ID],
+      lastSelectedBridgeId: "one",
+      backends: [
+        {
+          id: "one",
+          name: "Home",
+          baseUrl: "http://192.168.1.20:4000",
+          lastConnectedAt: undefined,
+        },
+      ],
+    });
+  });
+
+  it("keeps valid backend colors and drops invalid colors", () => {
+    expect(
+      parseBackendStore({
+        version: 2,
+        enabledBridgeIds: ["one", "two"],
+        lastSelectedBridgeId: "one",
+        backends: [
+          {
+            id: "one",
+            name: "Home",
+            baseUrl: "http://192.168.1.20:4000",
+            color: "#A1b2C3",
+          },
+          {
+            id: "two",
+            name: "Work",
+            baseUrl: "http://192.168.1.21:4000",
+            color: "red",
+          },
+        ],
+      }).backends,
+    ).toEqual([
+      {
+        id: "one",
+        name: "Home",
+        baseUrl: "http://192.168.1.20:4000",
+        color: "#a1b2c3",
+        lastConnectedAt: undefined,
+      },
+      {
+        id: "two",
+        name: "Work",
+        baseUrl: "http://192.168.1.21:4000",
+        lastConnectedAt: undefined,
+      },
+    ]);
+  });
+
+  it("drops saved backend profiles that use the reserved same-origin id", () => {
+    expect(
+      parseBackendStore({
+        version: 2,
+        enabledBridgeIds: [SAME_ORIGIN_BRIDGE_ID],
+        lastSelectedBridgeId: SAME_ORIGIN_BRIDGE_ID,
+        backends: [
+          {
+            id: SAME_ORIGIN_BRIDGE_ID,
+            name: "Impostor",
+            baseUrl: "http://192.168.1.20:4000",
+          },
+        ],
+      }),
+    ).toEqual({
+      version: 2,
+      enabledBridgeIds: [SAME_ORIGIN_BRIDGE_ID],
+      lastSelectedBridgeId: SAME_ORIGIN_BRIDGE_ID,
+      backends: [],
+    });
+  });
+
+  it("migrates the legacy browser store into the v2 browser key", async () => {
+    const legacyStore = {
+      version: 1,
+      activeBackendId: "one",
+      backends: [{ id: "one", name: "Home", baseUrl: "http://192.168.1.20:4000" }],
+    };
+    const setItem = vi.fn();
+    const removeItem = vi.fn();
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn((key: string) =>
+        key === "herdrWeb.bridgeBackends.v1" ? JSON.stringify(legacyStore) : null,
+      ),
+      setItem,
+      removeItem,
+    });
+
+    const migrated = await loadBackendStore();
+
+    expect(migrated).toEqual({
+      version: 2,
+      enabledBridgeIds: ["one"],
+      lastSelectedBridgeId: "one",
+      backends: [
+        {
+          id: "one",
+          name: "Home",
+          baseUrl: "http://192.168.1.20:4000",
+          lastConnectedAt: undefined,
+        },
+      ],
+    });
+    expect(setItem).toHaveBeenCalledWith("herdrWeb.bridgeBackends.v2", JSON.stringify(migrated));
+    expect(removeItem).toHaveBeenCalledWith("herdrWeb.bridgeBackends.v1");
+
+    vi.unstubAllGlobals();
   });
 
   it("detects duplicate normalized backend URLs", () => {

@@ -11,11 +11,14 @@
     "check": "npm run lint && npm run test && npm run build"
   },
   "dependencies": {
+    "@babel/runtime": "^7.29.7",
     "@capacitor/app": "^8.1.0",
     "@capacitor/core": "^8.4.0",
     "@capacitor/keyboard": "^8.0.5",
     "@capacitor/preferences": "^8.0.1",
     "@fontsource-variable/geist": "^5.2.9",
+    "@uiw/color-convert": "^2.10.3",
+    "@uiw/react-color-wheel": "^2.10.3",
     "ghostty-web": "0.4.0",
     "lucide-react": "^0.562.0",
     "react": "^19.2.3",

@@ -70,6 +70,7 @@ struct BridgeOptions {
     upload_dir: PathBuf,
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
+    allowed_connect_sources: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -90,6 +91,7 @@ struct RequestPolicy {
     bind_port: u16,
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
+    allowed_connect_sources: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -601,7 +603,7 @@ pub(crate) fn run_command(args: &[String]) -> io::Result<i32> {
         Err(message) => {
             eprintln!("{message}");
             eprintln!(
-                "usage: herdr-web-bridge [--session NAME] [--host HOST] [--port PORT] [--static-dir DIR] [--allow-origin ORIGIN] [--allow-host HOSTNAME]"
+                "usage: herdr-web-bridge [--session NAME] [--host HOST] [--port PORT] [--static-dir DIR] [--allow-origin ORIGIN] [--allow-host HOSTNAME] [--allow-connect-origin ORIGIN]"
             );
             return Ok(2);
         }
@@ -629,6 +631,7 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
     let mut upload_dir = default_upload_dir();
     let mut allowed_hosts = Vec::new();
     let mut allowed_origins = Vec::new();
+    let mut allowed_connect_sources = Vec::new();
     let mut explicit_session = None;
     let mut index = 0;
 
@@ -690,9 +693,19 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
                 allowed_origins.push(normalize_allowed_origin(value)?);
                 index += 2;
             }
+            "--allow-connect-origin" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --allow-connect-origin".into());
+                };
+                allowed_connect_sources.extend(connect_sources_for_origin(value)?);
+                index += 2;
+            }
             arg => return Err(format!("unknown herdr-web option: {arg}")),
         }
     }
+
+    allowed_connect_sources.sort();
+    allowed_connect_sources.dedup();
 
     if let Some(name) = explicit_session {
         crate::session::configure_explicit_session(&name)?;
@@ -705,6 +718,7 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
         upload_dir,
         allowed_hosts,
         allowed_origins,
+        allowed_connect_sources,
     }))
 }
 
@@ -715,7 +729,7 @@ fn print_help() {
 fn help_text() -> &'static str {
     "herdr-web-bridge\n\
 \n\
-Usage: herdr-web-bridge [--session NAME] [--host HOST] [--port PORT] [--static-dir DIR] [--upload-dir DIR] [--allow-origin ORIGIN] [--allow-host HOSTNAME]\n\
+Usage: herdr-web-bridge [--session NAME] [--host HOST] [--port PORT] [--static-dir DIR] [--upload-dir DIR] [--allow-origin ORIGIN] [--allow-host HOSTNAME] [--allow-connect-origin ORIGIN]\n\
 \n\
 Runs the local HTTP/WebSocket bridge for herdr-web.\n\
 Defaults to the active Herdr daemon sockets and 127.0.0.1:8787.\n\
@@ -723,6 +737,7 @@ Use --session NAME to target a named Herdr session and ignore HERDR_SOCKET_PATH.
 Use --host 0.0.0.0 to listen on non-loopback interfaces.\n\
 Use --allow-origin http://localhost for bundled Android app access.\n\
 Use --allow-host HOSTNAME to accept that exact DNS hostname in Host headers.\n\
+Use --allow-connect-origin ORIGIN to let the served web app connect to another bridge origin.\n\
 Uploads default to HERDR_WEB_UPLOAD_DIR, XDG_DATA_HOME/herdr-web/uploads, or ~/.local/share/herdr-web/uploads."
 }
 
@@ -740,6 +755,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         bind_port: options.port,
         allowed_hosts: options.allowed_hosts.clone(),
         allowed_origins: options.allowed_origins.clone(),
+        allowed_connect_sources: options.allowed_connect_sources.clone(),
     };
     let api = ApiClient::for_socket_path(crate::session::active_api_socket_path());
     let daemon_protocol = startup_daemon_protocol(&api)?;
@@ -814,12 +830,7 @@ async fn add_security_headers(
     );
     headers.insert(
         HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' data:; \
-             img-src 'self' data: blob:; \
-             style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'none'; \
-             frame-ancestors 'none'",
-        ),
+        content_security_policy(&policy),
     );
     if let Some(origin) = cors_origin {
         insert_cors_headers(headers, origin);
@@ -1106,14 +1117,39 @@ fn origin_authority(origin: &str) -> Option<&str> {
 }
 
 fn normalize_allowed_origin(origin: &str) -> Result<String, String> {
-    let origin = origin.trim();
-    let Some(authority) = origin_authority(origin) else {
+    let origin = origin.trim().to_ascii_lowercase();
+    let Some(authority) = origin_authority(&origin) else {
         return Err("allowed origin must be an http or https origin without a path".into());
     };
     if authority.is_empty() {
         return Err("allowed origin must include a host".into());
     }
-    Ok(origin.to_ascii_lowercase())
+    Ok(origin)
+}
+
+fn connect_sources_for_origin(origin: &str) -> Result<Vec<String>, String> {
+    let origin = normalize_allowed_origin(origin)?;
+    let websocket_origin = if let Some(authority) = origin.strip_prefix("http://") {
+        format!("ws://{authority}")
+    } else if let Some(authority) = origin.strip_prefix("https://") {
+        format!("wss://{authority}")
+    } else {
+        unreachable!("normalize_allowed_origin only accepts http and https origins")
+    };
+    Ok(vec![origin, websocket_origin])
+}
+
+fn content_security_policy(policy: &RequestPolicy) -> HeaderValue {
+    let mut connect_src = vec!["'self'".to_string(), "data:".to_string()];
+    connect_src.extend(policy.allowed_connect_sources.iter().cloned());
+    let value = format!(
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src {}; \
+         img-src 'self' data: blob:; \
+         style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'none'; \
+         frame-ancestors 'none'",
+        connect_src.join(" ")
+    );
+    HeaderValue::from_str(&value).expect("connect-src sources are validated origins")
 }
 
 fn normalize_allowed_host(host: &str) -> Result<String, String> {
@@ -3320,6 +3356,7 @@ mod tests {
             bind_port: 4000,
             allowed_hosts: Vec::new(),
             allowed_origins: vec!["http://localhost".to_string()],
+            allowed_connect_sources: Vec::new(),
         };
         assert!(request_allowed(
             &origin_headers("192.168.1.10:4000", Some("http://localhost")),
@@ -3385,6 +3422,7 @@ mod tests {
             bind_port: 4000,
             allowed_hosts: vec!["herdr-host.local".to_string()],
             allowed_origins: Vec::new(),
+            allowed_connect_sources: Vec::new(),
         };
         assert!(host_authority_allowed("herdr-host.local:4000", &policy));
         assert!(host_authority_allowed("HERDR-HOST.LOCAL:4000", &policy));
@@ -3399,6 +3437,7 @@ mod tests {
             bind_port: 4000,
             allowed_hosts: Vec::new(),
             allowed_origins: vec!["http://localhost".to_string()],
+            allowed_connect_sources: Vec::new(),
         };
         assert_eq!(
             cors_origin_header(
@@ -3431,6 +3470,35 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("content-type, authorization")
         );
+    }
+
+    #[test]
+    fn connect_origins_expand_to_http_and_websocket_csp_sources() {
+        assert_eq!(
+            connect_sources_for_origin("HTTP://SRV:8787").unwrap(),
+            vec!["http://srv:8787".to_string(), "ws://srv:8787".to_string()]
+        );
+        assert_eq!(
+            connect_sources_for_origin("https://srv.example:9443").unwrap(),
+            vec![
+                "https://srv.example:9443".to_string(),
+                "wss://srv.example:9443".to_string()
+            ]
+        );
+        assert!(connect_sources_for_origin("ws://srv:8787").is_err());
+        assert!(connect_sources_for_origin("http://srv:8787/path").is_err());
+    }
+
+    #[test]
+    fn content_security_policy_includes_configured_connect_sources() {
+        let mut policy = test_policy("0.0.0.0", 8787);
+        policy.allowed_connect_sources = connect_sources_for_origin("http://srv:8787").unwrap();
+
+        let header = content_security_policy(&policy);
+        let value = header.to_str().unwrap();
+
+        assert!(value.contains("connect-src 'self' data: http://srv:8787 ws://srv:8787;"));
+        assert!(value.contains("frame-ancestors 'none'"));
     }
 
     #[test]
@@ -3866,6 +3934,7 @@ mod tests {
             bind_port,
             allowed_hosts: Vec::new(),
             allowed_origins: Vec::new(),
+            allowed_connect_sources: Vec::new(),
         }
     }
 }

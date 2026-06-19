@@ -133,6 +133,24 @@ bin/herdr-web --host 0.0.0.0 --port 4000 \
 
 Then install the Android APK and add the bridge URL in the Bridge area of Settings.
 
+For browser-served multi-bridge use, configure both the page-serving bridge and the bridge being
+called. If a page opened from `http://host-a:8787` should connect to `http://host-b:8787`, run host
+A with:
+
+```bash
+bin/herdr-web --host 0.0.0.0 --allow-host host-a --allow-connect-origin http://host-b:8787
+```
+
+Run host B with:
+
+```bash
+bin/herdr-web --host 0.0.0.0 --allow-host host-b --allow-origin http://host-a:8787
+```
+
+`--allow-origin` accepts inbound browser calls to a bridge. `--allow-connect-origin` expands the
+served page's Content Security Policy so that page can connect to another bridge over HTTP and
+WebSocket.
+
 ## Manual Release Upload
 
 The release script creates the GitHub release from changelog notes. Tarballs and APKs are uploaded

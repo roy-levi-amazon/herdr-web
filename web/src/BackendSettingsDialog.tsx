@@ -1,5 +1,7 @@
+import { hexToHsva, hsvaToHex } from "@uiw/color-convert";
+import type { HsvaColor } from "@uiw/color-convert";
+import Wheel from "@uiw/react-color-wheel";
 import {
-  Check,
   Plus,
   RotateCcw,
   Server,
@@ -9,9 +11,15 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import type { CSSProperties, KeyboardEvent } from "react";
 import {
   duplicateBackend,
+  fallbackBackendColor,
   normalizeBridgeBaseUrl,
+  normalizeBackendColor,
+  SAME_ORIGIN_BRIDGE_ID,
+  SAME_ORIGIN_BRIDGE_COLOR,
+  suggestBackendColor,
   useBridge,
 } from "./bridge";
 import type { BridgeBackendProfile } from "./bridge";
@@ -62,16 +70,11 @@ type FormState = {
   id: string | null;
   name: string;
   baseUrl: string;
+  color: string;
 };
 
 type SelectionMode = "same-origin" | "new" | "backend";
 type SettingsArea = "bridge" | "display" | "terminal" | "mobile";
-
-const emptyForm: FormState = {
-  id: null,
-  name: "",
-  baseUrl: "",
-};
 
 export function BackendSettingsDialog({
   showMobileTerminalSettings,
@@ -100,20 +103,20 @@ export function BackendSettingsDialog({
   const titleId = useId();
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const nameInputRef = useRef<HTMLInputElement | null>(null);
-  const [form, setForm] = useState<FormState>(emptyForm);
+  const [form, setForm] = useState<FormState>(() => newBackendForm(bridge.store.backends));
   const [selectionMode, setSelectionMode] = useState<SelectionMode>(
-    initialSelectionMode(bridge.activeBackend, bridge.sameOriginAvailable),
+    initialSelectionMode(bridge.lastSelectedBridgeId, bridge.sameOriginAvailable),
   );
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [duplicate, setDuplicate] = useState<BridgeBackendProfile | null>(null);
   const [activeArea, setActiveArea] = useState<SettingsArea>("bridge");
 
-  const activeBackend = bridge.activeBackend;
   const selectedBackend = useMemo(
     () => bridge.store.backends.find((backend) => backend.id === form.id) ?? null,
     [bridge.store.backends, form.id],
   );
+  const sameOriginEnabled = bridge.store.enabledBridgeIds.includes(SAME_ORIGIN_BRIDGE_ID);
 
   useEffect(() => {
     if (activeArea !== "bridge") {
@@ -136,32 +139,30 @@ export function BackendSettingsDialog({
     if (selectionMode !== "backend" || form.id || bridge.store.backends.length === 0) {
       return;
     }
-    const backend = activeBackend ?? bridge.store.backends[0];
-    setForm({ id: backend.id, name: backend.name, baseUrl: backend.baseUrl });
-  }, [activeBackend, bridge.store.backends, form.id, selectionMode]);
+    const lastBackend = bridge.lastSelectedBridgeId
+      ? bridge.store.backends.find((backend) => backend.id === bridge.lastSelectedBridgeId)
+      : undefined;
+    const backend = lastBackend ?? bridge.store.backends[0];
+    setForm(backendFormFromProfile(backend));
+  }, [bridge.lastSelectedBridgeId, bridge.store.backends, form.id, selectionMode]);
 
   const selectSameOrigin = () => {
     setSelectionMode("same-origin");
-    setForm(emptyForm);
+    setForm(newBackendForm(bridge.store.backends));
     setMessage(null);
     setDuplicate(null);
   };
 
-  const useSameOrigin = () => {
-    bridge.clearActiveBackend();
-    onClose();
-  };
-
   const startNew = () => {
     setSelectionMode("new");
-    setForm(emptyForm);
+    setForm(newBackendForm(bridge.store.backends));
     setMessage(null);
     setDuplicate(null);
   };
 
   const editBackend = (backend: BridgeBackendProfile) => {
     setSelectionMode("backend");
-    setForm({ id: backend.id, name: backend.name, baseUrl: backend.baseUrl });
+    setForm(backendFormFromProfile(backend));
     setMessage(null);
     setDuplicate(null);
   };
@@ -194,7 +195,7 @@ export function BackendSettingsDialog({
     }
   };
 
-  const saveBackend = async (activate: boolean) => {
+  const saveBackend = async () => {
     setBusy(true);
     setMessage(null);
     try {
@@ -209,23 +210,14 @@ export function BackendSettingsDialog({
       try {
         await bridge.probeBackend(baseUrl);
       } catch (error) {
-        if (activate) {
-          throw error;
-        }
         probeWarning = error instanceof Error ? error.message : "Backend could not be reached.";
       }
       const profile = form.id
-        ? await bridge.updateBackend(form.id, { name: form.name, baseUrl })
-        : await bridge.addBackend({ name: form.name, baseUrl }, activate);
-      if (activate && form.id) {
-        bridge.setActiveBackend(profile.id);
-      }
+        ? await bridge.updateBackend(form.id, { name: form.name, baseUrl, color: form.color })
+        : await bridge.addBackend({ name: form.name, baseUrl, color: form.color }, false);
       setSelectionMode("backend");
-      setForm({ id: profile.id, name: profile.name, baseUrl: profile.baseUrl });
+      setForm(backendFormFromProfile(profile));
       setMessage(probeWarning ? `Backend saved. ${probeWarning}` : "Backend saved.");
-      if (activate) {
-        onClose();
-      }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not save backend");
     } finally {
@@ -234,14 +226,14 @@ export function BackendSettingsDialog({
   };
 
   const deleteBackend = () => {
-    if (!form.id || bridge.activeBackend?.id === form.id) {
+    if (!form.id) {
       return;
     }
     bridge.deleteBackend(form.id);
     startNew();
   };
 
-  const canDelete = Boolean(form.id && bridge.activeBackend?.id !== form.id);
+  const canDelete = Boolean(form.id);
   const editingBackend = selectionMode !== "same-origin";
   const sameOriginUrl = sameOriginDisplayUrl();
   const showSameOrigin = bridge.sameOriginAvailable;
@@ -274,7 +266,7 @@ export function BackendSettingsDialog({
           if (activeArea !== "bridge" || !editingBackend) {
             return;
           }
-          void saveBackend(true);
+          void saveBackend();
         }}
       >
         <button
@@ -312,36 +304,35 @@ export function BackendSettingsDialog({
                 <div className="bridge-settings-grid">
                   <div className="backend-list" role="list" aria-label="Saved bridges">
                     {showSameOrigin ? (
-                      <button
-                        className="backend-row"
-                        type="button"
-                        data-active={selectionMode === "same-origin" ? "true" : undefined}
-                        onClick={selectSameOrigin}
-                      >
-                        {!bridge.store.activeBackendId ? <Check size={14} /> : <span />}
-                        <span>
-                          <strong>Same origin</strong>
-                          <small>{sameOriginUrl}</small>
-                        </span>
-                      </button>
+                      <BackendToggleRow
+                        active={selectionMode === "same-origin"}
+                        color={SAME_ORIGIN_BRIDGE_COLOR}
+                        enabled={sameOriginEnabled}
+                        title="Same origin"
+                        subtitle={sameOriginUrl}
+                        toggleLabel={`${sameOriginEnabled ? "Disable" : "Enable"} Same origin bridge`}
+                        onSelect={selectSameOrigin}
+                        onToggle={() => bridge.setBridgeEnabled(SAME_ORIGIN_BRIDGE_ID, !sameOriginEnabled)}
+                      />
                     ) : null}
-                    {bridge.store.backends.map((backend) => (
-                      <button
-                        key={backend.id}
-                        className="backend-row"
-                        type="button"
-                        data-active={backend.id === form.id ? "true" : undefined}
-                        onClick={() => editBackend(backend)}
-                      >
-                        {backend.id === bridge.store.activeBackendId ? <Check size={14} /> : <span />}
-                        <span>
-                          <strong>{backend.name}</strong>
-                          <small>{backend.baseUrl}</small>
-                        </span>
-                      </button>
-                    ))}
+                    {bridge.store.backends.map((backend) => {
+                      const enabled = bridge.store.enabledBridgeIds.includes(backend.id);
+                      return (
+                        <BackendToggleRow
+                          key={backend.id}
+                          active={backend.id === form.id}
+                          color={backend.color ?? fallbackBackendColor(backend.id)}
+                          enabled={enabled}
+                          title={backend.name}
+                          subtitle={backend.baseUrl}
+                          toggleLabel={`${enabled ? "Disable" : "Enable"} ${backend.name}`}
+                          onSelect={() => editBackend(backend)}
+                          onToggle={() => bridge.setBridgeEnabled(backend.id, !enabled)}
+                        />
+                      );
+                    })}
                     <button
-                      className="backend-row"
+                      className="backend-row-action"
                       type="button"
                       data-active={selectionMode === "new" ? "true" : undefined}
                       onClick={startNew}
@@ -357,7 +348,10 @@ export function BackendSettingsDialog({
                     {selectionMode === "same-origin" ? (
                       <div className="backend-static">
                         <strong>Same origin</strong>
-                        <span>Uses the server that delivered this web app.</span>
+                        <span>
+                          {sameOriginEnabled ? "Enabled" : "Disabled"}; uses the server that
+                          delivered this web app.
+                        </span>
                       </div>
                     ) : (
                       <>
@@ -388,6 +382,18 @@ export function BackendSettingsDialog({
                             }
                           />
                         </label>
+                        <label className="field-label">
+                          <span>Bridge color</span>
+                          <BackendColorControl
+                            value={form.color}
+                            defaultValue={
+                              form.id
+                                ? fallbackBackendColor(form.id)
+                                : suggestBackendColor(bridge.store.backends)
+                            }
+                            onChange={(color) => setForm((current) => ({ ...current, color }))}
+                          />
+                        </label>
                         {selectedBackend?.lastConnectedAt ? (
                           <div className="backend-note">
                             Last used {formatDate(selectedBackend.lastConnectedAt)}
@@ -395,9 +401,11 @@ export function BackendSettingsDialog({
                         ) : null}
                       </>
                     )}
-                    {selectionMode === "same-origin" && bridge.store.activeBackendId ? (
+                    {selectedBackend ? (
                       <div className="backend-note">
-                        Use switches back from the active saved bridge.
+                        {bridge.store.enabledBridgeIds.includes(selectedBackend.id)
+                          ? "Enabled"
+                          : "Disabled"}
                       </div>
                     ) : null}
                     {duplicate ? (
@@ -408,41 +416,31 @@ export function BackendSettingsDialog({
                     {message ? <div className="modal-message">{message}</div> : null}
                   </div>
                 </div>
-                <div className="modal-actions">
-                  {canDelete ? (
-                    <button type="button" className="btn btn-danger" disabled={busy} onClick={deleteBackend}>
-                      Delete
+                {editingBackend ? (
+                  <div className="modal-actions">
+                    {canDelete ? (
+                      <button type="button" className="btn btn-danger" disabled={busy} onClick={deleteBackend}>
+                        Delete
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={busy || !form.baseUrl.trim()}
+                      onClick={testBackend}
+                    >
+                      Test
                     </button>
-                  ) : null}
-                  {selectionMode === "same-origin" && bridge.store.activeBackendId ? (
-                    <button type="button" className="btn btn-primary" onClick={useSameOrigin}>
-                      Use
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={busy || !form.baseUrl.trim()}
+                      onClick={() => void saveBackend()}
+                    >
+                      Save
                     </button>
-                  ) : null}
-                  {editingBackend ? (
-                    <>
-                      <button
-                        type="button"
-                        className="btn"
-                        disabled={busy || !form.baseUrl.trim()}
-                        onClick={testBackend}
-                      >
-                        Test
-                      </button>
-                      <button
-                        type="button"
-                        className="btn"
-                        disabled={busy || !form.baseUrl.trim()}
-                        onClick={() => void saveBackend(false)}
-                      >
-                        Save
-                      </button>
-                      <button type="submit" className="btn btn-primary" disabled={busy || !form.baseUrl.trim()}>
-                        Save & use
-                      </button>
-                    </>
-                  ) : null}
-                </div>
+                  </div>
+                ) : null}
               </>
             ) : null}
 
@@ -633,6 +631,198 @@ export function BackendSettingsDialog({
   );
 }
 
+function BackendColorControl({
+  value,
+  defaultValue,
+  onChange,
+}: {
+  value: string;
+  defaultValue: string;
+  onChange: (value: string) => void;
+}) {
+  const fallbackColor = normalizeBackendColor(defaultValue) ?? SAME_ORIGIN_BRIDGE_COLOR;
+  const color = normalizeBackendColor(value) ?? fallbackColor;
+  const [hsva, setHsva] = useState<HsvaColor>(() => hexToHsva(color));
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(color.toUpperCase());
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const skipDraftBlurCommitRef = useRef(false);
+  const popoverId = useId();
+  const shadeColor = hsvaToHex({ ...hsva, v: 100, a: 1 });
+
+  useEffect(() => {
+    setDraft(color.toUpperCase());
+  }, [color]);
+
+  useEffect(() => {
+    setHsva((current) => (hsvaToHex({ ...current, a: 1 }) === color ? current : hexToHsva(color)));
+  }, [color]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const handlePointerDown = (event: PointerEvent) => {
+      if (rootRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      setOpen(false);
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [open]);
+
+  const setColor = (nextColor: string) => {
+    const normalized = normalizeBackendColor(nextColor);
+    if (!normalized) {
+      return;
+    }
+    setHsva(hexToHsva(normalized));
+    onChange(normalized);
+  };
+
+  const setHsvaColor = (nextHsva: HsvaColor) => {
+    const opaqueHsva = { ...nextHsva, a: 1 };
+    const normalized = normalizeBackendColor(hsvaToHex(opaqueHsva));
+    if (!normalized) {
+      return;
+    }
+    setHsva(opaqueHsva);
+    onChange(normalized);
+  };
+
+  const commitDraft = (nextDraft: string) => {
+    const normalized = normalizeHexDraft(nextDraft);
+    if (normalized) {
+      setColor(normalized);
+      return;
+    }
+    setDraft(color.toUpperCase());
+  };
+
+  const handleWheelKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    let nextHsva: HsvaColor | null = null;
+    const hueStep = event.shiftKey ? 15 : 5;
+    const saturationStep = event.shiftKey ? 10 : 5;
+    if (event.key === "ArrowLeft") {
+      nextHsva = { ...hsva, h: wrapHue(hsva.h - hueStep) };
+    } else if (event.key === "ArrowRight") {
+      nextHsva = { ...hsva, h: wrapHue(hsva.h + hueStep) };
+    } else if (event.key === "ArrowDown") {
+      nextHsva = { ...hsva, s: clampPercent(hsva.s - saturationStep) };
+    } else if (event.key === "ArrowUp") {
+      nextHsva = { ...hsva, s: clampPercent(hsva.s + saturationStep) };
+    }
+    if (!nextHsva) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setHsvaColor(nextHsva);
+  };
+
+  return (
+    <div
+      className="backend-color-control"
+      ref={rootRef}
+      onKeyDown={(event) => {
+        if (!open || event.key !== "Escape") {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        setOpen(false);
+        buttonRef.current?.focus();
+      }}
+    >
+      <button
+        className="backend-color-swatch"
+        ref={buttonRef}
+        type="button"
+        aria-label="Bridge color"
+        aria-expanded={open}
+        aria-controls={open ? popoverId : undefined}
+        aria-haspopup="true"
+        style={{ "--bridge-color": color } as CSSProperties}
+        onClick={() => setOpen((current) => !current)}
+      />
+      <input
+        className="backend-color-value mono"
+        value={draft}
+        aria-label="Bridge color hex value"
+        spellCheck={false}
+        autoCapitalize="none"
+        onFocus={(event) => event.currentTarget.select()}
+        onChange={(event) => {
+          setDraft(event.currentTarget.value);
+        }}
+        onBlur={(event) => {
+          if (skipDraftBlurCommitRef.current) {
+            skipDraftBlurCommitRef.current = false;
+            return;
+          }
+          commitDraft(event.currentTarget.value);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            event.stopPropagation();
+            event.currentTarget.blur();
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            skipDraftBlurCommitRef.current = true;
+            setDraft(color.toUpperCase());
+            event.currentTarget.blur();
+          }
+        }}
+      />
+      {open ? (
+        <div
+          className="backend-color-popover"
+          id={popoverId}
+          role="group"
+          aria-label="Bridge color picker"
+        >
+          <Wheel
+            aria-label="Bridge color hue and saturation"
+            color={hsva}
+            width={176}
+            height={176}
+            onKeyDown={handleWheelKeyDown}
+            onChange={(nextColor) => setHsvaColor(nextColor.hsva)}
+          />
+          <input
+            className="backend-color-shade"
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={Math.round(hsva.v)}
+            aria-label="Bridge color brightness"
+            style={{ "--shade-color": shadeColor } as CSSProperties}
+            onChange={(event) => setHsvaColor({ ...hsva, v: event.currentTarget.valueAsNumber })}
+          />
+          <div className="backend-color-actions">
+            <span className="backend-color-preview" style={{ "--bridge-color": color } as CSSProperties} />
+            <button
+              className="settings-reset icon-btn"
+              type="button"
+              aria-label="Reset bridge color"
+              title="Reset"
+              disabled={color === fallbackColor}
+              onClick={() => setColor(fallbackColor)}
+            >
+              <RotateCcw size={13} />
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function NumberSettingControl({
   ariaLabel,
   value,
@@ -798,6 +988,88 @@ function ResetSettingButton({
   );
 }
 
+function BackendToggleRow({
+  active,
+  color,
+  enabled,
+  title,
+  subtitle,
+  toggleLabel,
+  onSelect,
+  onToggle,
+}: {
+  active: boolean;
+  color: string;
+  enabled: boolean;
+  title: string;
+  subtitle: string;
+  toggleLabel: string;
+  onSelect: () => void;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="backend-row" data-active={active ? "true" : undefined} role="listitem">
+      <button className="backend-row-main" type="button" onClick={onSelect}>
+        <span
+          className="backend-row-dot"
+          style={{ "--bridge-color": color } as CSSProperties}
+          aria-hidden="true"
+        />
+        <span className="backend-row-text">
+          <strong>{title}</strong>
+          <small>{subtitle}</small>
+        </span>
+      </button>
+      <button
+        className="backend-toggle"
+        type="button"
+        role="switch"
+        aria-checked={enabled}
+        aria-label={toggleLabel}
+        title={toggleLabel}
+        data-on={enabled ? "true" : undefined}
+        onClick={onToggle}
+      >
+        <span aria-hidden="true" />
+      </button>
+    </div>
+  );
+}
+
+function newBackendForm(backends: readonly BridgeBackendProfile[]): FormState {
+  return {
+    id: null,
+    name: "",
+    baseUrl: "",
+    color: suggestBackendColor(backends),
+  };
+}
+
+function backendFormFromProfile(backend: BridgeBackendProfile): FormState {
+  return {
+    id: backend.id,
+    name: backend.name,
+    baseUrl: backend.baseUrl,
+    color: backend.color ?? fallbackBackendColor(backend.id),
+  };
+}
+
+function normalizeHexDraft(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return normalizeBackendColor(trimmed.startsWith("#") ? trimmed : `#${trimmed}`);
+}
+
+function wrapHue(value: number) {
+  return ((value % 360) + 360) % 360;
+}
+
+function clampPercent(value: number) {
+  return Math.min(100, Math.max(0, value));
+}
+
 function sameOriginDisplayUrl() {
   const location = globalThis.location;
   if (!location?.origin || location.origin === "null") {
@@ -807,10 +1079,10 @@ function sameOriginDisplayUrl() {
 }
 
 function initialSelectionMode(
-  activeBackend: BridgeBackendProfile | null,
+  lastSelectedBridgeId: string | null,
   sameOriginAvailable: boolean,
 ): SelectionMode {
-  if (activeBackend) {
+  if (lastSelectedBridgeId && lastSelectedBridgeId !== SAME_ORIGIN_BRIDGE_ID) {
     return "backend";
   }
   return sameOriginAvailable ? "same-origin" : "new";
