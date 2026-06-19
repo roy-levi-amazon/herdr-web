@@ -1,3 +1,6 @@
+import { hexToHsva, hsvaToHex } from "@uiw/color-convert";
+import type { HsvaColor } from "@uiw/color-convert";
+import Wheel from "@uiw/react-color-wheel";
 import {
   Plus,
   RotateCcw,
@@ -8,11 +11,12 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, KeyboardEvent } from "react";
 import {
   duplicateBackend,
   fallbackBackendColor,
   normalizeBridgeBaseUrl,
+  normalizeBackendColor,
   SAME_ORIGIN_BRIDGE_ID,
   SAME_ORIGIN_BRIDGE_COLOR,
   suggestBackendColor,
@@ -380,18 +384,15 @@ export function BackendSettingsDialog({
                         </label>
                         <label className="field-label">
                           <span>Bridge color</span>
-                          <div className="backend-color-control">
-                            <input
-                              className="backend-color-picker"
-                              type="color"
-                              value={form.color}
-                              aria-label="Bridge color"
-                              onChange={(event) =>
-                                setForm((current) => ({ ...current, color: event.target.value }))
-                              }
-                            />
-                            <span className="backend-color-value mono">{form.color.toUpperCase()}</span>
-                          </div>
+                          <BackendColorControl
+                            value={form.color}
+                            defaultValue={
+                              form.id
+                                ? fallbackBackendColor(form.id)
+                                : suggestBackendColor(bridge.store.backends)
+                            }
+                            onChange={(color) => setForm((current) => ({ ...current, color }))}
+                          />
                         </label>
                         {selectedBackend?.lastConnectedAt ? (
                           <div className="backend-note">
@@ -630,6 +631,198 @@ export function BackendSettingsDialog({
   );
 }
 
+function BackendColorControl({
+  value,
+  defaultValue,
+  onChange,
+}: {
+  value: string;
+  defaultValue: string;
+  onChange: (value: string) => void;
+}) {
+  const fallbackColor = normalizeBackendColor(defaultValue) ?? SAME_ORIGIN_BRIDGE_COLOR;
+  const color = normalizeBackendColor(value) ?? fallbackColor;
+  const [hsva, setHsva] = useState<HsvaColor>(() => hexToHsva(color));
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(color.toUpperCase());
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const skipDraftBlurCommitRef = useRef(false);
+  const popoverId = useId();
+  const shadeColor = hsvaToHex({ ...hsva, v: 100, a: 1 });
+
+  useEffect(() => {
+    setDraft(color.toUpperCase());
+  }, [color]);
+
+  useEffect(() => {
+    setHsva((current) => (hsvaToHex({ ...current, a: 1 }) === color ? current : hexToHsva(color)));
+  }, [color]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const handlePointerDown = (event: PointerEvent) => {
+      if (rootRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      setOpen(false);
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [open]);
+
+  const setColor = (nextColor: string) => {
+    const normalized = normalizeBackendColor(nextColor);
+    if (!normalized) {
+      return;
+    }
+    setHsva(hexToHsva(normalized));
+    onChange(normalized);
+  };
+
+  const setHsvaColor = (nextHsva: HsvaColor) => {
+    const opaqueHsva = { ...nextHsva, a: 1 };
+    const normalized = normalizeBackendColor(hsvaToHex(opaqueHsva));
+    if (!normalized) {
+      return;
+    }
+    setHsva(opaqueHsva);
+    onChange(normalized);
+  };
+
+  const commitDraft = (nextDraft: string) => {
+    const normalized = normalizeHexDraft(nextDraft);
+    if (normalized) {
+      setColor(normalized);
+      return;
+    }
+    setDraft(color.toUpperCase());
+  };
+
+  const handleWheelKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    let nextHsva: HsvaColor | null = null;
+    const hueStep = event.shiftKey ? 15 : 5;
+    const saturationStep = event.shiftKey ? 10 : 5;
+    if (event.key === "ArrowLeft") {
+      nextHsva = { ...hsva, h: wrapHue(hsva.h - hueStep) };
+    } else if (event.key === "ArrowRight") {
+      nextHsva = { ...hsva, h: wrapHue(hsva.h + hueStep) };
+    } else if (event.key === "ArrowDown") {
+      nextHsva = { ...hsva, s: clampPercent(hsva.s - saturationStep) };
+    } else if (event.key === "ArrowUp") {
+      nextHsva = { ...hsva, s: clampPercent(hsva.s + saturationStep) };
+    }
+    if (!nextHsva) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setHsvaColor(nextHsva);
+  };
+
+  return (
+    <div
+      className="backend-color-control"
+      ref={rootRef}
+      onKeyDown={(event) => {
+        if (!open || event.key !== "Escape") {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        setOpen(false);
+        buttonRef.current?.focus();
+      }}
+    >
+      <button
+        className="backend-color-swatch"
+        ref={buttonRef}
+        type="button"
+        aria-label="Bridge color"
+        aria-expanded={open}
+        aria-controls={open ? popoverId : undefined}
+        aria-haspopup="true"
+        style={{ "--bridge-color": color } as CSSProperties}
+        onClick={() => setOpen((current) => !current)}
+      />
+      <input
+        className="backend-color-value mono"
+        value={draft}
+        aria-label="Bridge color hex value"
+        spellCheck={false}
+        autoCapitalize="none"
+        onFocus={(event) => event.currentTarget.select()}
+        onChange={(event) => {
+          setDraft(event.currentTarget.value);
+        }}
+        onBlur={(event) => {
+          if (skipDraftBlurCommitRef.current) {
+            skipDraftBlurCommitRef.current = false;
+            return;
+          }
+          commitDraft(event.currentTarget.value);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            event.stopPropagation();
+            event.currentTarget.blur();
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            skipDraftBlurCommitRef.current = true;
+            setDraft(color.toUpperCase());
+            event.currentTarget.blur();
+          }
+        }}
+      />
+      {open ? (
+        <div
+          className="backend-color-popover"
+          id={popoverId}
+          role="group"
+          aria-label="Bridge color picker"
+        >
+          <Wheel
+            aria-label="Bridge color hue and saturation"
+            color={hsva}
+            width={176}
+            height={176}
+            onKeyDown={handleWheelKeyDown}
+            onChange={(nextColor) => setHsvaColor(nextColor.hsva)}
+          />
+          <input
+            className="backend-color-shade"
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={Math.round(hsva.v)}
+            aria-label="Bridge color brightness"
+            style={{ "--shade-color": shadeColor } as CSSProperties}
+            onChange={(event) => setHsvaColor({ ...hsva, v: event.currentTarget.valueAsNumber })}
+          />
+          <div className="backend-color-actions">
+            <span className="backend-color-preview" style={{ "--bridge-color": color } as CSSProperties} />
+            <button
+              className="settings-reset icon-btn"
+              type="button"
+              aria-label="Reset bridge color"
+              title="Reset"
+              disabled={color === fallbackColor}
+              onClick={() => setColor(fallbackColor)}
+            >
+              <RotateCcw size={13} />
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function NumberSettingControl({
   ariaLabel,
   value,
@@ -859,6 +1052,22 @@ function backendFormFromProfile(backend: BridgeBackendProfile): FormState {
     baseUrl: backend.baseUrl,
     color: backend.color ?? fallbackBackendColor(backend.id),
   };
+}
+
+function normalizeHexDraft(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return normalizeBackendColor(trimmed.startsWith("#") ? trimmed : `#${trimmed}`);
+}
+
+function wrapHue(value: number) {
+  return ((value % 360) + 360) % 360;
+}
+
+function clampPercent(value: number) {
+  return Math.min(100, Math.max(0, value));
 }
 
 function sameOriginDisplayUrl() {
