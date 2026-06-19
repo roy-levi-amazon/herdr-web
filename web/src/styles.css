@@ -2430,7 +2430,7 @@ button {
 }
 
 .app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-selection-sheet {
-  bottom: calc(122px * var(--mobile-controls-scale));
+  bottom: calc(90px * var(--mobile-controls-scale));
 }
 
 .app[data-touch="true"]
@@ -2448,5 +2448,5 @@ button {
 .app[data-touch="true"]
   .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"])
   .terminal-selection-sheet {
-  bottom: calc(160px * var(--mobile-controls-scale));
+  bottom: calc(126px * var(--mobile-controls-scale));
 }
