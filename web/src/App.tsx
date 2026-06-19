@@ -7,8 +7,10 @@ import {
   SplitSquareHorizontal,
   SplitSquareVertical,
 } from "lucide-react";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, Dispatch, MutableRefObject, SetStateAction } from "react";
+import { Capacitor } from "@capacitor/core";
+import { Preferences } from "@capacitor/preferences";
 import { AgentIcon, agentIconKind } from "./AgentIcon";
 import { applyActivityMessage, parseActivityEventData, replayActivityMessages } from "./activity";
 import type { ActivityLogEntry } from "./activity";
@@ -204,51 +206,74 @@ function readDisplayPrefs(): DisplayPrefs {
       return readLegacyDisplayPrefs(fallback);
     }
     const parsed = JSON.parse(raw) as Partial<DisplayPrefs>;
-    return {
-      scope: parsed.scope === "all" || parsed.scope === "space" ? parsed.scope : fallback.scope,
-      sidebarView:
-        parsed.sidebarView === "agents" || parsed.sidebarView === "tabs"
-          ? parsed.sidebarView
-          : fallback.sidebarView,
-      agentSort:
-        parsed.agentSort === "attention" ||
-        parsed.agentSort === "status" ||
-        parsed.agentSort === "workspace"
-          ? parsed.agentSort
-          : fallback.agentSort,
-      agentGroup:
-        parsed.agentGroup === "none" || parsed.agentGroup === "workspace"
-          ? parsed.agentGroup
-          : fallback.agentGroup,
-      sidebarWidth:
-        typeof parsed.sidebarWidth === "number"
-          ? clampSidebarWidth(parsed.sidebarWidth)
-          : fallback.sidebarWidth,
-      sidebarOpen:
-        typeof parsed.sidebarOpen === "boolean" ? parsed.sidebarOpen : fallback.sidebarOpen,
-      selectedBridgeId:
-        typeof parsed.selectedBridgeId === "string" ? parsed.selectedBridgeId : fallback.selectedBridgeId,
-      selectedPane: parseScopedPaneRef(parsed.selectedPane),
-      activeWorkspace: parseScopedWorkspaceRef(parsed.activeWorkspace),
-      selectedPanesByBridgeId: parseStringRecord(parsed.selectedPanesByBridgeId),
-      activeWorkspacesByBridgeId: parseStringRecord(parsed.activeWorkspacesByBridgeId),
-      terminalInputTransport: parseTerminalInputTransport(parsed.terminalInputTransport),
-      terminalInputBatchDelayMs: parseTerminalInputBatchDelayMs(parsed.terminalInputBatchDelayMs),
-      terminalOutputCoalesceMs: parseTerminalOutputCoalesceMs(
-        parsed.terminalOutputCoalesceMs,
-      ),
-      contentInsetTopPx: parseContentInsetTopPx(parsed.contentInsetTopPx),
-      contentInsetBottomPx: parseContentInsetBottomPx(parsed.contentInsetBottomPx),
-      mobileControlsScalePercent: parseMobileControlsScalePercent(
-        parsed.mobileControlsScalePercent,
-      ),
-      mobileTerminalTapTarget: parseMobileTerminalTapTarget(parsed.mobileTerminalTapTarget),
-      mobileTouchSelection: parseMobileTouchSelection(parsed.mobileTouchSelection),
-      mobileKeyboardHideRefit: parseMobileKeyboardHideRefit(parsed.mobileKeyboardHideRefit),
-    };
+    return parseDisplayPrefsValue(parsed, fallback);
   } catch {
     return fallback;
   }
+}
+
+async function loadDisplayPrefs(): Promise<DisplayPrefs> {
+  const localPrefs = readDisplayPrefs();
+  if (!isNativeApp()) {
+    return localPrefs;
+  }
+  try {
+    const { value } = await Preferences.get({ key: DISPLAY_PREFS_KEY });
+    if (value) {
+      return parseDisplayPrefsValue(JSON.parse(value) as Partial<DisplayPrefs>, localPrefs);
+    }
+  } catch {
+    // Fall back to browser storage backup.
+  }
+  return localPrefs;
+}
+
+function parseDisplayPrefsValue(
+  parsed: Partial<DisplayPrefs>,
+  fallback: DisplayPrefs,
+): DisplayPrefs {
+  return {
+    scope: parsed.scope === "all" || parsed.scope === "space" ? parsed.scope : fallback.scope,
+    sidebarView:
+      parsed.sidebarView === "agents" || parsed.sidebarView === "tabs"
+        ? parsed.sidebarView
+        : fallback.sidebarView,
+    agentSort:
+      parsed.agentSort === "attention" ||
+      parsed.agentSort === "status" ||
+      parsed.agentSort === "workspace"
+        ? parsed.agentSort
+        : fallback.agentSort,
+    agentGroup:
+      parsed.agentGroup === "none" || parsed.agentGroup === "workspace"
+        ? parsed.agentGroup
+        : fallback.agentGroup,
+    sidebarWidth:
+      typeof parsed.sidebarWidth === "number"
+        ? clampSidebarWidth(parsed.sidebarWidth)
+        : fallback.sidebarWidth,
+    sidebarOpen:
+      typeof parsed.sidebarOpen === "boolean" ? parsed.sidebarOpen : fallback.sidebarOpen,
+    selectedBridgeId:
+      typeof parsed.selectedBridgeId === "string" ? parsed.selectedBridgeId : fallback.selectedBridgeId,
+    selectedPane: parseScopedPaneRef(parsed.selectedPane),
+    activeWorkspace: parseScopedWorkspaceRef(parsed.activeWorkspace),
+    selectedPanesByBridgeId: parseStringRecord(parsed.selectedPanesByBridgeId),
+    activeWorkspacesByBridgeId: parseStringRecord(parsed.activeWorkspacesByBridgeId),
+    terminalInputTransport: parseTerminalInputTransport(parsed.terminalInputTransport),
+    terminalInputBatchDelayMs: parseTerminalInputBatchDelayMs(parsed.terminalInputBatchDelayMs),
+    terminalOutputCoalesceMs: parseTerminalOutputCoalesceMs(
+      parsed.terminalOutputCoalesceMs,
+    ),
+    contentInsetTopPx: parseContentInsetTopPx(parsed.contentInsetTopPx),
+    contentInsetBottomPx: parseContentInsetBottomPx(parsed.contentInsetBottomPx),
+    mobileControlsScalePercent: parseMobileControlsScalePercent(
+      parsed.mobileControlsScalePercent,
+    ),
+    mobileTerminalTapTarget: parseMobileTerminalTapTarget(parsed.mobileTerminalTapTarget),
+    mobileTouchSelection: parseMobileTouchSelection(parsed.mobileTouchSelection),
+    mobileKeyboardHideRefit: parseMobileKeyboardHideRefit(parsed.mobileKeyboardHideRefit),
+  };
 }
 
 function readLegacyDisplaySelectionPrefs(): LegacyDisplaySelectionPrefs {
@@ -355,12 +380,25 @@ function clampSidebarWidth(width: number) {
   return Math.round(Math.min(Math.max(width, MIN_SIDEBAR_WIDTH), viewportMax));
 }
 
-function writeDisplayPrefs(prefs: DisplayPrefs) {
+async function writeDisplayPrefs(prefs: DisplayPrefs) {
+  const value = JSON.stringify(prefs);
+  if (isNativeApp()) {
+    try {
+      await Preferences.set({ key: DISPLAY_PREFS_KEY, value });
+    } catch {
+      // Browser storage below remains a best-effort backup.
+    }
+  }
   try {
-    window.localStorage.setItem(DISPLAY_PREFS_KEY, JSON.stringify(prefs));
+    window.localStorage.setItem(DISPLAY_PREFS_KEY, value);
+    window.localStorage.removeItem(LEGACY_DISPLAY_PREFS_KEY);
   } catch {
     // Storage can be unavailable in private or locked-down browser contexts.
   }
+}
+
+function isNativeApp() {
+  return Capacitor.isNativePlatform();
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -406,6 +444,7 @@ export function App() {
   const bridge = useBridge();
   const initialPrefs = useMemo(readDisplayPrefs, []);
   const legacySelectionPrefs = useMemo(readLegacyDisplaySelectionPrefs, []);
+  const [displayPrefsLoaded, setDisplayPrefsLoaded] = useState(() => !isNativeApp());
   const [connectionStates, setConnectionStates] = useState<Record<string, BridgeConnectionState>>({});
   const [selectedBridgeId, setSelectedBridgeId] = useState<BridgeId | null>(
     initialPrefs.selectedBridgeId,
@@ -481,6 +520,42 @@ export function App() {
   } | null>(null);
 
   useEffect(() => {
+    if (displayPrefsLoaded) {
+      return;
+    }
+    let cancelled = false;
+    void loadDisplayPrefs().then((prefs) => {
+      if (cancelled) {
+        return;
+      }
+      setScope(prefs.scope);
+      setSidebarView(prefs.sidebarView);
+      setAgentSort(prefs.agentSort);
+      setAgentGroup(prefs.agentGroup);
+      setSidebarWidth(prefs.sidebarWidth);
+      setSidebarOpen(prefs.sidebarOpen);
+      setSelectedBridgeId(prefs.selectedBridgeId);
+      setSelectedPaneRefState(prefs.selectedPane);
+      setActiveWorkspaceRefState(prefs.activeWorkspace);
+      setSelectedPanesByBridgeId(prefs.selectedPanesByBridgeId);
+      setActiveWorkspacesByBridgeId(prefs.activeWorkspacesByBridgeId);
+      setTerminalInputTransport(prefs.terminalInputTransport);
+      setTerminalInputBatchDelayMs(prefs.terminalInputBatchDelayMs);
+      setTerminalOutputCoalesceMs(prefs.terminalOutputCoalesceMs);
+      setContentInsetTopPx(prefs.contentInsetTopPx);
+      setContentInsetBottomPx(prefs.contentInsetBottomPx);
+      setMobileControlsScalePercent(prefs.mobileControlsScalePercent);
+      setMobileTerminalTapTarget(prefs.mobileTerminalTapTarget);
+      setMobileTouchSelection(prefs.mobileTouchSelection);
+      setMobileKeyboardHideRefit(prefs.mobileKeyboardHideRefit);
+      setDisplayPrefsLoaded(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [displayPrefsLoaded]);
+
+  useEffect(() => {
     return addNativeBackHandler(() => {
       if (backendSettingsOpen) {
         setBackendSettingsOpen(false);
@@ -545,12 +620,29 @@ export function App() {
     selectedRuntime?.capabilityState === "ready" ? (selectedRuntime.capabilities?.commands ?? []) : [];
   const splitSupported = supportedCommands.includes("pane.split");
   const paneFocusSupported = supportedCommands.includes("pane.focus_direction");
+  const selectedHttpUrl = useMemo(
+    () => selectedRuntime?.httpUrl ?? disconnectedHttpUrl,
+    [selectedRuntime?.connectionKey],
+  );
+  const selectedWsUrl = useMemo(
+    () => selectedRuntime?.wsUrl ?? disconnectedWsUrl,
+    [selectedRuntime?.connectionKey],
+  );
   const selectedCommands = useMemo(
-    () => (selectedRuntime ? createCommands(selectedRuntime.httpUrl) : null),
-    [selectedRuntime],
+    () => (selectedRuntime ? createCommands(selectedHttpUrl) : null),
+    [selectedHttpUrl, selectedRuntime?.id],
   );
   const menuRuntime = menu ? bridge.getRuntime(menu.bridgeId) : null;
-  const menuCommandsReady = Boolean(menuRuntime?.canConnect && menuRuntime.capabilityState === "ready");
+  const menuConnectionState =
+    menuRuntime && connectionStates[menuRuntime.id]?.connectionKey === menuRuntime.connectionKey
+      ? connectionStates[menuRuntime.id]
+      : null;
+  const menuCommandsReady = Boolean(
+    menuRuntime?.canConnect &&
+      menuRuntime.capabilityState === "ready" &&
+      menuConnectionState?.loadState === "ready" &&
+      menuConnectionState.snapshot,
+  );
   const menuSupportedCommands = menuCommandsReady ? (menuRuntime?.capabilities?.commands ?? []) : [];
   const menuPaneMoveSupported = menuSupportedCommands.includes("pane.move");
   const activeMenuItems = menu ? menuItems(menu.kind, menuPaneMoveSupported, menuCommandsReady) : [];
@@ -710,7 +802,10 @@ export function App() {
   ]);
 
   useEffect(() => {
-    writeDisplayPrefs({
+    if (!displayPrefsLoaded) {
+      return;
+    }
+    void writeDisplayPrefs({
       scope,
       sidebarView,
       agentSort,
@@ -733,6 +828,7 @@ export function App() {
       mobileKeyboardHideRefit,
     });
   }, [
+    displayPrefsLoaded,
     scope,
     sidebarView,
     agentSort,
@@ -828,11 +924,11 @@ export function App() {
     [],
   );
 
-  function rememberPaneSelection(
+  const rememberPaneSelection = useCallback((
     bridgeId: BridgeId,
     paneId: string,
     workspaceId?: string,
-  ) {
+  ) => {
     setSelectedPanesByBridgeId((current) =>
       current[bridgeId] === paneId ? current : { ...current, [bridgeId]: paneId },
     );
@@ -853,14 +949,12 @@ export function App() {
       setActiveWorkspaceRefState((current) =>
         current?.bridgeId === bridgeId && current.workspaceId === workspaceId
           ? current
-          : { bridgeId, workspaceId },
+        : { bridgeId, workspaceId },
       );
     }
-  }
+  }, []);
 
   useEffect(() => {
-    let disposed = false;
-    const cleanups: (() => void)[] = [];
     const activeBridgeIds = new Set(bridge.enabledRuntimes.map((runtime) => runtime.id));
 
     for (const bridgeId of Object.keys(connectionRefs.current)) {
@@ -880,163 +974,6 @@ export function App() {
       }
       return changed ? next : current;
     });
-
-    for (const runtime of bridge.enabledRuntimes) {
-      const existing = connectionRefs.current[runtime.id];
-      if (!existing || existing.connectionKey !== runtime.connectionKey) {
-        connectionRefs.current[runtime.id] = {
-          connectionKey: runtime.connectionKey,
-          snapshot: null,
-          activityGeneration: 0,
-          resyncBarrierGeneration: 0,
-          activityLog: [],
-        };
-        setConnectionStates((current) => ({
-          ...current,
-          [runtime.id]: {
-            connectionKey: runtime.connectionKey,
-            snapshot: null,
-            loadState: runtime.canConnect ? "loading" : "ready",
-          },
-        }));
-      }
-
-      if (!runtime.canConnect) {
-        connectionRefs.current[runtime.id].snapshot = null;
-        setConnectionStates((current) => ({
-          ...current,
-          [runtime.id]: {
-            connectionKey: runtime.connectionKey,
-            snapshot: null,
-            loadState: "ready",
-          },
-        }));
-        continue;
-      }
-
-      const requestConnectionKey = runtime.connectionKey;
-      const isCurrentConnection = () =>
-        !disposed &&
-        isConnectionResultCurrent(
-          connectionRefs.current[runtime.id]?.connectionKey ?? "",
-          requestConnectionKey,
-        );
-      const refreshController = createSnapshotRefreshController({
-        fetchSnapshot: () => fetchSnapshot(runtime.httpUrl),
-        getGeneration: () => connectionRefs.current[runtime.id]?.activityGeneration ?? 0,
-        getBarrierGeneration: () =>
-          connectionRefs.current[runtime.id]?.resyncBarrierGeneration ?? 0,
-        isCurrent: isCurrentConnection,
-        onError: () =>
-          setConnectionStates((current) => ({
-            ...current,
-            [runtime.id]: {
-              connectionKey: requestConnectionKey,
-              snapshot:
-                current[runtime.id]?.connectionKey === requestConnectionKey
-                  ? current[runtime.id]?.snapshot ?? null
-                  : null,
-              loadState: "error",
-            },
-          })),
-        applySnapshot: (next, refreshGeneration) => {
-          const ref = connectionRefs.current[runtime.id];
-          if (!ref || ref.connectionKey !== requestConnectionKey) {
-            return;
-          }
-          const patched = replayActivityMessages(next, ref.activityLog, refreshGeneration);
-          ref.snapshot = patched;
-          setConnectionStates((current) => ({
-            ...current,
-            [runtime.id]: {
-              connectionKey: requestConnectionKey,
-              snapshot: patched,
-              loadState: "ready",
-            },
-          }));
-        },
-      });
-      const refresh = () => refreshController.request();
-      const requestActivityResync = () => {
-        const ref = connectionRefs.current[runtime.id];
-        if (!ref) {
-          return;
-        }
-        ref.activityGeneration += 1;
-        ref.resyncBarrierGeneration = ref.activityGeneration;
-        refresh();
-      };
-      refresh();
-      const interval = window.setInterval(refresh, 10000);
-      const events = openEventsSocket(runtime.wsUrl, "/ws/events", refresh);
-      const activity = openEventsSocket(
-        runtime.wsUrl,
-        "/ws/activity",
-        (event) => {
-          if (!isCurrentConnection()) {
-            return;
-          }
-          const ref = connectionRefs.current[runtime.id];
-          if (!ref) {
-            return;
-          }
-          const parsed = parseActivityEventData(event.data);
-          if (parsed.status === "ignored") {
-            return;
-          }
-          if (parsed.status === "invalid_known") {
-            requestActivityResync();
-            return;
-          }
-          const result = applyActivityMessage(ref.snapshot, parsed.message);
-          if (result.status === "applied") {
-            ref.activityGeneration += 1;
-            ref.activityLog = [
-              ...ref.activityLog,
-              { generation: ref.activityGeneration, message: parsed.message },
-            ].slice(-100);
-            ref.snapshot = result.snapshot;
-            setConnectionStates((current) => ({
-              ...current,
-              [runtime.id]: {
-                connectionKey: requestConnectionKey,
-                snapshot: result.snapshot,
-                loadState: "ready",
-              },
-            }));
-          } else if (result.status === "resync") {
-            requestActivityResync();
-          }
-        },
-        { onOpen: refresh },
-      );
-      const uiEvents = openEventsSocket(runtime.wsUrl, "/ws/ui-events", (event) => {
-        if (!isCurrentConnection()) {
-          return;
-        }
-        const paneId = selectionPaneId(event);
-        if (paneId) {
-          const pane = connectionRefs.current[runtime.id]?.snapshot?.panes.find(
-            (item) => item.pane_id === paneId,
-          );
-          rememberPaneSelection(runtime.id, paneId, pane?.workspace_id);
-        }
-        refresh();
-      });
-      cleanups.push(() => {
-        events?.close();
-        activity?.close();
-        uiEvents?.close();
-        window.clearInterval(interval);
-      });
-    }
-
-    return () => {
-      disposed = true;
-      for (const cleanup of cleanups) {
-        cleanup();
-      }
-    };
   }, [bridge.enabledRuntimes]);
 
   useEffect(() => {
@@ -1460,19 +1397,18 @@ export function App() {
   ]);
 
   const refreshNow = () => {
-    if (!selectedRuntime) {
+    const connectableRuntimes = bridge.enabledRuntimes.filter((runtime) => runtime.canConnect);
+    if (connectableRuntimes.length === 0) {
       setBackendSettingsOpen(true);
       return;
     }
-    if (!selectedRuntime.canConnect) {
-      setBackendSettingsOpen(true);
-      return;
+    for (const runtime of connectableRuntimes) {
+      void refreshBridgeSnapshot(runtime, true);
     }
-    void refreshBridgeSnapshot(selectedRuntime, true);
   };
 
   async function refreshBridgeSnapshot(runtime: BridgeRuntime, setLoading: boolean) {
-    const ref = ensureConnectionRef(runtime);
+    const ref = ensureBridgeConnectionRef(connectionRefs, runtime);
     const requestConnectionKey = runtime.connectionKey;
     const refreshGeneration = ref.activityGeneration;
     if (setLoading) {
@@ -1583,22 +1519,6 @@ export function App() {
     } finally {
       setBusy(false);
     }
-  }
-
-  function ensureConnectionRef(runtime: BridgeRuntime) {
-    const existing = connectionRefs.current[runtime.id];
-    if (existing?.connectionKey === runtime.connectionKey) {
-      return existing;
-    }
-    const next: BridgeConnectionRef = {
-      connectionKey: runtime.connectionKey,
-      snapshot: null,
-      activityGeneration: 0,
-      resyncBarrierGeneration: 0,
-      activityLog: [],
-    };
-    connectionRefs.current[runtime.id] = next;
-    return next;
   }
 
   const onMenuPick = (key: string) => {
@@ -1748,6 +1668,17 @@ export function App() {
       data-touch={isTouchInput ? "true" : "false"}
       data-detail={isCompactLayout && showDetail ? "true" : "false"}
     >
+      {bridge.enabledRuntimes.map((runtime, index) => (
+        <BridgeConnectionController
+          key={runtime.id}
+          runtime={runtime}
+          index={index}
+          total={bridge.enabledRuntimes.length}
+          connectionRefs={connectionRefs}
+          setConnectionStates={setConnectionStates}
+          onPaneSelection={rememberPaneSelection}
+        />
+      ))}
       <aside className="sidebar" aria-label="Switcher">
         <Switcher
           bridgeViews={bridgeViews}
@@ -1774,6 +1705,12 @@ export function App() {
           onSelectTab={selectTab}
           onSelectPane={openPane}
           onRefresh={refreshNow}
+          onRefreshBridge={(bridgeId) => {
+            const runtime = bridge.getRuntime(bridgeId);
+            if (runtime?.canConnect) {
+              void refreshBridgeSnapshot(runtime, true);
+            }
+          }}
           onBackendSettings={() => setBackendSettingsOpen(true)}
           onCreateSpace={() =>
             selectedRuntime && selectedCommands
@@ -1966,16 +1903,16 @@ export function App() {
             terminalOutputCoalesceMs={terminalOutputCoalesceMs}
             connectionKey={selectedRuntime?.connectionKey ?? "disconnected"}
             resumeToken={selectedRuntime?.resumeToken ?? 0}
-            httpUrl={selectedRuntime?.httpUrl ?? disconnectedHttpUrl}
-            wsUrl={selectedRuntime?.wsUrl ?? disconnectedWsUrl}
+            httpUrl={selectedHttpUrl}
+            wsUrl={selectedWsUrl}
           />
         ) : renderTerminal ? (
           <TerminalView
             pane={selectedPane}
             connectionKey={selectedRuntime?.connectionKey ?? "disconnected"}
             resumeToken={selectedRuntime?.resumeToken ?? 0}
-            httpUrl={selectedRuntime?.httpUrl ?? disconnectedHttpUrl}
-            wsUrl={selectedRuntime?.wsUrl ?? disconnectedWsUrl}
+            httpUrl={selectedHttpUrl}
+            wsUrl={selectedWsUrl}
             autoFocus={!isTouchInput}
             scrollSensitivity={isTouchInput ? 2 : 0.4}
             mobileControls={isTouchInput}
@@ -2068,6 +2005,236 @@ export function App() {
       ) : null}
     </div>
   );
+}
+
+const SNAPSHOT_REFRESH_INTERVAL_MS = 10000;
+
+function BridgeConnectionController({
+  runtime,
+  index,
+  total,
+  connectionRefs,
+  setConnectionStates,
+  onPaneSelection,
+}: {
+  runtime: BridgeRuntime;
+  index: number;
+  total: number;
+  connectionRefs: MutableRefObject<Record<string, BridgeConnectionRef>>;
+  setConnectionStates: Dispatch<SetStateAction<Record<string, BridgeConnectionState>>>;
+  onPaneSelection: (bridgeId: BridgeId, paneId: string, workspaceId?: string) => void;
+}) {
+  const httpUrlRef = useRef(runtime.httpUrl);
+  const wsUrlRef = useRef(runtime.wsUrl);
+
+  useEffect(() => {
+    httpUrlRef.current = runtime.httpUrl;
+    wsUrlRef.current = runtime.wsUrl;
+  }, [runtime.httpUrl, runtime.wsUrl]);
+
+  useEffect(() => {
+    let disposed = false;
+    let interval: number | null = null;
+    let intervalStartTimer: number | null = null;
+    const ref = ensureBridgeConnectionRef(connectionRefs, runtime);
+
+    if (!runtime.canConnect) {
+      ref.snapshot = null;
+      setConnectionStates((current) => ({
+        ...current,
+        [runtime.id]: {
+          connectionKey: runtime.connectionKey,
+          snapshot: null,
+          loadState: "ready",
+        },
+      }));
+      return () => {
+        disposed = true;
+      };
+    }
+
+    setConnectionStates((current) => {
+      const existing = current[runtime.id];
+      if (existing?.connectionKey === runtime.connectionKey && existing.loadState !== "error") {
+        return current;
+      }
+      return {
+        ...current,
+        [runtime.id]: {
+          connectionKey: runtime.connectionKey,
+          snapshot: existing?.connectionKey === runtime.connectionKey ? existing.snapshot : null,
+          loadState: "loading",
+        },
+      };
+    });
+
+    const requestConnectionKey = runtime.connectionKey;
+    const isCurrentConnection = () =>
+      !disposed &&
+      isConnectionResultCurrent(
+        connectionRefs.current[runtime.id]?.connectionKey ?? "",
+        requestConnectionKey,
+      );
+    const refreshController = createSnapshotRefreshController({
+      fetchSnapshot: () => fetchSnapshot(httpUrlRef.current),
+      getGeneration: () => connectionRefs.current[runtime.id]?.activityGeneration ?? 0,
+      getBarrierGeneration: () =>
+        connectionRefs.current[runtime.id]?.resyncBarrierGeneration ?? 0,
+      isCurrent: isCurrentConnection,
+      onError: () =>
+        setConnectionStates((current) => ({
+          ...current,
+          [runtime.id]: {
+            connectionKey: requestConnectionKey,
+            snapshot:
+              current[runtime.id]?.connectionKey === requestConnectionKey
+                ? current[runtime.id]?.snapshot ?? null
+                : null,
+            loadState: "error",
+          },
+        })),
+      applySnapshot: (next, refreshGeneration) => {
+        const currentRef = connectionRefs.current[runtime.id];
+        if (!currentRef || currentRef.connectionKey !== requestConnectionKey) {
+          return;
+        }
+        const patched = replayActivityMessages(next, currentRef.activityLog, refreshGeneration);
+        currentRef.snapshot = patched;
+        setConnectionStates((current) => ({
+          ...current,
+          [runtime.id]: {
+            connectionKey: requestConnectionKey,
+            snapshot: patched,
+            loadState: "ready",
+          },
+        }));
+      },
+    });
+    const refresh = () => refreshController.request();
+    const requestActivityResync = () => {
+      const currentRef = connectionRefs.current[runtime.id];
+      if (!currentRef) {
+        return;
+      }
+      currentRef.activityGeneration += 1;
+      currentRef.resyncBarrierGeneration = currentRef.activityGeneration;
+      refresh();
+    };
+
+    refresh();
+    const refreshOffset = staggerRefreshDelayMs(index, total);
+    intervalStartTimer = window.setTimeout(() => {
+      refresh();
+      interval = window.setInterval(refresh, SNAPSHOT_REFRESH_INTERVAL_MS);
+    }, SNAPSHOT_REFRESH_INTERVAL_MS + refreshOffset);
+
+    const events = openEventsSocket(wsUrlRef.current, "/ws/events", refresh);
+    const activity = openEventsSocket(
+      wsUrlRef.current,
+      "/ws/activity",
+      (event) => {
+        if (!isCurrentConnection()) {
+          return;
+        }
+        const currentRef = connectionRefs.current[runtime.id];
+        if (!currentRef) {
+          return;
+        }
+        const parsed = parseActivityEventData(event.data);
+        if (parsed.status === "ignored") {
+          return;
+        }
+        if (parsed.status === "invalid_known") {
+          requestActivityResync();
+          return;
+        }
+        const result = applyActivityMessage(currentRef.snapshot, parsed.message);
+        if (result.status === "applied") {
+          currentRef.activityGeneration += 1;
+          currentRef.activityLog = [
+            ...currentRef.activityLog,
+            { generation: currentRef.activityGeneration, message: parsed.message },
+          ].slice(-100);
+          currentRef.snapshot = result.snapshot;
+          setConnectionStates((current) => ({
+            ...current,
+            [runtime.id]: {
+              connectionKey: requestConnectionKey,
+              snapshot: result.snapshot,
+              loadState: "ready",
+            },
+          }));
+        } else if (result.status === "resync") {
+          requestActivityResync();
+        }
+      },
+      { onOpen: refresh },
+    );
+    const uiEvents = openEventsSocket(wsUrlRef.current, "/ws/ui-events", (event) => {
+      if (!isCurrentConnection()) {
+        return;
+      }
+      const paneId = selectionPaneId(event);
+      if (paneId) {
+        const pane = connectionRefs.current[runtime.id]?.snapshot?.panes.find(
+          (item) => item.pane_id === paneId,
+        );
+        onPaneSelection(runtime.id, paneId, pane?.workspace_id);
+      }
+      refresh();
+    });
+
+    return () => {
+      disposed = true;
+      events?.close();
+      activity?.close();
+      uiEvents?.close();
+      if (intervalStartTimer !== null) {
+        window.clearTimeout(intervalStartTimer);
+      }
+      if (interval !== null) {
+        window.clearInterval(interval);
+      }
+    };
+  }, [
+    connectionRefs,
+    index,
+    onPaneSelection,
+    runtime.canConnect,
+    runtime.connectionKey,
+    runtime.id,
+    runtime.resumeToken,
+    setConnectionStates,
+    total,
+  ]);
+
+  return null;
+}
+
+function staggerRefreshDelayMs(index: number, total: number) {
+  if (total <= 1) {
+    return 0;
+  }
+  return Math.floor((SNAPSHOT_REFRESH_INTERVAL_MS / total) * index);
+}
+
+function ensureBridgeConnectionRef(
+  connectionRefs: MutableRefObject<Record<string, BridgeConnectionRef>>,
+  runtime: BridgeRuntime,
+) {
+  const existing = connectionRefs.current[runtime.id];
+  if (existing?.connectionKey === runtime.connectionKey) {
+    return existing;
+  }
+  const next: BridgeConnectionRef = {
+    connectionKey: runtime.connectionKey,
+    snapshot: null,
+    activityGeneration: 0,
+    resyncBarrierGeneration: 0,
+    activityLog: [],
+  };
+  connectionRefs.current[runtime.id] = next;
+  return next;
 }
 
 function orderedShortcutAgentPanes(
@@ -2368,6 +2535,7 @@ function Switcher({
   onSelectTab,
   onSelectPane,
   onRefresh,
+  onRefreshBridge,
   onBackendSettings,
   onCreateSpace,
   onCreateTab,
@@ -2398,6 +2566,7 @@ function Switcher({
   onSelectTab: (bridgeId: BridgeId, tabId: string) => void;
   onSelectPane: (bridgeId: BridgeId, pane: PaneInfo) => void;
   onRefresh: () => void;
+  onRefreshBridge: (bridgeId: BridgeId) => void;
   onBackendSettings: () => void;
   onCreateSpace: () => void;
   onCreateTab: (bridgeId: BridgeId, workspaceId: string) => void;
@@ -2425,8 +2594,14 @@ function Switcher({
   const headerSummary = summary(panes);
   const bridgeBlocked = !bridgeCanConnect || bridgeViews.length === 0;
   const showingAgentOverview = sidebarView === "agents" && scope === "all";
+  const disconnectedBridgeViews = showingAgentOverview
+    ? bridgeViews.filter(
+        (view) =>
+          !view.snapshot && (!view.runtime.canConnect || view.loadState === "error"),
+      )
+    : [];
   const hasListSnapshot = showingAgentOverview
-    ? bridgeViews.some((view) => view.snapshot)
+    ? bridgeViews.some((view) => view.snapshot) || disconnectedBridgeViews.length > 0
     : Boolean(snapshot);
 
   const agentPanes = useMemo<ScopedAgentPane[]>(() => {
@@ -2757,76 +2932,90 @@ function Switcher({
               </div>
 
               {sidebarView === "agents" ? (
-                agentPanes.length === 0 ? (
+                agentPanes.length === 0 && disconnectedBridgeViews.length === 0 ? (
                   <div className="empty">
                     <strong>No detected agents</strong>
                     <span>Open the Tabs view for plain panes.</span>
                   </div>
-                ) : agentGroup === "workspace" ? (
-                  agentGroups.map((group) => (
-                    <Fragment key={group.key}>
-                      <div className="grp-space">
-                        <span className="dot" data-status={group.workspace?.agent_status ?? "unknown"} />
-                        <span className="grp-space-name">
-                          {scope === "all" && group.bridgeLabel
-                            ? `${group.bridgeLabel} / ${group.workspace?.label ?? "workspace"}`
-                            : (group.workspace?.label ?? "workspace")}
-                        </span>
-                        <span className="grp-space-line" />
-                      </div>
-                      {group.panes.map((entry) => (
-                        <AgentRow
-                          key={`${entry.bridgeId}:${entry.pane.pane_id}`}
-                          index={agentPaneIndex++}
-                          pane={entry.pane}
-                          workspace={entry.workspace}
-                          tabLabel={entry.tabLabel}
-                          bridgeLabel={scope === "all" ? entry.bridgeLabel : undefined}
-                          active={
-                            entry.bridgeId === selectedBridgeId &&
-                            entry.pane.pane_id === selectedPane?.pane_id
-                          }
-                          onSelect={() => onSelectPane(entry.bridgeId, entry.pane)}
-                          onMenu={(x, y) =>
-                            onScopedMenu(
-                              "pane",
-                              entry.bridgeId,
-                              entry.pane.pane_id,
-                              paneTitle(entry.pane),
-                              x,
-                              y,
-                            )
-                          }
-                        />
-                      ))}
-                    </Fragment>
-                  ))
                 ) : (
-                  agentPanes.map((entry, index) => (
-                    <AgentRow
-                      key={`${entry.bridgeId}:${entry.pane.pane_id}`}
-                      index={index}
-                      pane={entry.pane}
-                      workspace={entry.workspace}
-                      tabLabel={entry.tabLabel}
-                      bridgeLabel={scope === "all" ? entry.bridgeLabel : undefined}
-                      active={
-                        entry.bridgeId === selectedBridgeId &&
-                        entry.pane.pane_id === selectedPane?.pane_id
-                      }
-                      onSelect={() => onSelectPane(entry.bridgeId, entry.pane)}
-                      onMenu={(x, y) =>
-                        onScopedMenu(
-                          "pane",
-                          entry.bridgeId,
-                          entry.pane.pane_id,
-                          paneTitle(entry.pane),
-                          x,
-                          y,
-                        )
-                      }
-                    />
-                  ))
+                  <>
+                    {disconnectedBridgeViews.map((view) => (
+                      <DisconnectedBridgeRow
+                        key={view.runtime.id}
+                        label={view.runtime.label}
+                        message={
+                          view.runtime.capabilityError ||
+                          (view.loadState === "error" ? "Could not reach bridge" : "Bridge disconnected")
+                        }
+                        onSelect={() => onSelectBridge(view.runtime.id)}
+                        onRetry={() => onRefreshBridge(view.runtime.id)}
+                      />
+                    ))}
+                    {agentGroup === "workspace"
+                      ? agentGroups.map((group) => (
+                          <Fragment key={group.key}>
+                            <div className="grp-space">
+                              <span className="dot" data-status={group.workspace?.agent_status ?? "unknown"} />
+                              <span className="grp-space-name">
+                                {scope === "all" && group.bridgeLabel
+                                  ? `${group.bridgeLabel} / ${group.workspace?.label ?? "workspace"}`
+                                  : (group.workspace?.label ?? "workspace")}
+                              </span>
+                              <span className="grp-space-line" />
+                            </div>
+                            {group.panes.map((entry) => (
+                              <AgentRow
+                                key={`${entry.bridgeId}:${entry.pane.pane_id}`}
+                                index={agentPaneIndex++}
+                                pane={entry.pane}
+                                workspace={entry.workspace}
+                                tabLabel={entry.tabLabel}
+                                bridgeLabel={scope === "all" ? entry.bridgeLabel : undefined}
+                                active={
+                                  entry.bridgeId === selectedBridgeId &&
+                                  entry.pane.pane_id === selectedPane?.pane_id
+                                }
+                                onSelect={() => onSelectPane(entry.bridgeId, entry.pane)}
+                                onMenu={(x, y) =>
+                                  onScopedMenu(
+                                    "pane",
+                                    entry.bridgeId,
+                                    entry.pane.pane_id,
+                                    paneTitle(entry.pane),
+                                    x,
+                                    y,
+                                  )
+                                }
+                              />
+                            ))}
+                          </Fragment>
+                        ))
+                      : agentPanes.map((entry, index) => (
+                          <AgentRow
+                            key={`${entry.bridgeId}:${entry.pane.pane_id}`}
+                            index={index}
+                            pane={entry.pane}
+                            workspace={entry.workspace}
+                            tabLabel={entry.tabLabel}
+                            bridgeLabel={scope === "all" ? entry.bridgeLabel : undefined}
+                            active={
+                              entry.bridgeId === selectedBridgeId &&
+                              entry.pane.pane_id === selectedPane?.pane_id
+                            }
+                            onSelect={() => onSelectPane(entry.bridgeId, entry.pane)}
+                            onMenu={(x, y) =>
+                              onScopedMenu(
+                                "pane",
+                                entry.bridgeId,
+                                entry.pane.pane_id,
+                                paneTitle(entry.pane),
+                                x,
+                                y,
+                              )
+                            }
+                          />
+                        ))}
+                  </>
                 )
               ) : !snapshot || spaceGroups.every((group) => group.tabs.length === 0) ? (
                 <div className="empty">
@@ -3029,6 +3218,39 @@ function AgentRow({
           {statusLabel(pane.agent_status)}
         </span>
       ) : null}
+    </button>
+  );
+}
+
+function DisconnectedBridgeRow({
+  label,
+  message,
+  onSelect,
+  onRetry,
+}: {
+  label: string;
+  message: string;
+  onSelect: () => void;
+  onRetry: () => void;
+}) {
+  return (
+    <button className="pane-row" type="button" data-status="unknown" onClick={onSelect}>
+      <span className="dot" data-status="unknown" />
+      <span className="pane-body">
+        <span className="pane-name">{label}</span>
+        <span className="pane-meta mono">{message}</span>
+      </span>
+      <span
+        className="pane-word"
+        data-status="working"
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onRetry();
+        }}
+      >
+        retry
+      </span>
     </button>
   );
 }

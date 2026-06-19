@@ -198,9 +198,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
         ...current,
         enabledBridgeIds,
         lastSelectedBridgeId,
-        backends: enabled
-          ? markBackendConnected(current.backends, bridgeId)
-          : current.backends,
+        backends: current.backends,
       };
     });
   }, []);
@@ -236,13 +234,28 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  const markBridgeReachable = useCallback((bridgeId: BridgeId) => {
+    if (bridgeId === SAME_ORIGIN_BRIDGE_ID) {
+      return;
+    }
+    setStore((current) => {
+      if (!current.backends.some((backend) => backend.id === bridgeId)) {
+        return current;
+      }
+      return {
+        ...current,
+        backends: markBackendConnected(current.backends, bridgeId),
+      };
+    });
+  }, []);
+
   const addBackend = useCallback(async (input: BackendInput, enable = true) => {
     const baseUrl = normalizeBridgeBaseUrl(input.baseUrl);
     const profile: BridgeBackendProfile = {
       id: createBackendId(),
       name: backendDisplayName(input.name, baseUrl, store.backends),
       baseUrl,
-      lastConnectedAt: enable ? new Date().toISOString() : undefined,
+      lastConnectedAt: undefined,
     };
     storeEditedRef.current = true;
     setStore((current) => {
@@ -275,9 +288,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
       ...existing,
       name: backendDisplayName(input.name, baseUrl, otherBackends),
       baseUrl,
-      lastConnectedAt: store.enabledBridgeIds.includes(id)
-        ? new Date().toISOString()
-        : existing.lastConnectedAt,
+      lastConnectedAt: existing.lastConnectedAt,
     };
     setStore((current) => {
       if (!current.backends.some((backend) => backend.id === id)) {
@@ -361,6 +372,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
         <BridgeCapabilityProbe
           key={`${runtime.connectionKey}:${runtime.resumeToken}`}
           runtime={runtime}
+          onReach={markBridgeReachable}
           onState={(state) =>
             setProbeStates((current) => ({
               ...current,
@@ -375,9 +387,11 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
 
 function BridgeCapabilityProbe({
   runtime,
+  onReach,
   onState,
 }: {
   runtime: BridgeRuntime;
+  onReach: (bridgeId: BridgeId) => void;
   onState: (state: BridgeProbeState) => void;
 }) {
   const [capabilityRetry, setCapabilityRetry] = useState(0);
@@ -408,6 +422,9 @@ function BridgeCapabilityProbe({
           return;
         }
         const outcome = capabilityProbeSuccess(next);
+        if (outcome.state === "ready") {
+          onReach(runtime.id);
+        }
         onStateRef.current({
           connectionKey: runtime.connectionKey,
           capabilities: outcome.capabilities,
@@ -441,7 +458,7 @@ function BridgeCapabilityProbe({
         window.clearTimeout(retryTimer);
       }
     };
-  }, [capabilityRetry, runtime.connectionKey]);
+  }, [capabilityRetry, onReach, runtime.connectionKey, runtime.id]);
 
   return null;
 }
@@ -555,6 +572,7 @@ export async function loadBackendStore(): Promise<BridgeBackendStore> {
   const legacyStore = await loadLegacyBackendStore();
   if (legacyStore) {
     await writeBackendStore(legacyStore);
+    await removeLegacyBackendStore();
     return legacyStore;
   }
 
@@ -596,6 +614,21 @@ async function loadLegacyBackendStore(): Promise<BridgeBackendStore | null> {
     return parseBackendStore(JSON.parse(raw));
   } catch {
     return null;
+  }
+}
+
+async function removeLegacyBackendStore() {
+  if (isNativeApp()) {
+    try {
+      await Preferences.remove({ key: LEGACY_STORE_KEY });
+    } catch {
+      // Browser storage cleanup below remains best effort.
+    }
+  }
+  try {
+    globalThis.localStorage?.removeItem(LEGACY_STORE_KEY);
+  } catch {
+    // Storage can be unavailable in private or locked-down browser contexts.
   }
 }
 

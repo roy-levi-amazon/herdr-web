@@ -168,11 +168,13 @@ describe("backend store parsing", () => {
       backends: [{ id: "one", name: "Home", baseUrl: "http://192.168.1.20:4000" }],
     };
     const setItem = vi.fn();
+    const removeItem = vi.fn();
     vi.stubGlobal("localStorage", {
       getItem: vi.fn((key: string) =>
         key === "herdrWeb.bridgeBackends.v1" ? JSON.stringify(legacyStore) : null,
       ),
       setItem,
+      removeItem,
     });
 
     const migrated = await loadBackendStore();
@@ -191,6 +193,7 @@ describe("backend store parsing", () => {
       ],
     });
     expect(setItem).toHaveBeenCalledWith("herdrWeb.bridgeBackends.v2", JSON.stringify(migrated));
+    expect(removeItem).toHaveBeenCalledWith("herdrWeb.bridgeBackends.v1");
 
     vi.unstubAllGlobals();
   });
