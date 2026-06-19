@@ -1,8 +1,6 @@
 # Changelog
 
-## [Unreleased]
-
-### Breaking Changes
+## [0.2.0] - 2026-06-19
 
 ### Added
 
@@ -20,10 +18,6 @@
 
 - Moved sidebar agent/tab sorting and grouping controls into a vertical options menu, and removed
   redundant host prefixes from grouped tab labels. [PR #17](https://github.com/kcosr/herdr-web/pull/17)
-
-### Fixed
-
-### Removed
 
 ## [0.1.2] - 2026-06-18
 
