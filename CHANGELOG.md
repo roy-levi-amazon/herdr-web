@@ -1,8 +1,6 @@
 # Changelog
 
-## [Unreleased]
-
-### Breaking Changes
+## [0.2.1] - 2026-06-20
 
 ### Added
 
@@ -23,8 +21,6 @@
   keeps the Settings dialog open. [PR #16](https://github.com/kcosr/herdr-web/pull/16)
 - Fixed sidebar keyboard shortcuts so agent and tab navigation follows the visible host/sidebar
   order across selected-host and all-host views. [PR #18](https://github.com/kcosr/herdr-web/pull/18)
-
-### Removed
 
 ## [0.2.0] - 2026-06-19
 
