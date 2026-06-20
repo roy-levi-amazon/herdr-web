@@ -19,6 +19,9 @@
 
 ### Fixed
 
+- Fixed Android/tablet bridge color picker dismissal so saving a backend after choosing a color
+  keeps the Settings dialog open. [PR #16](https://github.com/kcosr/herdr-web/pull/16)
+
 ### Removed
 
 ## [0.2.0] - 2026-06-19

@@ -729,14 +729,14 @@ function BackendColorControl({
     if (!open) {
       return;
     }
-    const handlePointerDown = (event: PointerEvent) => {
+    const handleClick = (event: MouseEvent) => {
       if (rootRef.current?.contains(event.target as Node)) {
         return;
       }
       setOpen(false);
     };
-    document.addEventListener("pointerdown", handlePointerDown);
-    return () => document.removeEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("click", handleClick);
+    return () => document.removeEventListener("click", handleClick);
   }, [open]);
 
   const setColor = (nextColor: string) => {
