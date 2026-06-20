@@ -1106,6 +1106,10 @@ button {
   will-change: transform;
 }
 
+.terminal-touch-endpoint[data-dragging="true"] {
+  opacity: 0;
+}
+
 .terminal-touch-endpoint[data-hint]::before {
   content: attr(data-hint);
   position: absolute;

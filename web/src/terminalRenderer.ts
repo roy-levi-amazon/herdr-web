@@ -615,8 +615,16 @@ export class GhosttyRenderer implements TerminalRenderer {
       container.append(endpointBubble);
       return endpointBubble;
     };
+    const hideEndpointBubble = () => {
+      if (endpointBubble) {
+        endpointBubble.dataset.dragging = "true";
+        endpointBubble.removeAttribute("data-hint");
+      }
+    };
     const positionEndpointBubble = (client: { clientX: number; clientY: number }) => {
       const bubble = ensureEndpointBubble();
+      delete bubble.dataset.dragging;
+      bubble.setAttribute("data-hint", "Drag");
       positionOverlay(
         bubble,
         client.clientX,
@@ -699,7 +707,7 @@ export class GhosttyRenderer implements TerminalRenderer {
         return;
       }
       selectCurrentTouchRange();
-      positionEndpointBubble(cellClientCenter(selectionState.endpoint));
+      hideEndpointBubble();
       renderLoupe(selectionState.endpoint, client);
       renderLoupeAfterTerminalPaint(selectionState.endpoint, client);
       suppressMouseEvents();
@@ -711,7 +719,6 @@ export class GhosttyRenderer implements TerminalRenderer {
         const deltaX = touch.clientX - endpointDragStartX;
         const deltaY = touch.clientY - endpointDragStartY;
         if (!endpointDragMoved && Math.hypot(deltaX, deltaY) <= TOUCH_SELECTION_TOLERANCE_PX && !force) {
-          positionEndpointBubble(cellClientCenter(endpointPositionFromTouch(touch)));
           return;
         }
         endpointDragMoved = true;
@@ -720,7 +727,6 @@ export class GhosttyRenderer implements TerminalRenderer {
       const client = clientFromTouch(touch);
       selectionState = moveTouchSelectionEndpoint(selectionState, position, client);
       selectCurrentTouchRange();
-      positionEndpointBubble(cellClientCenter(position));
       renderLoupe(position, client);
     };
     const completeEndpointDrag = (event: TouchEvent) => {
