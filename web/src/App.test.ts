@@ -423,6 +423,17 @@ describe("App multi-bridge helpers", () => {
         serverRevision: 1,
       }),
     ).toBe(false);
+    expect(
+      shouldBlockDirtyNoteAutosave({
+        dirty: true,
+        title: "Continued title",
+        body: "Continued typing",
+        baseRevision: 2,
+        serverTitle: "Saved title",
+        serverBody: "Saved body",
+        serverRevision: 2,
+      }),
+    ).toBe(false);
   });
 });
 

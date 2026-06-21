@@ -1578,12 +1578,13 @@ export function App() {
       throw new Error("Bridge is not ready");
     }
     try {
-      await updateNote(runtime.httpUrl, entry.note.note_id, {
+      const savedNote = await updateNote(runtime.httpUrl, entry.note.note_id, {
         title,
         body,
         expectedRevision,
       });
       await refreshBridgeNotes(runtime, false);
+      return savedNote.revision;
     } catch (caught) {
       setError(
         isNotesConflictError(caught)
@@ -4605,7 +4606,7 @@ function NotesSurface({
     title: string,
     body: string,
     expectedRevision: number,
-  ) => Promise<void>;
+  ) => Promise<number>;
   onAttachToCurrentPane: (entry: ScopedNoteEntry) => void;
   onDetach: (entry: ScopedNoteEntry) => void;
   onArchive: (entry: ScopedNoteEntry) => void;
@@ -4786,7 +4787,7 @@ function NoteEditor({
     title: string,
     body: string,
     expectedRevision: number,
-  ) => Promise<void>;
+  ) => Promise<number>;
   onAttachToCurrentPane: (entry: ScopedNoteEntry) => void;
   onDetach: (entry: ScopedNoteEntry) => void;
   onArchive: (entry: ScopedNoteEntry) => void;
@@ -4919,8 +4920,9 @@ function NoteEditor({
     const timer = window.setTimeout(() => {
       setSaveState("saving");
       void onSave(entry, title, body, expectedRevision)
-        .then(() => {
+        .then((savedRevision) => {
           if (!cancelled) {
+            setBaseRevision(savedRevision);
             setSaveState("saved");
           }
         })
@@ -4966,9 +4968,9 @@ function NoteEditor({
     saveBlockedRef.current = false;
     setSaveState("saving");
     void onSave(entry, title, body, entry.note.revision)
-      .then(() => {
+      .then((savedRevision) => {
         clearNoteDraft(entry);
-        setBaseRevision(entry.note.revision);
+        setBaseRevision(savedRevision);
         setSaveState("saved");
       })
       .catch((caught) => {
