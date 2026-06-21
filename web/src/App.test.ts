@@ -5,6 +5,7 @@ import {
   noteDraftStorageKey,
   buildVisibleScopedWorkspaces,
   buildVisibleTabEntries,
+  isInFlightNoteSaveVisible,
   nextVisibleAgentPaneEntry,
   nextVisibleTabEntry,
   resolveInitialSelectedBridgeId,
@@ -432,6 +433,43 @@ describe("App multi-bridge helpers", () => {
         serverTitle: "Saved title",
         serverBody: "Saved body",
         serverRevision: 2,
+      }),
+    ).toBe(false);
+  });
+
+  it("recognizes the user's in-flight note save when a refetch exposes it", () => {
+    const inFlight = {
+      noteIdentity: "note-key",
+      expectedRevision: 5,
+      title: "Saved title",
+      body: "Saved body",
+    };
+
+    expect(
+      isInFlightNoteSaveVisible({
+        inFlight,
+        noteIdentity: "note-key",
+        serverTitle: "Saved title",
+        serverBody: "Saved body",
+        serverRevision: 6,
+      }),
+    ).toBe(true);
+    expect(
+      isInFlightNoteSaveVisible({
+        inFlight,
+        noteIdentity: "note-key",
+        serverTitle: "Remote title",
+        serverBody: "Saved body",
+        serverRevision: 6,
+      }),
+    ).toBe(false);
+    expect(
+      isInFlightNoteSaveVisible({
+        inFlight,
+        noteIdentity: "note-key",
+        serverTitle: "Saved title",
+        serverBody: "Saved body",
+        serverRevision: 5,
       }),
     ).toBe(false);
   });

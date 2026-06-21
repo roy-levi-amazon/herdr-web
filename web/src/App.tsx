@@ -219,6 +219,12 @@ type NoteDraft = {
   baseRevision: number;
   updatedAt: number;
 };
+type NoteSaveInFlight = {
+  noteIdentity: string;
+  expectedRevision: number;
+  title: string;
+  body: string;
+};
 type MenuState = {
   kind: MenuKind;
   bridgeId: BridgeId;
@@ -3333,6 +3339,28 @@ export function shouldBlockDirtyNoteAutosave({
   return title !== serverTitle || body !== serverBody;
 }
 
+export function isInFlightNoteSaveVisible({
+  inFlight,
+  noteIdentity,
+  serverRevision,
+  serverTitle,
+  serverBody,
+}: {
+  inFlight: NoteSaveInFlight | null;
+  noteIdentity: string;
+  serverRevision: number;
+  serverTitle: string;
+  serverBody: string;
+}) {
+  return Boolean(
+    inFlight &&
+      inFlight.noteIdentity === noteIdentity &&
+      serverRevision > inFlight.expectedRevision &&
+      serverTitle === inFlight.title &&
+      serverBody === inFlight.body,
+  );
+}
+
 export function noteDraftStorageKey(entry: ScopedNoteEntry) {
   return `${NOTE_DRAFT_STORAGE_PREFIX}${[
     entry.bridgeId,
@@ -4804,6 +4832,7 @@ function NoteEditor({
   >("idle");
   const loadedNoteIdentityRef = useRef("");
   const saveBlockedRef = useRef(false);
+  const noteSaveInFlightRef = useRef<NoteSaveInFlight | null>(null);
   const noteIdentity = entry ? noteDraftStorageKey(entry) : "";
   const noteKey = entry ? `${entry.bridgeId}:${entry.note.note_id}:${entry.note.revision}` : "";
 
@@ -4816,6 +4845,7 @@ function NoteEditor({
       setBaseRevision(null);
       setSaveState("idle");
       saveBlockedRef.current = false;
+      noteSaveInFlightRef.current = null;
       return;
     }
     const noteChanged = loadedNoteIdentityRef.current !== noteIdentity;
@@ -4828,6 +4858,24 @@ function NoteEditor({
       return;
     }
     const expectedRevision = baseRevision ?? entry.note.revision;
+    if (
+      !noteChanged &&
+      isInFlightNoteSaveVisible({
+        inFlight: noteSaveInFlightRef.current,
+        noteIdentity,
+        serverRevision: entry.note.revision,
+        serverTitle: entry.note.title,
+        serverBody: entry.note.body,
+      })
+    ) {
+      noteSaveInFlightRef.current = null;
+      setBaseRevision((current) =>
+        current === null || current < entry.note.revision ? entry.note.revision : current,
+      );
+      saveBlockedRef.current = false;
+      setSaveState("pending");
+      return;
+    }
     if (
       !noteChanged &&
       shouldBlockDirtyNoteAutosave({
@@ -4915,14 +4963,29 @@ function NoteEditor({
     if (saveBlockedRef.current) {
       return;
     }
+    if (noteSaveInFlightRef.current?.noteIdentity === noteIdentity) {
+      setSaveState("pending");
+      return;
+    }
     setSaveState("pending");
     let cancelled = false;
     const timer = window.setTimeout(() => {
       setSaveState("saving");
+      const inFlight: NoteSaveInFlight = {
+        noteIdentity,
+        expectedRevision,
+        title,
+        body,
+      };
+      noteSaveInFlightRef.current = inFlight;
       void onSave(entry, title, body, expectedRevision)
         .then((savedRevision) => {
+          if (loadedNoteIdentityRef.current === inFlight.noteIdentity) {
+            setBaseRevision((current) =>
+              current === null || current < savedRevision ? savedRevision : current,
+            );
+          }
           if (!cancelled) {
-            setBaseRevision(savedRevision);
             setSaveState("saved");
           }
         })
@@ -4930,6 +4993,11 @@ function NoteEditor({
           if (!cancelled) {
             saveBlockedRef.current = true;
             setSaveState(isNotesConflictError(caught) ? "conflict" : "error");
+          }
+        })
+        .finally(() => {
+          if (noteSaveInFlightRef.current === inFlight) {
+            noteSaveInFlightRef.current = null;
           }
         });
     }, 700);
