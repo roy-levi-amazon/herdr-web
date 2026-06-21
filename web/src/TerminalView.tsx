@@ -18,6 +18,7 @@ import {
   isNonRetryableTerminalClose,
   parseTerminalCloseReason,
   terminalConnectionCopy,
+  terminalConnectionOverlayDelayMs,
 } from "./terminalConnectionStatus";
 import type { TerminalConnectionState } from "./terminalConnectionStatus";
 import { findFirstUrlInSelection, openableHttpUrl } from "./terminalSelection";
@@ -36,7 +37,6 @@ import {
   TERMINAL_FOREGROUND_FAST_ATTEMPTS,
   TERMINAL_FOREGROUND_CONNECT_TIMEOUT_MS,
   TERMINAL_FOREGROUND_SIGNAL_COALESCE_MS,
-  TERMINAL_RECONNECT_OVERLAY_DELAY_MS,
   terminalReconnectPolicy,
 } from "./terminalReconnectPolicy";
 import type { TerminalReconnectMode } from "./terminalReconnectPolicy";
@@ -158,6 +158,8 @@ export function TerminalView({
   const uploadConflictRef = useRef<UploadConflictState | null>(null);
   const connectionKeyRef = useRef(connectionKey);
   const terminalIdRef = useRef(pane?.terminal_id ?? null);
+  const overlayTerminalIdRef = useRef(pane?.terminal_id ?? null);
+  const delayConnectingOverlayRef = useRef(false);
   const [connectionState, setConnectionState] = useState<TerminalConnectionState>("idle");
   const [closeReason, setCloseReason] = useState<string | null>(null);
   const [rendererReady, setRendererReady] = useState<TerminalRendererReady | null>(null);
@@ -430,6 +432,11 @@ export function TerminalView({
   useEffect(() => {
     const host = hostRef.current;
     const terminalId = pane?.terminal_id ?? null;
+    const previousOverlayTerminalId = overlayTerminalIdRef.current;
+    delayConnectingOverlayRef.current = Boolean(
+      terminalId && previousOverlayTerminalId && previousOverlayTerminalId !== terminalId,
+    );
+    overlayTerminalIdRef.current = terminalId;
     rendererReadyRef.current = null;
     setRendererReady(null);
     setHasAttachedForTerminal(false);
@@ -968,11 +975,15 @@ export function TerminalView({
       setShowConnectionOverlay(false);
       return;
     }
-    if (connectionState === "connecting" && hasAttachedForTerminal) {
+    const overlayDelayMs = terminalConnectionOverlayDelayMs(
+      connectionState,
+      hasAttachedForTerminal || delayConnectingOverlayRef.current,
+    );
+    if (overlayDelayMs > 0) {
       setShowConnectionOverlay(false);
       overlayTimer = window.setTimeout(() => {
         setShowConnectionOverlay(true);
-      }, TERMINAL_RECONNECT_OVERLAY_DELAY_MS);
+      }, overlayDelayMs);
       return () => {
         if (overlayTimer !== null) {
           window.clearTimeout(overlayTimer);

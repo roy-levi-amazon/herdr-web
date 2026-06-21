@@ -20,7 +20,6 @@ export const TERMINAL_CONNECT_TIMEOUT_MS = 3500;
 export const TERMINAL_FOREGROUND_CONNECT_TIMEOUT_MS = 1200;
 export const TERMINAL_FOREGROUND_FAST_ATTEMPTS = 2;
 export const TERMINAL_FOREGROUND_SIGNAL_COALESCE_MS = 400;
-export const TERMINAL_RECONNECT_OVERLAY_DELAY_MS = 300;
 
 export function terminalReconnectPolicy({
   attempt,

@@ -1,5 +1,7 @@
 export type TerminalConnectionState = "idle" | "connecting" | "attached" | "closed" | "error";
 
+export const TERMINAL_CONNECTION_OVERLAY_DELAY_MS = 500;
+
 export function parseTerminalCloseReason(message: string) {
   try {
     const parsed = JSON.parse(message) as { type?: unknown; reason?: unknown };
@@ -40,4 +42,11 @@ export function terminalConnectionCopy(
     case "attached":
       return "";
   }
+}
+
+export function terminalConnectionOverlayDelayMs(
+  state: TerminalConnectionState,
+  delayConnecting: boolean,
+) {
+  return state === "connecting" && delayConnecting ? TERMINAL_CONNECTION_OVERLAY_DELAY_MS : 0;
 }

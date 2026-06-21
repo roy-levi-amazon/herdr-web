@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  TERMINAL_CONNECTION_OVERLAY_DELAY_MS,
   isNonRetryableTerminalClose,
   parseTerminalCloseReason,
   terminalConnectionCopy,
+  terminalConnectionOverlayDelayMs,
 } from "./terminalConnectionStatus";
 
 describe("terminalConnectionStatus", () => {
@@ -36,5 +38,16 @@ describe("terminalConnectionStatus", () => {
       "Detached elsewhere",
     );
     expect(terminalConnectionCopy("error", null)).toBe("Connection failed");
+  });
+
+  it("delays only transient connecting overlays", () => {
+    expect(terminalConnectionOverlayDelayMs("connecting", true)).toBe(
+      TERMINAL_CONNECTION_OVERLAY_DELAY_MS,
+    );
+    expect(terminalConnectionOverlayDelayMs("connecting", false)).toBe(0);
+    expect(terminalConnectionOverlayDelayMs("closed", true)).toBe(0);
+    expect(terminalConnectionOverlayDelayMs("error", true)).toBe(0);
+    expect(terminalConnectionOverlayDelayMs("attached", true)).toBe(0);
+    expect(terminalConnectionOverlayDelayMs("idle", true)).toBe(0);
   });
 });
