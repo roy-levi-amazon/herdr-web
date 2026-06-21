@@ -4827,6 +4827,7 @@ function NoteEditor({
   const [body, setBody] = useState("");
   const [dirty, setDirty] = useState(false);
   const [baseRevision, setBaseRevision] = useState<number | null>(null);
+  const [saveRetryCycle, setSaveRetryCycle] = useState(0);
   const [saveState, setSaveState] = useState<
     "idle" | "pending" | "saving" | "saved" | "error" | "conflict"
   >("idle");
@@ -4868,7 +4869,6 @@ function NoteEditor({
         serverBody: entry.note.body,
       })
     ) {
-      noteSaveInFlightRef.current = null;
       setBaseRevision((current) =>
         current === null || current < entry.note.revision ? entry.note.revision : current,
       );
@@ -4945,6 +4945,22 @@ function NoteEditor({
     }
     const expectedRevision = baseRevision ?? entry.note.revision;
     if (
+      isInFlightNoteSaveVisible({
+        inFlight: noteSaveInFlightRef.current,
+        noteIdentity,
+        serverRevision: entry.note.revision,
+        serverTitle: entry.note.title,
+        serverBody: entry.note.body,
+      })
+    ) {
+      setBaseRevision((current) =>
+        current === null || current < entry.note.revision ? entry.note.revision : current,
+      );
+      saveBlockedRef.current = false;
+      setSaveState("pending");
+      return;
+    }
+    if (
       shouldBlockDirtyNoteAutosave({
         dirty,
         title,
@@ -4998,6 +5014,9 @@ function NoteEditor({
         .finally(() => {
           if (noteSaveInFlightRef.current === inFlight) {
             noteSaveInFlightRef.current = null;
+            if (cancelled && loadedNoteIdentityRef.current === inFlight.noteIdentity) {
+              setSaveRetryCycle((cycle) => cycle + 1);
+            }
           }
         });
     }, 700);
@@ -5005,7 +5024,7 @@ function NoteEditor({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [baseRevision, body, dirty, entry, onSave, title]);
+  }, [baseRevision, body, dirty, entry, noteIdentity, onSave, saveRetryCycle, title]);
 
   if (!entry) {
     return (
