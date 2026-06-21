@@ -1553,9 +1553,14 @@ async fn command_handler(
         .map_err(|err| BridgeError::Protocol(err.to_string()))??;
     if let ResponseResult::PaneMove { move_result } = &response.result {
         if move_result.changed {
-            match state
-                .notes
-                .update_for_pane_move(&move_result.previous_pane_id, &move_result.pane)
+            let notes = state.notes.clone();
+            let previous_pane_id = move_result.previous_pane_id.clone();
+            let moved_pane = (*move_result.pane).clone();
+            match tokio::task::spawn_blocking(move || {
+                notes.update_for_pane_move(&previous_pane_id, &moved_pane)
+            })
+            .await
+            .map_err(|err| BridgeError::Protocol(err.to_string()))?
             {
                 Ok(true) => broadcast_notes_changed(&state, None, None),
                 Ok(false) => {}
@@ -1794,7 +1799,12 @@ async fn snapshot_handler(
         }
     };
     let panes = current_panes(&state.api)?;
-    match state.notes.observe_panes(&panes) {
+    let notes = state.notes.clone();
+    let note_panes = panes.clone();
+    match tokio::task::spawn_blocking(move || notes.observe_panes(&note_panes))
+        .await
+        .map_err(|err| BridgeError::Protocol(err.to_string()))?
+    {
         Ok(true) => broadcast_notes_changed(&state, None, None),
         Ok(false) => {}
         Err(err) => warn!(error = %err, "failed to update pane note observations"),
@@ -1854,8 +1864,13 @@ async fn notes_list_handler(
     headers: HeaderMap,
 ) -> Result<Json<NotesListResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
-    let panes = current_panes(&state.api)?;
-    Ok(Json(state.notes.list(query, &panes)?))
+    Ok(Json(
+        run_notes_task(state, move |state| {
+            let panes = current_panes(&state.api)?;
+            Ok(state.notes.list(query, &panes)?)
+        })
+        .await?,
+    ))
 }
 
 async fn notes_create_handler(
@@ -1864,8 +1879,11 @@ async fn notes_create_handler(
     Json(body): Json<CreateNoteRequest>,
 ) -> Result<Json<NoteResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
-    let panes = current_panes(&state.api)?;
-    let note = state.notes.create(body, &panes)?;
+    let note = run_notes_task(state.clone(), move |state| {
+        let panes = current_panes(&state.api)?;
+        Ok(state.notes.create(body, &panes)?)
+    })
+    .await?;
     broadcast_notes_changed(&state, Some(&note.note.note_id), Some(note.note.revision));
     Ok(Json(note))
 }
@@ -1877,8 +1895,11 @@ async fn notes_update_handler(
     Json(body): Json<UpdateNoteRequest>,
 ) -> Result<Json<NoteResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
-    let panes = current_panes(&state.api)?;
-    let note = state.notes.update(&note_id, body, &panes)?;
+    let note = run_notes_task(state.clone(), move |state| {
+        let panes = current_panes(&state.api)?;
+        Ok(state.notes.update(&note_id, body, &panes)?)
+    })
+    .await?;
     broadcast_notes_changed(&state, Some(&note.note.note_id), Some(note.note.revision));
     Ok(Json(note))
 }
@@ -1890,8 +1911,11 @@ async fn notes_attach_handler(
     Json(body): Json<AttachNoteRequest>,
 ) -> Result<Json<NoteResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
-    let panes = current_panes(&state.api)?;
-    let note = state.notes.attach(&note_id, body, &panes)?;
+    let note = run_notes_task(state.clone(), move |state| {
+        let panes = current_panes(&state.api)?;
+        Ok(state.notes.attach(&note_id, body, &panes)?)
+    })
+    .await?;
     broadcast_notes_changed(&state, Some(&note.note.note_id), Some(note.note.revision));
     Ok(Json(note))
 }
@@ -1903,8 +1927,11 @@ async fn notes_detach_handler(
     Json(body): Json<RevisionRequest>,
 ) -> Result<Json<NoteResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
-    let panes = current_panes(&state.api)?;
-    let note = state.notes.detach(&note_id, body, &panes)?;
+    let note = run_notes_task(state.clone(), move |state| {
+        let panes = current_panes(&state.api)?;
+        Ok(state.notes.detach(&note_id, body, &panes)?)
+    })
+    .await?;
     broadcast_notes_changed(&state, Some(&note.note.note_id), Some(note.note.revision));
     Ok(Json(note))
 }
@@ -1916,8 +1943,11 @@ async fn notes_archive_handler(
     Json(body): Json<RevisionRequest>,
 ) -> Result<Json<NoteResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
-    let panes = current_panes(&state.api)?;
-    let note = state.notes.archive(&note_id, body, &panes)?;
+    let note = run_notes_task(state.clone(), move |state| {
+        let panes = current_panes(&state.api)?;
+        Ok(state.notes.archive(&note_id, body, &panes)?)
+    })
+    .await?;
     broadcast_notes_changed(&state, Some(&note.note.note_id), Some(note.note.revision));
     Ok(Json(note))
 }
@@ -1929,8 +1959,11 @@ async fn notes_restore_handler(
     Json(body): Json<RevisionRequest>,
 ) -> Result<Json<NoteResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
-    let panes = current_panes(&state.api)?;
-    let note = state.notes.restore(&note_id, body, &panes)?;
+    let note = run_notes_task(state.clone(), move |state| {
+        let panes = current_panes(&state.api)?;
+        Ok(state.notes.restore(&note_id, body, &panes)?)
+    })
+    .await?;
     broadcast_notes_changed(&state, Some(&note.note.note_id), Some(note.note.revision));
     Ok(Json(note))
 }
@@ -1942,10 +1975,23 @@ async fn notes_delete_handler(
     Json(body): Json<RevisionRequest>,
 ) -> Result<Json<NoteResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
-    let panes = current_panes(&state.api)?;
-    let note = state.notes.delete(&note_id, body, &panes)?;
+    let note = run_notes_task(state.clone(), move |state| {
+        let panes = current_panes(&state.api)?;
+        Ok(state.notes.delete(&note_id, body, &panes)?)
+    })
+    .await?;
     broadcast_notes_changed(&state, Some(&note.note.note_id), Some(note.note.revision));
     Ok(Json(note))
+}
+
+async fn run_notes_task<T, F>(state: BridgeState, task: F) -> Result<T, BridgeError>
+where
+    T: Send + 'static,
+    F: FnOnce(BridgeState) -> Result<T, BridgeError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || task(state))
+        .await
+        .map_err(|err| BridgeError::Protocol(err.to_string()))?
 }
 
 fn broadcast_notes_changed(state: &BridgeState, note_id: Option<&str>, revision: Option<u64>) {

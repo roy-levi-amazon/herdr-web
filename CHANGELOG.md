@@ -7,7 +7,9 @@
 ### Added
 
 - Added bridge-owned pane notes with a sidebar Notes view, desktop/mobile notes editor, pane
-  attachment recovery states, and per-bridge note synchronization.
+  attachment recovery states, and per-bridge note synchronization. Notes are exposed through the
+  same bridge request policy as terminal controls, so allowed bridge clients can read and mutate
+  saved note content.
 
 ### Changed
 

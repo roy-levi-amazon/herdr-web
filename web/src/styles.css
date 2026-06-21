@@ -1164,6 +1164,34 @@ button {
   white-space: nowrap;
 }
 
+.note-conflict {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--peach) 35%, var(--line-soft));
+  color: var(--peach);
+  background: color-mix(in srgb, var(--peach) 12%, var(--base));
+  font-size: 12px;
+}
+
+.note-conflict span {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.note-conflict button {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--peach) 48%, var(--line));
+  border-radius: 6px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface0) 75%, var(--peach));
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .note-title-input,
 .note-body-input {
   width: 100%;

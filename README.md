@@ -254,6 +254,7 @@ The bridge exposes:
 - `GET /api/snapshot`: workspaces, tabs, panes, layouts, and shared web selection
 - `POST /api/command`: allow-listed workspace/tab/pane commands
 - `POST /api/selection`: bridge-owned selected pane for syncing browser clients
+- `GET /api/notes` and `POST /api/notes...`: bridge-owned pane notes
 - `POST /api/uploads`: save uploaded files into the configured upload directory
 - `GET /ws/activity`: bridge-owned pane activity deltas
 - `GET /ws/events`: Herdr structural events
@@ -273,6 +274,10 @@ must also be same-origin with the bridge, an explicitly allowed origin such as A
 `http://localhost`, or a loopback development proxy origin allowed for Vite. Hostname backends must
 be explicitly allowed with `--allow-host HOSTNAME`. This is a DNS-rebinding/CSRF guard, not user
 authentication.
+
+Bridge-owned notes are part of that same request policy. Any allowed bridge client can read and
+mutate saved note content, including clients connecting over a trusted LAN when the bridge is bound
+to a non-loopback interface. Do not store sensitive notes on a bridge exposed to untrusted networks.
 
 Bridge-served pages also send a Content Security Policy. By default, `connect-src` allows only the
 serving bridge origin and `data:`. Use `--allow-connect-origin ORIGIN` on the serving bridge when

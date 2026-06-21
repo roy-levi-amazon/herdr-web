@@ -77,6 +77,20 @@ export type NoteRevisionInput = {
 
 export type BridgeHttpUrl = (path: string, query?: URLSearchParams) => string;
 
+export class NotesApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "NotesApiError";
+    this.status = status;
+  }
+}
+
+export function isNotesConflictError(error: unknown): error is NotesApiError {
+  return error instanceof NotesApiError && error.status === 409;
+}
+
 export function supportsNotes(capabilities: BridgeCapabilities | null | undefined) {
   return capabilities?.notes?.version === 1;
 }
@@ -177,7 +191,7 @@ async function sendNoteMutation(
   path: string,
   body: Record<string, unknown>,
 ) {
-  const response = await fetch(httpUrl(path), {
+  const response = await fetchWithTimeout(httpUrl(path), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -203,12 +217,12 @@ async function notesApiError(response: Response, fallback: string) {
   try {
     const parsed = (await response.json()) as { error?: unknown };
     if (typeof parsed.error === "string" && parsed.error.trim()) {
-      return new Error(parsed.error);
+      return new NotesApiError(parsed.error, response.status);
     }
   } catch {
     // Fall through to the status-based error.
   }
-  return new Error(`${fallback} failed: ${response.status}`);
+  return new NotesApiError(`${fallback} failed: ${response.status}`, response.status);
 }
 
 function notePath(noteId: string, action: string) {

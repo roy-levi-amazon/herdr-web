@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -609,7 +609,13 @@ impl NotesManager {
 
     fn load_or_create_notes_store(&self) -> Result<NotesStore, NotesError> {
         match fs::read(&self.notes_path) {
-            Ok(bytes) => parse_notes_store(&bytes),
+            Ok(bytes) => match parse_notes_store(&bytes) {
+                Ok(store) => Ok(store),
+                Err(err) => {
+                    copy_corrupt_once(&self.notes_path);
+                    Err(err)
+                }
+            },
             Err(err) if err.kind() == ErrorKind::NotFound => {
                 let now = now_ms_string();
                 Ok(NotesStore {
@@ -953,11 +959,22 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), NotesEr
     let temp_path = path.with_extension(format!("{}.tmp", std::process::id()));
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|err| NotesError::Store(format!("failed to serialize notes: {err}")))?;
-    fs::write(&temp_path, bytes)?;
+    let mut file = File::create(&temp_path)?;
     set_private_file_permissions(&temp_path)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
     backup_existing_file(path);
     fs::rename(&temp_path, path)?;
     set_private_file_permissions(path)?;
+    sync_parent_dir(path)?;
+    Ok(())
+}
+
+fn sync_parent_dir(path: &Path) -> Result<(), NotesError> {
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 
@@ -1324,6 +1341,19 @@ mod tests {
         assert_eq!(corrupt_copy_count(&dir), 0);
         manager.observe_panes(&panes).unwrap();
         manager.observe_panes(&panes).unwrap();
+        assert_eq!(corrupt_copy_count(&dir), 1);
+    }
+
+    #[test]
+    fn corrupt_notes_store_is_copied_once_for_recovery() {
+        let dir = test_dir("corrupt_notes_store_is_copied_once_for_recovery");
+        let manager = NotesManager::for_test(dir.clone(), "session:default").unwrap();
+        fs::write(&manager.notes_path, b"not json").unwrap();
+        let panes = vec![pane("p1", "t1", "w1", "tab1", 1)];
+
+        assert!(manager.list(NotesListQuery::default(), &panes).is_err());
+        assert!(manager.list(NotesListQuery::default(), &panes).is_err());
+
         assert_eq!(corrupt_copy_count(&dir), 1);
     }
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildVisibleAgentPaneEntries,
   buildVisibleScopedNotes,
+  noteDraftStorageKey,
   buildVisibleScopedWorkspaces,
   buildVisibleTabEntries,
   nextVisibleAgentPaneEntry,
@@ -360,6 +361,31 @@ describe("App multi-bridge helpers", () => {
         false,
       ).map((entry) => `${entry.bridgeId}:${entry.note.note_id}`),
     ).toEqual(["bridge-a:a"]);
+  });
+
+  it("scopes note drafts by bridge connection, store, session, and note id", () => {
+    const bridgeViews = [
+      bridgeView(
+        "bridge-a",
+        bridgeSnapshot("workspace-a", "tab-a", pane("pane-a", "workspace-a", "tab-a")),
+      ),
+    ];
+    const [first] = buildVisibleScopedNotes(
+      bridgeViews,
+      notesState("bridge-a", "store-1", [note("n1", "workspace-a", "linked")]),
+      "bridge-a",
+      "selected",
+      "all",
+      null,
+      {},
+      false,
+      false,
+    );
+    const changedSession = { ...first, sessionKey: "session:other" };
+
+    expect(noteDraftStorageKey(first)).not.toBe(noteDraftStorageKey(changedSession));
+    expect(noteDraftStorageKey(first)).toContain("store-1");
+    expect(noteDraftStorageKey(first)).toContain("session%3Adefault");
   });
 });
 

@@ -99,6 +99,7 @@ Open `http://127.0.0.1:8787` and verify:
 - New tabs can launch Shell, Codex, Claude, and pi.
 - Split right/down can launch Shell, Codex, Claude, and pi.
 - Upload button, paste upload, and drop upload place shell-quoted file paths in the terminal.
+- Pane notes can be created, edited, reloaded, and recovered from the Notes view.
 - Binding to `HOST=0.0.0.0` is only used on a trusted network.
 
 ## Cut

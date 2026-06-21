@@ -1,8 +1,12 @@
-import { describe, expect, it } from "vitest";
-import { notesForPane, supportsNotes } from "./notes";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { NotesApiError, createNote, isNotesConflictError, notesForPane, supportsNotes } from "./notes";
 import type { PaneNote } from "./notes";
 
 describe("notes helpers", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("checks the bridge notes capability", () => {
     expect(supportsNotes({ commands: [], notes: { version: 1 } })).toBe(true);
     expect(supportsNotes({ commands: [] })).toBe(false);
@@ -19,6 +23,28 @@ describe("notes helpers", () => {
     ];
 
     expect(notesForPane(notes, "p1").map((item) => item.note_id)).toEqual(["n5", "n1"]);
+  });
+
+  it("preserves HTTP status for note mutation errors", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ error: "note has changed" }), {
+          status: 409,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+
+    await expect(createNote((path) => `http://bridge${path}`, {})).rejects.toMatchObject({
+      name: "NotesApiError",
+      status: 409,
+      message: "note has changed",
+    });
+
+    const error = new NotesApiError("note has changed", 409);
+    expect(isNotesConflictError(error)).toBe(true);
+    expect(isNotesConflictError(new NotesApiError("bad", 400))).toBe(false);
   });
 });
 

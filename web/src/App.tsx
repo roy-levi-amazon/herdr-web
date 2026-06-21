@@ -68,6 +68,7 @@ import {
   deleteNote,
   detachNote,
   fetchNotes,
+  isNotesConflictError,
   notesForPane,
   restoreNote,
   supportsNotes,
@@ -193,6 +194,9 @@ export type ScopedTabEntry = ScopedWorkspace & {
 };
 export type ScopedNoteEntry = {
   bridgeId: BridgeId;
+  connectionKey: string;
+  storeId: string;
+  sessionKey: string;
   bridgeIndex: number;
   bridgeLabel: string;
   bridgeColor: string;
@@ -208,6 +212,12 @@ type ScopedAgentGroup = {
   bridgeColor?: string;
   status?: AgentStatus;
   panes: ScopedAgentPane[];
+};
+type NoteDraft = {
+  title: string;
+  body: string;
+  revision: number;
+  updatedAt: number;
 };
 type MenuState = {
   kind: MenuKind;
@@ -1570,7 +1580,13 @@ export function App() {
       });
       await refreshBridgeNotes(runtime, false);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not save note");
+      setError(
+        isNotesConflictError(caught)
+          ? "Note changed in another client"
+          : caught instanceof Error
+            ? caught.message
+            : "Could not save note",
+      );
       await refreshBridgeNotes(runtime, false);
       throw caught;
     }
@@ -1650,6 +1666,7 @@ export function App() {
       await deleteNote(runtime.httpUrl, entry.note.note_id, {
         expectedRevision: entry.note.revision,
       });
+      clearNoteDraft(entry);
       await refreshBridgeNotes(runtime, false);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not delete note");
@@ -2034,6 +2051,21 @@ export function App() {
       }
     }
   }, [bridge.enabledRuntimes]);
+
+  useEffect(() => {
+    if (!notesPanelOpen && sidebarView !== "notes") {
+      return;
+    }
+    const refresh = () => {
+      for (const runtime of bridge.enabledRuntimes) {
+        if (runtime.capabilityState === "ready" && supportsNotes(runtime.capabilities)) {
+          void refreshBridgeNotes(runtime, false);
+        }
+      }
+    };
+    const timer = window.setInterval(refresh, NOTES_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [bridge.enabledRuntimes, notesPanelOpen, sidebarView]);
 
   async function exec(
     runtime: BridgeRuntime | null,
@@ -2545,6 +2577,9 @@ export function App() {
           selectedPane={selectedPane}
           selectedPaneNotes={selectedRuntime ? selectedPaneNotes.map((note) => ({
             bridgeId: selectedRuntime.id,
+            connectionKey: selectedRuntime.connectionKey,
+            storeId: selectedNotesState?.response?.store_id ?? "unknown-store",
+            sessionKey: selectedNotesState?.response?.session_key ?? note.session_key,
             bridgeIndex: Math.max(
               0,
               bridgeViews.findIndex((view) => view.runtime.id === selectedRuntime.id),
@@ -2678,6 +2713,8 @@ export function App() {
 }
 
 const SNAPSHOT_REFRESH_INTERVAL_MS = 10000;
+const NOTES_REFRESH_INTERVAL_MS = 15000;
+const NOTE_DRAFT_STORAGE_PREFIX = "herdr-web:note-draft:v1:";
 
 export function resolveInitialSelectedBridgeId(
   currentBridgeId: BridgeId | null,
@@ -3173,6 +3210,9 @@ export function buildVisibleScopedNotes(
         const workspaceId = pane?.workspace_id ?? note.attachment?.workspace_id;
         return {
           bridgeId: view.runtime.id,
+          connectionKey: view.runtime.connectionKey,
+          storeId: notesState.response?.store_id ?? "unknown-store",
+          sessionKey: notesState.response?.session_key ?? note.session_key,
           bridgeIndex,
           bridgeLabel: view.runtime.label,
           bridgeColor: view.runtime.color,
@@ -3262,6 +3302,61 @@ function noteSubtitle(entry: ScopedNoteEntry, showBridge: boolean) {
   ]
     .filter(Boolean)
     .join(" · ");
+}
+
+export function noteDraftStorageKey(entry: ScopedNoteEntry) {
+  return `${NOTE_DRAFT_STORAGE_PREFIX}${[
+    entry.bridgeId,
+    entry.connectionKey,
+    entry.storeId,
+    entry.sessionKey,
+    entry.note.note_id,
+  ]
+    .map((part) => encodeURIComponent(part))
+    .join(":")}`;
+}
+
+function readNoteDraft(entry: ScopedNoteEntry): NoteDraft | null {
+  try {
+    const raw = globalThis.localStorage?.getItem(noteDraftStorageKey(entry));
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as Partial<NoteDraft>;
+    if (typeof parsed.title !== "string" || typeof parsed.body !== "string") {
+      return null;
+    }
+    return {
+      title: parsed.title,
+      body: parsed.body,
+      revision: typeof parsed.revision === "number" ? parsed.revision : entry.note.revision,
+      updatedAt: typeof parsed.updatedAt === "number" ? parsed.updatedAt : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeNoteDraft(entry: ScopedNoteEntry, title: string, body: string) {
+  try {
+    const draft: NoteDraft = {
+      title,
+      body,
+      revision: entry.note.revision,
+      updatedAt: Date.now(),
+    };
+    globalThis.localStorage?.setItem(noteDraftStorageKey(entry), JSON.stringify(draft));
+  } catch {
+    // Draft persistence is best-effort; the bridge remains the durable source.
+  }
+}
+
+function clearNoteDraft(entry: ScopedNoteEntry) {
+  try {
+    globalThis.localStorage?.removeItem(noteDraftStorageKey(entry));
+  } catch {
+    // Ignore storage failures.
+  }
 }
 
 export function nextVisibleAgentPaneEntry(
@@ -4655,10 +4750,12 @@ function NoteEditor({
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [dirty, setDirty] = useState(false);
-  const [saveState, setSaveState] = useState<"idle" | "pending" | "saving" | "saved" | "error">("idle");
+  const [saveState, setSaveState] = useState<
+    "idle" | "pending" | "saving" | "saved" | "error" | "conflict"
+  >("idle");
   const loadedNoteIdentityRef = useRef("");
   const saveBlockedRef = useRef(false);
-  const noteIdentity = entry ? `${entry.bridgeId}:${entry.note.note_id}` : "";
+  const noteIdentity = entry ? noteDraftStorageKey(entry) : "";
   const noteKey = entry ? `${entry.bridgeId}:${entry.note.note_id}:${entry.note.revision}` : "";
 
   useEffect(() => {
@@ -4676,17 +4773,38 @@ function NoteEditor({
       setDirty(false);
       setSaveState("saved");
       saveBlockedRef.current = false;
+      clearNoteDraft(entry);
       return;
     }
     if (noteChanged || !dirty) {
+      const draft = readNoteDraft(entry);
       loadedNoteIdentityRef.current = noteIdentity;
-      setTitle(entry.note.title);
-      setBody(entry.note.body);
-      setDirty(false);
-      setSaveState("idle");
+      if (draft && (draft.title !== entry.note.title || draft.body !== entry.note.body)) {
+        setTitle(draft.title);
+        setBody(draft.body);
+        setDirty(true);
+        setSaveState("pending");
+      } else {
+        setTitle(entry.note.title);
+        setBody(entry.note.body);
+        setDirty(false);
+        setSaveState("idle");
+        clearNoteDraft(entry);
+      }
       saveBlockedRef.current = false;
     }
   }, [body, dirty, entry, noteIdentity, noteKey, title]);
+
+  useEffect(() => {
+    if (!entry) {
+      return;
+    }
+    if (dirty && (title !== entry.note.title || body !== entry.note.body)) {
+      writeNoteDraft(entry, title, body);
+    } else {
+      clearNoteDraft(entry);
+    }
+  }, [body, dirty, entry, title]);
 
   useEffect(() => {
     if (!entry || !dirty) {
@@ -4708,10 +4826,10 @@ function NoteEditor({
             setSaveState("saved");
           }
         })
-        .catch(() => {
+        .catch((caught) => {
           if (!cancelled) {
             saveBlockedRef.current = true;
-            setSaveState("error");
+            setSaveState(isNotesConflictError(caught) ? "conflict" : "error");
           }
         });
     }, 700);
@@ -4733,6 +4851,36 @@ function NoteEditor({
   const note = entry.note;
   const deleted = Boolean(note.deleted_at);
   const archived = Boolean(note.archived_at);
+  const markEdited = () => {
+    setDirty(true);
+    if (saveState === "conflict") {
+      writeNoteDraft(entry, title, body);
+      return;
+    }
+    saveBlockedRef.current = false;
+    setSaveState("pending");
+  };
+  const overwriteConflict = () => {
+    saveBlockedRef.current = false;
+    setSaveState("saving");
+    void onSave(entry, title, body)
+      .then(() => {
+        clearNoteDraft(entry);
+        setSaveState("saved");
+      })
+      .catch((caught) => {
+        saveBlockedRef.current = true;
+        setSaveState(isNotesConflictError(caught) ? "conflict" : "error");
+      });
+  };
+  const useServerVersion = () => {
+    setTitle(entry.note.title);
+    setBody(entry.note.body);
+    setDirty(false);
+    saveBlockedRef.current = false;
+    setSaveState("idle");
+    clearNoteDraft(entry);
+  };
   return (
     <div className="note-editor">
       <div className="note-editor-toolbar">
@@ -4745,6 +4893,8 @@ function NoteEditor({
                 ? "saved"
                 : saveState === "error"
                   ? "save failed"
+                  : saveState === "conflict"
+                    ? "conflict"
                 : noteStateLabel(note).label}
         </span>
         {note.link_state === "linked" ? (
@@ -4792,14 +4942,23 @@ function NoteEditor({
           </button>
         ) : null}
       </div>
+      {saveState === "conflict" ? (
+        <div className="note-conflict" role="alert">
+          <span>This note changed elsewhere.</span>
+          <button type="button" onClick={overwriteConflict}>
+            Overwrite
+          </button>
+          <button type="button" onClick={useServerVersion}>
+            Use server
+          </button>
+        </div>
+      ) : null}
       <input
         className="note-title-input"
         value={title}
         onChange={(event) => {
           setTitle(event.currentTarget.value);
-          setDirty(true);
-          saveBlockedRef.current = false;
-          setSaveState("pending");
+          markEdited();
         }}
         placeholder="Untitled note"
         disabled={deleted}
@@ -4809,9 +4968,7 @@ function NoteEditor({
         value={body}
         onChange={(event) => {
           setBody(event.currentTarget.value);
-          setDirty(true);
-          saveBlockedRef.current = false;
-          setSaveState("pending");
+          markEdited();
         }}
         placeholder="Write a note"
         disabled={deleted}
