@@ -293,12 +293,14 @@ describe("capabilities", () => {
         bridge_version: "1.2.3",
         web_compat: 1,
         min_android_app_compat: 2,
+        notes: { version: 1 },
       }),
     ).toEqual({
       commands: ["pane.split"],
       bridge_version: "1.2.3",
       web_compat: 1,
       min_android_app_compat: 2,
+      notes: { version: 1 },
     });
   });
 

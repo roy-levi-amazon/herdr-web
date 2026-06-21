@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildVisibleAgentPaneEntries,
+  buildVisibleScopedNotes,
   buildVisibleScopedWorkspaces,
   buildVisibleTabEntries,
   nextVisibleAgentPaneEntry,
@@ -17,6 +18,7 @@ import {
   isConnectionResultCurrent,
 } from "./connectionState";
 import type { AgentStatus, PaneInfo, Snapshot, TabInfo, WorkspaceInfo } from "./types";
+import type { PaneNote } from "./notes";
 
 describe("App connection guards", () => {
   it("hides snapshots from stale backend connections", () => {
@@ -286,6 +288,79 @@ describe("App multi-bridge helpers", () => {
     expect(nextVisibleTabEntry(entries, 0, -1).tab.tab_id).toBe("tab-b");
     expect(nextVisibleTabEntry(entries, 1, 1).tab.tab_id).toBe("tab-a");
   });
+
+  it("keeps unresolved notes visible in space scope and filters archived/deleted notes explicitly", () => {
+    const bridgeViews = [
+      bridgeView(
+        "bridge-a",
+        bridgeSnapshot("workspace-a", "tab-a", pane("pane-a", "workspace-a", "tab-a")),
+      ),
+    ];
+    const notes = [
+      note("active-linked", "workspace-a", "linked"),
+      note("unresolved-other-space", "workspace-b", "unresolved"),
+      { ...note("archived", "workspace-a", "linked"), archived_at: "500" },
+      { ...note("deleted", "workspace-a", "linked"), deleted_at: "600" },
+    ];
+
+    expect(
+      buildVisibleScopedNotes(
+        bridgeViews,
+        notesState("bridge-a", "store-1", notes),
+        "bridge-a",
+        "selected",
+        "space",
+        bridgeViews[0].snapshot?.workspaces[0] ?? null,
+        { "bridge-a": "workspace-a" },
+        false,
+        false,
+      ).map((entry) => entry.note.note_id),
+    ).toEqual(["unresolved-other-space", "active-linked"]);
+
+    expect(
+      buildVisibleScopedNotes(
+        bridgeViews,
+        notesState("bridge-a", "store-1", notes),
+        "bridge-a",
+        "selected",
+        "space",
+        bridgeViews[0].snapshot?.workspaces[0] ?? null,
+        { "bridge-a": "workspace-a" },
+        true,
+        true,
+      ).map((entry) => entry.note.note_id),
+    ).toEqual(["deleted", "archived", "unresolved-other-space", "active-linked"]);
+  });
+
+  it("dedupes all-host notes when two bridge profiles point at the same store", () => {
+    const bridgeViews = [
+      bridgeView(
+        "bridge-a",
+        bridgeSnapshot("workspace-a", "tab-a", pane("pane-a", "workspace-a", "tab-a")),
+      ),
+      bridgeView(
+        "bridge-b",
+        bridgeSnapshot("workspace-a", "tab-a", pane("pane-a", "workspace-a", "tab-a")),
+      ),
+    ];
+
+    expect(
+      buildVisibleScopedNotes(
+        bridgeViews,
+        {
+          ...notesState("bridge-a", "shared-store", [note("a", "workspace-a", "linked")]),
+          ...notesState("bridge-b", "shared-store", [note("b", "workspace-a", "linked")]),
+        },
+        "bridge-a",
+        "all",
+        "all",
+        null,
+        {},
+        false,
+        false,
+      ).map((entry) => `${entry.bridgeId}:${entry.note.note_id}`),
+    ).toEqual(["bridge-a:a"]);
+  });
 });
 
 function entry(
@@ -390,5 +465,59 @@ function bridgeSnapshot(workspaceId: string, tabId: string, paneInfo: PaneInfo):
     tabs: [tabInfo],
     panes: [paneInfo],
     layouts: [],
+  };
+}
+
+function notesState(bridgeId: string, storeId: string, notes: PaneNote[]) {
+  return {
+    [bridgeId]: {
+      connectionKey: bridgeId,
+      response: {
+        store_id: storeId,
+        session_key: "session:default",
+        notes,
+      },
+      loadState: "ready" as const,
+      error: null,
+    },
+  };
+}
+
+function note(
+  noteId: string,
+  workspaceId: string,
+  linkState: PaneNote["link_state"],
+): PaneNote {
+  const paneId = `${workspaceId}-pane`;
+  return {
+    note_id: noteId,
+    title: noteId,
+    body: "",
+    created_at: "100",
+    updated_at:
+      noteId === "deleted"
+        ? "600"
+        : noteId === "archived"
+          ? "500"
+          : noteId === "unresolved-other-space"
+            ? "300"
+            : "200",
+    session_key: "session:default",
+    attachment: {
+      type: "pane",
+      pane_id: paneId,
+      workspace_id: workspaceId,
+      tab_id: "tab-a",
+      terminal_id: `${paneId}-terminal`,
+      captured_at: "100",
+      context: {},
+    },
+    attachment_history: [],
+    revision: 1,
+    link_state: linkState,
+    resolved_pane:
+      linkState === "linked"
+        ? pane(paneId, workspaceId, "tab-a")
+        : undefined,
   };
 }

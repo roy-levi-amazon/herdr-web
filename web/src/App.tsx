@@ -1,12 +1,19 @@
 import {
   ChevronLeft,
+  Archive,
+  Link2,
   MoreVertical,
   PanelLeft,
   Plus,
   RefreshCw,
+  RotateCcw,
   Settings,
   SplitSquareHorizontal,
   SplitSquareVertical,
+  StickyNote,
+  Trash2,
+  Unlink,
+  X,
 } from "lucide-react";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, Dispatch, MutableRefObject, SetStateAction } from "react";
@@ -53,6 +60,20 @@ import type {
   MobileTouchSelectionEndpointTimeoutMs,
 } from "./mobileTerminalPrefs";
 import { addNativeBackHandler, addNativeKeyboardHideHandler, isNativeAndroid } from "./native";
+import {
+  archiveNote,
+  attachNote,
+  compareNotes,
+  createNote,
+  deleteNote,
+  detachNote,
+  fetchNotes,
+  notesForPane,
+  restoreNote,
+  supportsNotes,
+  updateNote,
+} from "./notes";
+import type { NotesListResponse, PaneNote } from "./notes";
 import { ActionMenu, ConfirmDialog, RenameDialog, useLongPress } from "./overlays";
 import type { MenuItem } from "./overlays";
 import { createSnapshotRefreshController } from "./refreshCoordinator";
@@ -101,7 +122,7 @@ import type {
 type LoadState = "loading" | "ready" | "error";
 type Scope = "space" | "all";
 type HostScope = "selected" | "all";
-type SidebarView = "agents" | "tabs";
+type SidebarView = "agents" | "tabs" | "notes";
 type AgentSort = "attention" | "status" | "workspace";
 type AgentGroup = "none" | "host" | "workspace" | "hostWorkspace";
 type MenuKind = "space" | "tab" | "pane";
@@ -109,6 +130,11 @@ type ScopedPaneRef = {
   bridgeId: BridgeId;
   paneId: string;
 };
+type ScopedNoteRef = {
+  bridgeId: BridgeId;
+  noteId: string;
+};
+type MobileNotesScreen = "list" | "editor";
 type ScopedWorkspaceRef = {
   bridgeId: BridgeId;
   workspaceId: string;
@@ -125,6 +151,12 @@ type BridgeConnectionState = {
   connectionKey: string;
   snapshot: Snapshot | null;
   loadState: LoadState;
+};
+type BridgeNotesState = {
+  connectionKey: string;
+  response: NotesListResponse | null;
+  loadState: LoadState;
+  error: string | null;
 };
 type BridgeConnectionRef = {
   connectionKey: string;
@@ -158,6 +190,16 @@ type ScopedTabWorkspace = ScopedWorkspace & {
 export type ScopedTabEntry = ScopedWorkspace & {
   tab: TabInfo;
   panes: PaneInfo[];
+};
+export type ScopedNoteEntry = {
+  bridgeId: BridgeId;
+  bridgeIndex: number;
+  bridgeLabel: string;
+  bridgeColor: string;
+  note: PaneNote;
+  snapshot: Snapshot | null;
+  workspace?: WorkspaceInfo;
+  pane?: PaneInfo;
 };
 type ScopedAgentGroup = {
   key: string;
@@ -294,7 +336,9 @@ function parseDisplayPrefsValue(
         : fallback.hostScope,
     scope: parsed.scope === "all" || parsed.scope === "space" ? parsed.scope : fallback.scope,
     sidebarView:
-      parsed.sidebarView === "agents" || parsed.sidebarView === "tabs"
+      parsed.sidebarView === "agents" ||
+      parsed.sidebarView === "tabs" ||
+      parsed.sidebarView === "notes"
         ? parsed.sidebarView
         : fallback.sidebarView,
     agentSort:
@@ -383,7 +427,9 @@ function readLegacyDisplayPrefs(fallback: DisplayPrefs): DisplayPrefs {
           : fallback.hostScope,
       scope: parsed.scope === "all" || parsed.scope === "space" ? parsed.scope : fallback.scope,
       sidebarView:
-        parsed.sidebarView === "agents" || parsed.sidebarView === "tabs"
+        parsed.sidebarView === "agents" ||
+        parsed.sidebarView === "tabs" ||
+        parsed.sidebarView === "notes"
           ? parsed.sidebarView
           : fallback.sidebarView,
       agentSort:
@@ -551,9 +597,15 @@ export function App() {
   const legacySelectionPrefs = useMemo(readLegacyDisplaySelectionPrefs, []);
   const [displayPrefsLoaded, setDisplayPrefsLoaded] = useState(() => !isNativeApp());
   const [connectionStates, setConnectionStates] = useState<Record<string, BridgeConnectionState>>({});
+  const [notesStates, setNotesStates] = useState<Record<string, BridgeNotesState>>({});
   const [selectedBridgeId, setSelectedBridgeId] = useState<BridgeId | null>(
     initialPrefs.selectedBridgeId,
   );
+  const [selectedNoteRef, setSelectedNoteRef] = useState<ScopedNoteRef | null>(null);
+  const [notesPanelOpen, setNotesPanelOpen] = useState(false);
+  const [mobileNotesScreen, setMobileNotesScreen] = useState<MobileNotesScreen>("list");
+  const [notesIncludeArchived, setNotesIncludeArchived] = useState(false);
+  const [notesIncludeDeleted, setNotesIncludeDeleted] = useState(false);
   const [selectedPaneRefState, setSelectedPaneRefState] = useState<ScopedPaneRef | null>(
     initialPrefs.selectedPane,
   );
@@ -681,6 +733,14 @@ export function App() {
 
   useEffect(() => {
     return addNativeBackHandler(() => {
+      if (notesPanelOpen) {
+        if (isCompactLayout && mobileNotesScreen === "editor") {
+          setMobileNotesScreen("list");
+          return true;
+        }
+        setNotesPanelOpen(false);
+        return true;
+      }
       if (backendSettingsOpen) {
         setBackendSettingsOpen(false);
         return true;
@@ -699,7 +759,15 @@ export function App() {
       }
       return false;
     });
-  }, [backendSettingsOpen, dialog, launchTarget, menu]);
+  }, [
+    backendSettingsOpen,
+    dialog,
+    isCompactLayout,
+    launchTarget,
+    menu,
+    mobileNotesScreen,
+    notesPanelOpen,
+  ]);
 
   const bridgeViews = useMemo<BridgeConnectionView[]>(
     () =>
@@ -1111,6 +1179,18 @@ export function App() {
       }
       return changed ? next : current;
     });
+    setNotesStates((current) => {
+      let changed = false;
+      const next: Record<string, BridgeNotesState> = {};
+      for (const [bridgeId, state] of Object.entries(current)) {
+        if (activeBridgeIds.has(bridgeId)) {
+          next[bridgeId] = state;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
   }, [bridge.enabledRuntimes]);
 
   useEffect(() => {
@@ -1157,6 +1237,15 @@ export function App() {
     () => snapshot?.panes.find((pane) => pane.pane_id === resolvedPaneId) ?? null,
     [snapshot, resolvedPaneId],
   );
+  const selectedNotesState =
+    selectedRuntime && notesStates[selectedRuntime.id]?.connectionKey === selectedRuntime.connectionKey
+      ? notesStates[selectedRuntime.id]
+      : null;
+  const selectedBridgeNotes = selectedNotesState?.response?.notes ?? [];
+  const selectedPaneNotes = useMemo(
+    () => notesForPane(selectedBridgeNotes, selectedPane?.pane_id),
+    [selectedBridgeNotes, selectedPane?.pane_id],
+  );
   const selectedPaneMenuPress = useLongPress((x, y) => {
     if (selectedPane && selectedRuntime) {
       setMenu({
@@ -1194,6 +1283,54 @@ export function App() {
       null
     );
   }, [snapshot, activeWorkspaceId, selectedPane]);
+  const visibleNotes = useMemo(
+    () =>
+      buildVisibleScopedNotes(
+        bridgeViews,
+        notesStates,
+        selectedRuntime?.id ?? null,
+        hostScope,
+        scope,
+        activeSpace,
+        activeWorkspacesByBridgeId,
+        notesIncludeArchived,
+        notesIncludeDeleted,
+      ),
+    [
+      activeSpace,
+      activeWorkspacesByBridgeId,
+      bridgeViews,
+      hostScope,
+      notesStates,
+      notesIncludeArchived,
+      notesIncludeDeleted,
+      scope,
+      selectedRuntime?.id,
+    ],
+  );
+  const allScopedNotes = useMemo(
+    () =>
+      buildVisibleScopedNotes(
+        bridgeViews,
+        notesStates,
+        null,
+        "all",
+        "all",
+        null,
+        {},
+        true,
+        true,
+        false,
+      ),
+    [bridgeViews, notesStates],
+  );
+  const selectedScopedNote = useMemo(
+    () =>
+      selectedNoteRef
+        ? findScopedNote(allScopedNotes, selectedNoteRef, false)
+        : (visibleNotes[0] ?? null),
+    [allScopedNotes, selectedNoteRef, visibleNotes],
+  );
 
   // The active tab's split layout, normalized to fractions of the tab area so we
   // can reproduce the herdr split geometry in the browser. Null when the tab has
@@ -1354,6 +1491,177 @@ export function App() {
   const focusPane = (bridgeId: BridgeId, pane: PaneInfo) => {
     openPane(bridgeId, pane);
     requestTerminalFocus();
+  };
+
+  const selectNote = (bridgeId: BridgeId, noteId: string) => {
+    setSelectedNoteRef({ bridgeId, noteId });
+    if (isCompactLayout) {
+      setMobileNotesScreen("editor");
+    }
+    setNotesPanelOpen(true);
+  };
+
+  const openNotesPanel = () => {
+    setMobileNotesScreen("list");
+    if (!selectedNoteRef && selectedRuntime && selectedPaneNotes.length > 0) {
+      setSelectedNoteRef({
+        bridgeId: selectedRuntime.id,
+        noteId: selectedPaneNotes[0].note_id,
+      });
+    }
+    setNotesPanelOpen(true);
+  };
+
+  const createNoteForCurrentPane = async () => {
+    if (!selectedRuntime || !selectedPane || !supportsNotes(selectedRuntime.capabilities)) {
+      setError("Notes are not available for this bridge");
+      return;
+    }
+    try {
+      const note = await createNote(selectedRuntime.httpUrl, {
+        title: "Untitled note",
+        body: "",
+        paneId: selectedPane.pane_id,
+      });
+      setSelectedNoteRef({ bridgeId: selectedRuntime.id, noteId: note.note_id });
+      if (isCompactLayout) {
+        setMobileNotesScreen("editor");
+      }
+      setNotesPanelOpen(true);
+      await refreshBridgeNotes(selectedRuntime, false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not create note");
+    }
+  };
+
+  const createDetachedBridgeNote = async (bridgeId = selectedRuntime?.id ?? null) => {
+    const runtime = bridgeId ? bridge.getRuntime(bridgeId) : null;
+    if (!runtime || !supportsNotes(runtime.capabilities)) {
+      setError("Notes are not available for this bridge");
+      return;
+    }
+    try {
+      const note = await createNote(runtime.httpUrl, {
+        title: "Untitled note",
+        body: "",
+      });
+      setSelectedNoteRef({ bridgeId: runtime.id, noteId: note.note_id });
+      if (isCompactLayout) {
+        setMobileNotesScreen("editor");
+      }
+      setNotesPanelOpen(true);
+      await refreshBridgeNotes(runtime, false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not create note");
+    }
+  };
+
+  const saveScopedNote = async (entry: ScopedNoteEntry, title: string, body: string) => {
+    const runtime = bridge.getRuntime(entry.bridgeId);
+    if (!runtime) {
+      setError("Bridge is not ready");
+      throw new Error("Bridge is not ready");
+    }
+    try {
+      await updateNote(runtime.httpUrl, entry.note.note_id, {
+        title,
+        body,
+        expectedRevision: entry.note.revision,
+      });
+      await refreshBridgeNotes(runtime, false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not save note");
+      await refreshBridgeNotes(runtime, false);
+      throw caught;
+    }
+  };
+
+  const attachScopedNoteToCurrentPane = async (entry: ScopedNoteEntry) => {
+    if (!selectedRuntime || !selectedPane || selectedRuntime.id !== entry.bridgeId) {
+      setError("Select a pane on the same bridge first");
+      return;
+    }
+    try {
+      await attachNote(selectedRuntime.httpUrl, entry.note.note_id, {
+        paneId: selectedPane.pane_id,
+        expectedRevision: entry.note.revision,
+      });
+      await refreshBridgeNotes(selectedRuntime, false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not attach note");
+    }
+  };
+
+  const detachScopedNote = async (entry: ScopedNoteEntry) => {
+    const runtime = bridge.getRuntime(entry.bridgeId);
+    if (!runtime) {
+      setError("Bridge is not ready");
+      return;
+    }
+    try {
+      await detachNote(runtime.httpUrl, entry.note.note_id, {
+        expectedRevision: entry.note.revision,
+      });
+      await refreshBridgeNotes(runtime, false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not detach note");
+    }
+  };
+
+  const archiveScopedNote = async (entry: ScopedNoteEntry) => {
+    const runtime = bridge.getRuntime(entry.bridgeId);
+    if (!runtime) {
+      setError("Bridge is not ready");
+      return;
+    }
+    try {
+      await archiveNote(runtime.httpUrl, entry.note.note_id, {
+        expectedRevision: entry.note.revision,
+      });
+      await refreshBridgeNotes(runtime, false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not archive note");
+    }
+  };
+
+  const restoreScopedNote = async (entry: ScopedNoteEntry) => {
+    const runtime = bridge.getRuntime(entry.bridgeId);
+    if (!runtime) {
+      setError("Bridge is not ready");
+      return;
+    }
+    try {
+      await restoreNote(runtime.httpUrl, entry.note.note_id, {
+        expectedRevision: entry.note.revision,
+      });
+      await refreshBridgeNotes(runtime, false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not restore note");
+    }
+  };
+
+  const deleteScopedNote = async (entry: ScopedNoteEntry) => {
+    const runtime = bridge.getRuntime(entry.bridgeId);
+    if (!runtime) {
+      setError("Bridge is not ready");
+      return;
+    }
+    try {
+      await deleteNote(runtime.httpUrl, entry.note.note_id, {
+        expectedRevision: entry.note.revision,
+      });
+      await refreshBridgeNotes(runtime, false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not delete note");
+    }
+  };
+
+  const viewScopedNotePane = (entry: ScopedNoteEntry) => {
+    if (!entry.pane) {
+      setError("That note is not linked to an open pane");
+      return;
+    }
+    openPane(entry.bridgeId, entry.pane);
   };
 
   useEffect(() => {
@@ -1645,6 +1953,88 @@ export function App() {
     }
   }
 
+  async function refreshBridgeNotes(runtime: BridgeRuntime, setLoading: boolean) {
+    const requestConnectionKey = runtime.connectionKey;
+    if (!runtime.canConnect || runtime.capabilityState !== "ready" || !supportsNotes(runtime.capabilities)) {
+      setNotesStates((current) => ({
+        ...current,
+        [runtime.id]: {
+          connectionKey: requestConnectionKey,
+          response: null,
+          loadState: "ready",
+          error: null,
+        },
+      }));
+      return null;
+    }
+    if (setLoading) {
+      setNotesStates((current) => ({
+        ...current,
+        [runtime.id]: {
+          connectionKey: requestConnectionKey,
+          response:
+            current[runtime.id]?.connectionKey === requestConnectionKey
+              ? current[runtime.id]?.response ?? null
+              : null,
+          loadState: "loading",
+          error: null,
+        },
+      }));
+    }
+    try {
+      const response = await fetchNotes(runtime.httpUrl, {
+        includeArchived: true,
+        includeDeleted: true,
+        includeOtherSessions: true,
+      });
+      setNotesStates((current) => {
+        if (bridge.getRuntime(runtime.id)?.connectionKey !== requestConnectionKey) {
+          return current;
+        }
+        return {
+          ...current,
+          [runtime.id]: {
+            connectionKey: requestConnectionKey,
+            response,
+            loadState: "ready",
+            error: null,
+          },
+        };
+      });
+      return response;
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Notes unavailable";
+      setNotesStates((current) => ({
+        ...current,
+        [runtime.id]: {
+          connectionKey: requestConnectionKey,
+          response:
+            current[runtime.id]?.connectionKey === requestConnectionKey
+              ? current[runtime.id]?.response ?? null
+              : null,
+          loadState: "error",
+          error: message,
+        },
+      }));
+      return null;
+    }
+  }
+
+  const refreshNotesForBridge = (bridgeId: BridgeId) => {
+    const runtime = bridge.getRuntime(bridgeId);
+    if (runtime) {
+      void refreshBridgeNotes(runtime, false);
+    }
+  };
+
+  useEffect(() => {
+    for (const runtime of bridge.enabledRuntimes) {
+      if (runtime.capabilityState === "ready" && supportsNotes(runtime.capabilities)) {
+        void refreshBridgeNotes(runtime, true);
+      }
+    }
+  }, [bridge.enabledRuntimes]);
+
   async function exec(
     runtime: BridgeRuntime | null,
     action: () => Promise<{ [key: string]: unknown }>,
@@ -1860,6 +2250,7 @@ export function App() {
           connectionRefs={connectionRefs}
           setConnectionStates={setConnectionStates}
           onPaneSelection={rememberPaneSelection}
+          onNotesChanged={refreshNotesForBridge}
         />
       ))}
       <aside className="sidebar" aria-label="Switcher">
@@ -1876,6 +2267,9 @@ export function App() {
           capabilityState={selectedRuntime?.capabilityState ?? "idle"}
           scope={scope}
           sidebarView={sidebarView}
+          notesStates={notesStates}
+          visibleNotes={visibleNotes}
+          selectedNote={selectedScopedNote}
           agentSort={agentSort}
           agentGroup={agentGroup}
           activeSpace={activeSpace}
@@ -1884,6 +2278,8 @@ export function App() {
           onHostScope={setHostScope}
           onScope={setScope}
           onSidebarView={setSidebarView}
+          onSelectNote={selectNote}
+          onCreateNote={() => void createDetachedBridgeNote()}
           onAgentSort={setAgentSort}
           onAgentGroup={setAgentGroup}
           onSelectBridge={setSelectedBridgeId}
@@ -2057,6 +2453,21 @@ export function App() {
           ) : null}
           {selectedPane ? (
             <button
+              className="icon-btn notes-button"
+              type="button"
+              aria-label="Notes"
+              title="Notes"
+              data-active={notesPanelOpen ? "true" : "false"}
+              onClick={openNotesPanel}
+            >
+              <StickyNote size={18} />
+              {selectedPaneNotes.length > 0 ? (
+                <span className="notes-count mono">{selectedPaneNotes.length}</span>
+              ) : null}
+            </button>
+          ) : null}
+          {selectedPane ? (
+            <button
               className="icon-btn"
               type="button"
               aria-label="Refit terminal"
@@ -2125,6 +2536,58 @@ export function App() {
           <div className="terminal-stage" aria-hidden="true" />
         )}
       </section>
+
+      {notesPanelOpen ? (
+        <NotesSurface
+          compact={isCompactLayout}
+          mobileScreen={mobileNotesScreen}
+          selectedEntry={selectedScopedNote}
+          selectedPane={selectedPane}
+          selectedPaneNotes={selectedRuntime ? selectedPaneNotes.map((note) => ({
+            bridgeId: selectedRuntime.id,
+            bridgeIndex: Math.max(
+              0,
+              bridgeViews.findIndex((view) => view.runtime.id === selectedRuntime.id),
+            ),
+            bridgeLabel: selectedRuntime.label,
+            bridgeColor: selectedRuntime.color,
+            note,
+            snapshot,
+            workspace: snapshot?.workspaces.find(
+              (workspace) => workspace.workspace_id === note.attachment?.workspace_id,
+            ),
+            pane: note.resolved_pane,
+          })) : []}
+          visibleNotes={visibleNotes}
+          notesLoadState={selectedNotesState?.loadState ?? "ready"}
+          notesError={selectedNotesState?.error ?? null}
+          includeArchived={notesIncludeArchived}
+          includeDeleted={notesIncludeDeleted}
+          currentBridgeSupportsNotes={Boolean(
+            selectedRuntime && supportsNotes(selectedRuntime.capabilities),
+          )}
+          canAttachToCurrentPane={Boolean(
+            selectedRuntime &&
+              selectedPane &&
+              selectedScopedNote &&
+              selectedScopedNote.bridgeId === selectedRuntime.id,
+          )}
+          onClose={() => setNotesPanelOpen(false)}
+          onMobileBackToList={() => setMobileNotesScreen("list")}
+          onSelectNote={selectNote}
+          onCreatePaneNote={() => void createNoteForCurrentPane()}
+          onCreateDetachedNote={() => void createDetachedBridgeNote()}
+          onIncludeArchived={setNotesIncludeArchived}
+          onIncludeDeleted={setNotesIncludeDeleted}
+          onSaveNote={saveScopedNote}
+          onAttachToCurrentPane={(entry) => void attachScopedNoteToCurrentPane(entry)}
+          onDetach={(entry) => void detachScopedNote(entry)}
+          onArchive={(entry) => void archiveScopedNote(entry)}
+          onRestore={(entry) => void restoreScopedNote(entry)}
+          onDelete={(entry) => void deleteScopedNote(entry)}
+          onViewPane={viewScopedNotePane}
+        />
+      ) : null}
 
       {menu && activeMenuItems.length > 0 ? (
         <ActionMenu
@@ -2243,11 +2706,13 @@ function BridgeConnectionController({
   connectionRefs,
   setConnectionStates,
   onPaneSelection,
+  onNotesChanged,
 }: {
   runtime: BridgeRuntime;
   connectionRefs: MutableRefObject<Record<string, BridgeConnectionRef>>;
   setConnectionStates: Dispatch<SetStateAction<Record<string, BridgeConnectionState>>>;
   onPaneSelection: (bridgeId: BridgeId, paneId: string, workspaceId?: string) => void;
+  onNotesChanged: (bridgeId: BridgeId) => void;
 }) {
   const httpUrlRef = useRef(runtime.httpUrl);
   const wsUrlRef = useRef(runtime.wsUrl);
@@ -2406,6 +2871,12 @@ function BridgeConnectionController({
           (item) => item.pane_id === paneId,
         );
         onPaneSelection(runtime.id, paneId, pane?.workspace_id);
+        refresh();
+        return;
+      }
+      if (isNotesChangedEvent(event)) {
+        onNotesChanged(runtime.id);
+        return;
       }
       refresh();
     });
@@ -2424,6 +2895,7 @@ function BridgeConnectionController({
     };
   }, [
     connectionRefs,
+    onNotesChanged,
     onPaneSelection,
     runtime.canConnect,
     runtime.connectionKey,
@@ -2651,6 +3123,145 @@ export function buildVisibleTabEntries(
     );
   }
   return spaceGroups.flatMap(flattenGroup);
+}
+
+export function buildVisibleScopedNotes(
+  bridgeViews: BridgeConnectionView[],
+  notesStates: Record<string, BridgeNotesState>,
+  selectedBridgeId: BridgeId | null,
+  hostScope: HostScope,
+  scope: Scope,
+  activeSpace: WorkspaceInfo | null,
+  activeWorkspacesByBridgeId: Record<string, string>,
+  includeArchived: boolean,
+  includeDeleted: boolean,
+  dedupeStores = true,
+): ScopedNoteEntry[] {
+  const hostBridgeViews = visibleHostBridgeViews(bridgeViews, selectedBridgeId, hostScope);
+  const seenStores = new Set<string>();
+  const entries = hostBridgeViews.flatMap((view) => {
+    const notesState = notesStates[view.runtime.id];
+    if (!notesState || notesState.connectionKey !== view.runtime.connectionKey) {
+      return [];
+    }
+    if (dedupeStores && hostScope === "all" && notesState.response) {
+      const storeKey = `${notesState.response.store_id}:${notesState.response.session_key}`;
+      if (seenStores.has(storeKey)) {
+        return [];
+      }
+      seenStores.add(storeKey);
+    }
+    const snapshot = view.snapshot;
+    const bridgeIndex = Math.max(
+      0,
+      bridgeViews.findIndex((candidate) => candidate.runtime.id === view.runtime.id),
+    );
+    const activeWorkspace =
+      scope === "space"
+        ? activeWorkspaceForBridgeView(
+            view,
+            selectedBridgeId,
+            activeSpace,
+            activeWorkspacesByBridgeId,
+          )
+        : null;
+    return (notesState.response?.notes ?? [])
+      .filter((note) => noteVisibleByLifecycle(note, includeArchived, includeDeleted))
+      .filter((note) => noteVisibleInScope(note, activeWorkspace))
+      .map((note) => {
+        const pane = note.resolved_pane;
+        const workspaceId = pane?.workspace_id ?? note.attachment?.workspace_id;
+        return {
+          bridgeId: view.runtime.id,
+          bridgeIndex,
+          bridgeLabel: view.runtime.label,
+          bridgeColor: view.runtime.color,
+          note,
+          snapshot,
+          workspace: workspaceId
+            ? snapshot?.workspaces.find((workspace) => workspace.workspace_id === workspaceId)
+            : undefined,
+          pane,
+        };
+      });
+  });
+  return entries.sort((a, b) => {
+    const bridge = a.bridgeIndex - b.bridgeIndex;
+    if (bridge !== 0) {
+      return bridge;
+    }
+    return compareNotes(a.note, b.note);
+  });
+}
+
+function noteVisibleByLifecycle(
+  note: PaneNote,
+  includeArchived: boolean,
+  includeDeleted: boolean,
+) {
+  if (note.deleted_at) {
+    return includeDeleted;
+  }
+  if (note.archived_at) {
+    return includeArchived;
+  }
+  return true;
+}
+
+function noteVisibleInScope(note: PaneNote, activeWorkspace: WorkspaceInfo | null) {
+  if (!activeWorkspace) {
+    return true;
+  }
+  if (note.link_state !== "linked") {
+    return true;
+  }
+  const workspaceId = note.resolved_pane?.workspace_id ?? note.attachment?.workspace_id;
+  return !workspaceId || workspaceId === activeWorkspace.workspace_id;
+}
+
+function findScopedNote(
+  entries: ScopedNoteEntry[],
+  ref: ScopedNoteRef | null,
+  fallback = true,
+) {
+  if (!ref) {
+    return fallback ? (entries[0] ?? null) : null;
+  }
+  const found = entries.find(
+    (entry) => entry.bridgeId === ref.bridgeId && entry.note.note_id === ref.noteId,
+  );
+  return found ?? (fallback ? (entries[0] ?? null) : null);
+}
+
+function noteStateLabel(note: PaneNote) {
+  if (note.deleted_at) {
+    return { label: "deleted", status: "blocked" as AgentStatus };
+  }
+  if (note.archived_at) {
+    return { label: "archived", status: "idle" as AgentStatus };
+  }
+  if (note.link_state === "linked") {
+    return { label: "linked", status: "done" as AgentStatus };
+  }
+  if (note.link_state === "unresolved") {
+    return { label: "unresolved", status: "working" as AgentStatus };
+  }
+  return { label: "detached", status: "unknown" as AgentStatus };
+}
+
+function noteSubtitle(entry: ScopedNoteEntry, showBridge: boolean) {
+  const context = entry.note.attachment?.context;
+  const paneLabel =
+    entry.pane ? paneTitle(entry.pane) : context?.pane_label || context?.pane_title;
+  const cwd = basename(context?.foreground_cwd || context?.cwd);
+  return [
+    showBridge ? entry.bridgeLabel : null,
+    entry.workspace?.label,
+    paneLabel,
+    cwd,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 export function nextVisibleAgentPaneEntry(
@@ -2954,6 +3565,9 @@ function Switcher({
   capabilityState,
   scope,
   sidebarView,
+  notesStates,
+  visibleNotes,
+  selectedNote,
   agentSort,
   agentGroup,
   activeSpace,
@@ -2962,6 +3576,8 @@ function Switcher({
   onHostScope,
   onScope,
   onSidebarView,
+  onSelectNote,
+  onCreateNote,
   onAgentSort,
   onAgentGroup,
   onSelectBridge,
@@ -2988,6 +3604,9 @@ function Switcher({
   capabilityState: "idle" | "probing" | "ready" | "error";
   scope: Scope;
   sidebarView: SidebarView;
+  notesStates: Record<string, BridgeNotesState>;
+  visibleNotes: ScopedNoteEntry[];
+  selectedNote: ScopedNoteEntry | null;
   agentSort: AgentSort;
   agentGroup: AgentGroup;
   activeSpace: WorkspaceInfo | null;
@@ -2996,6 +3615,8 @@ function Switcher({
   onHostScope: (scope: HostScope) => void;
   onScope: (scope: Scope) => void;
   onSidebarView: (view: SidebarView) => void;
+  onSelectNote: (bridgeId: BridgeId, noteId: string) => void;
+  onCreateNote: () => void;
   onAgentSort: (sort: AgentSort) => void;
   onAgentGroup: (group: AgentGroup) => void;
   onSelectBridge: (bridgeId: BridgeId) => void;
@@ -3061,10 +3682,20 @@ function Switcher({
           (view) => !view.snapshot && (!view.runtime.canConnect || view.loadState === "error"),
         )
       : [];
+  const notesSupported = hostBridgeViews.some((view) => supportsNotes(view.runtime.capabilities));
+  const notesLoading = hostBridgeViews.some(
+    (view) => notesStates[view.runtime.id]?.loadState === "loading",
+  );
+  const notesError = hostBridgeViews
+    .map((view) => notesStates[view.runtime.id]?.error)
+    .find((message): message is string => Boolean(message));
+  const hasNotesList =
+    sidebarView === "notes" && (notesSupported || visibleNotes.length > 0 || notesLoading || notesError);
   const hasListSnapshot =
-    hostScope === "all"
+    hasNotesList ||
+    (hostScope === "all"
       ? hostBridgeViews.some((view) => view.snapshot) || disconnectedBridgeViews.length > 0
-      : Boolean(snapshot);
+      : Boolean(snapshot));
 
   const agentPanes = useMemo<ScopedAgentPane[]>(() => {
     return buildVisibleAgentPaneEntries(
@@ -3093,14 +3724,16 @@ function Switcher({
   );
   const showGroupedHostContext = hostScope === "all";
   const showGroupControl =
-    sidebarView === "agents" || hostScope === "all" || scope === "all" || agentGroup !== "none";
-  const showOptionsControl = sidebarView === "agents" || showGroupControl;
+    sidebarView !== "notes" &&
+    (sidebarView === "agents" || hostScope === "all" || scope === "all" || agentGroup !== "none");
+  const showOptionsControl = sidebarView !== "notes" && (sidebarView === "agents" || showGroupControl);
   const canCreateTabFromHeader = Boolean(
     sidebarView === "tabs" &&
       scope === "space" &&
       activeSpace &&
       selectedBridgeId,
   );
+  const canCreateNoteFromHeader = sidebarView === "notes" && notesSupported;
 
   useEffect(() => {
     if (optionsMenu && !showOptionsControl) {
@@ -3267,6 +3900,37 @@ function Switcher({
       );
     });
   };
+  const renderNoteRows = () => {
+    if (!notesSupported) {
+      return (
+        <div className="empty">
+          <strong>Notes unavailable</strong>
+          <span>Update the selected bridge to use pane notes.</span>
+        </div>
+      );
+    }
+    if (visibleNotes.length === 0) {
+      return (
+        <div className="empty">
+          <strong>{notesLoading ? "Loading notes" : "No notes"}</strong>
+          <span>{notesError || (notesLoading ? "" : "Create a note from the terminal header.")}</span>
+        </div>
+      );
+    }
+    return visibleNotes.map((entry, index) => (
+      <NoteRow
+        key={`${entry.bridgeId}:${entry.note.note_id}`}
+        entry={entry}
+        index={index}
+        active={
+          selectedNote?.bridgeId === entry.bridgeId &&
+          selectedNote.note.note_id === entry.note.note_id
+        }
+        showBridge={hostScope === "all"}
+        onSelect={() => onSelectNote(entry.bridgeId, entry.note.note_id)}
+      />
+    ));
+  };
 
   return (
     <>
@@ -3356,6 +4020,14 @@ function Switcher({
           onClick={() => onSidebarView("tabs")}
         >
           Tabs
+        </button>
+        <button
+          type="button"
+          data-on={sidebarView === "notes"}
+          aria-pressed={sidebarView === "notes"}
+          onClick={() => onSidebarView("notes")}
+        >
+          Notes
         </button>
       </div>
       <div className="sidebar-scope" role="group" aria-label="Sidebar scope">
@@ -3498,7 +4170,8 @@ function Switcher({
             ) : null}
 
             {/* PANES ----------------------------------------------------- */}
-            {(hostScope === "all" ? hasListSnapshot : snapshot && snapshot.workspaces.length > 0) ? (
+            {sidebarView === "notes" ||
+            (hostScope === "all" ? hasListSnapshot : snapshot && snapshot.workspaces.length > 0) ? (
             <section className="sec">
               <div className="sec-head">
                 <span className="sec-label">
@@ -3506,6 +4179,10 @@ function Switcher({
                     ? scope === "all"
                       ? "all agents"
                       : "space agents"
+                    : sidebarView === "notes"
+                      ? scope === "all"
+                        ? "all notes"
+                        : "space notes"
                     : scope === "all"
                       ? "all tabs"
                       : hostScope === "all"
@@ -3528,6 +4205,17 @@ function Switcher({
                     <Plus size={14} />
                   </button>
                 ) : null}
+                {canCreateNoteFromHeader ? (
+                  <button
+                    className="sec-add"
+                    type="button"
+                    aria-label="New note"
+                    title="New note"
+                    onClick={onCreateNote}
+                  >
+                    <Plus size={14} />
+                  </button>
+                ) : null}
                 {showOptionsControl ? (
                   <button
                     className="sec-add"
@@ -3546,7 +4234,9 @@ function Switcher({
                 ) : null}
               </div>
 
-              {sidebarView === "agents" ? (
+              {sidebarView === "notes" ? (
+                renderNoteRows()
+              ) : sidebarView === "agents" ? (
                 agentPanes.length === 0 && disconnectedBridgeViews.length === 0 ? (
                   <div className="empty">
                     <strong>No detected agents</strong>
@@ -3731,6 +4421,405 @@ function SidebarOptionsMenu({
   );
 }
 
+function NotesSurface({
+  compact,
+  mobileScreen,
+  selectedEntry,
+  selectedPane,
+  selectedPaneNotes,
+  visibleNotes,
+  notesLoadState,
+  notesError,
+  includeArchived,
+  includeDeleted,
+  currentBridgeSupportsNotes,
+  canAttachToCurrentPane,
+  onClose,
+  onMobileBackToList,
+  onSelectNote,
+  onCreatePaneNote,
+  onCreateDetachedNote,
+  onIncludeArchived,
+  onIncludeDeleted,
+  onSaveNote,
+  onAttachToCurrentPane,
+  onDetach,
+  onArchive,
+  onRestore,
+  onDelete,
+  onViewPane,
+}: {
+  compact: boolean;
+  mobileScreen: MobileNotesScreen;
+  selectedEntry: ScopedNoteEntry | null;
+  selectedPane: PaneInfo | null;
+  selectedPaneNotes: ScopedNoteEntry[];
+  visibleNotes: ScopedNoteEntry[];
+  notesLoadState: LoadState;
+  notesError: string | null;
+  includeArchived: boolean;
+  includeDeleted: boolean;
+  currentBridgeSupportsNotes: boolean;
+  canAttachToCurrentPane: boolean;
+  onClose: () => void;
+  onMobileBackToList: () => void;
+  onSelectNote: (bridgeId: BridgeId, noteId: string) => void;
+  onCreatePaneNote: () => void;
+  onCreateDetachedNote: () => void;
+  onIncludeArchived: (include: boolean) => void;
+  onIncludeDeleted: (include: boolean) => void;
+  onSaveNote: (entry: ScopedNoteEntry, title: string, body: string) => Promise<void>;
+  onAttachToCurrentPane: (entry: ScopedNoteEntry) => void;
+  onDetach: (entry: ScopedNoteEntry) => void;
+  onArchive: (entry: ScopedNoteEntry) => void;
+  onRestore: (entry: ScopedNoteEntry) => void;
+  onDelete: (entry: ScopedNoteEntry) => void;
+  onViewPane: (entry: ScopedNoteEntry) => void;
+}) {
+  return (
+    <aside
+      className="notes-surface"
+      data-compact={compact ? "true" : "false"}
+      data-mobile-screen={mobileScreen}
+      role="dialog"
+      aria-label="Notes"
+    >
+      <header className="notes-head">
+        {compact && mobileScreen === "editor" ? (
+          <button
+            className="icon-btn"
+            type="button"
+            aria-label="Back to notes"
+            title="Back"
+            onClick={onMobileBackToList}
+          >
+            <ChevronLeft size={20} />
+          </button>
+        ) : null}
+        <div>
+          <span className="notes-title">Notes</span>
+          <span className="notes-sub mono">
+            {selectedPane ? paneTitle(selectedPane) : "All notes"}
+          </span>
+        </div>
+        <button className="icon-btn" type="button" aria-label="Close notes" title="Close" onClick={onClose}>
+          <X size={18} />
+        </button>
+      </header>
+      <div className="notes-shell">
+        <div className="notes-list-pane">
+          <section className="notes-section">
+            <div className="notes-section-head">
+              <span>Pane</span>
+              <button
+                className="icon-btn"
+                type="button"
+                aria-label="New pane note"
+                title="New pane note"
+                disabled={!selectedPane || !currentBridgeSupportsNotes}
+                onClick={onCreatePaneNote}
+              >
+                <Plus size={15} />
+              </button>
+            </div>
+            {selectedPaneNotes.length === 0 ? (
+              <div className="notes-empty">No notes attached to this pane</div>
+            ) : (
+              selectedPaneNotes.map((entry) => (
+                <NotesListItem
+                  key={`${entry.bridgeId}:${entry.note.note_id}`}
+                  entry={entry}
+                  active={
+                    selectedEntry?.bridgeId === entry.bridgeId &&
+                    selectedEntry.note.note_id === entry.note.note_id
+                  }
+                  onSelect={() => onSelectNote(entry.bridgeId, entry.note.note_id)}
+                />
+              ))
+            )}
+          </section>
+          <section className="notes-section">
+            <div className="notes-section-head">
+              <span>All</span>
+              <label className="notes-filter">
+                <input
+                  type="checkbox"
+                  checked={includeArchived}
+                  onChange={(event) => onIncludeArchived(event.currentTarget.checked)}
+                />
+                Archived
+              </label>
+              <label className="notes-filter">
+                <input
+                  type="checkbox"
+                  checked={includeDeleted}
+                  onChange={(event) => onIncludeDeleted(event.currentTarget.checked)}
+                />
+                Deleted
+              </label>
+              <button
+                className="icon-btn"
+                type="button"
+                aria-label="New detached note"
+                title="New detached note"
+                disabled={!currentBridgeSupportsNotes}
+                onClick={onCreateDetachedNote}
+              >
+                <Plus size={15} />
+              </button>
+            </div>
+            {notesLoadState === "loading" && visibleNotes.length === 0 ? (
+              <div className="notes-empty">Loading notes</div>
+            ) : notesError && visibleNotes.length === 0 ? (
+              <div className="notes-empty">{notesError}</div>
+            ) : visibleNotes.length === 0 ? (
+              <div className="notes-empty">No notes yet</div>
+            ) : (
+              visibleNotes.map((entry) => (
+                <NotesListItem
+                  key={`${entry.bridgeId}:${entry.note.note_id}`}
+                  entry={entry}
+                  active={
+                    selectedEntry?.bridgeId === entry.bridgeId &&
+                    selectedEntry.note.note_id === entry.note.note_id
+                  }
+                  onSelect={() => onSelectNote(entry.bridgeId, entry.note.note_id)}
+                />
+              ))
+            )}
+          </section>
+        </div>
+        <NoteEditor
+          entry={selectedEntry}
+          canAttachToCurrentPane={canAttachToCurrentPane}
+          onSave={onSaveNote}
+          onAttachToCurrentPane={onAttachToCurrentPane}
+          onDetach={onDetach}
+          onArchive={onArchive}
+          onRestore={onRestore}
+          onDelete={onDelete}
+          onViewPane={onViewPane}
+        />
+      </div>
+    </aside>
+  );
+}
+
+function NotesListItem({
+  entry,
+  active,
+  onSelect,
+}: {
+  entry: ScopedNoteEntry;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  const state = noteStateLabel(entry.note);
+  return (
+    <button className="notes-list-item" type="button" data-active={active} onClick={onSelect}>
+      <span
+        className="bridge-chip-dot"
+        style={{ "--bridge-color": entry.bridgeColor } as CSSProperties}
+        aria-hidden="true"
+      />
+      <span className="notes-list-item-body">
+        <span className="notes-list-item-title">{entry.note.title || "Untitled note"}</span>
+        <span className="notes-list-item-sub mono">{noteSubtitle(entry, true)}</span>
+      </span>
+      <span className="notes-list-item-state">{state.label}</span>
+    </button>
+  );
+}
+
+function NoteEditor({
+  entry,
+  canAttachToCurrentPane,
+  onSave,
+  onAttachToCurrentPane,
+  onDetach,
+  onArchive,
+  onRestore,
+  onDelete,
+  onViewPane,
+}: {
+  entry: ScopedNoteEntry | null;
+  canAttachToCurrentPane: boolean;
+  onSave: (entry: ScopedNoteEntry, title: string, body: string) => Promise<void>;
+  onAttachToCurrentPane: (entry: ScopedNoteEntry) => void;
+  onDetach: (entry: ScopedNoteEntry) => void;
+  onArchive: (entry: ScopedNoteEntry) => void;
+  onRestore: (entry: ScopedNoteEntry) => void;
+  onDelete: (entry: ScopedNoteEntry) => void;
+  onViewPane: (entry: ScopedNoteEntry) => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [dirty, setDirty] = useState(false);
+  const [saveState, setSaveState] = useState<"idle" | "pending" | "saving" | "saved" | "error">("idle");
+  const loadedNoteIdentityRef = useRef("");
+  const saveBlockedRef = useRef(false);
+  const noteIdentity = entry ? `${entry.bridgeId}:${entry.note.note_id}` : "";
+  const noteKey = entry ? `${entry.bridgeId}:${entry.note.note_id}:${entry.note.revision}` : "";
+
+  useEffect(() => {
+    if (!entry) {
+      loadedNoteIdentityRef.current = "";
+      setTitle("");
+      setBody("");
+      setDirty(false);
+      setSaveState("idle");
+      saveBlockedRef.current = false;
+      return;
+    }
+    const noteChanged = loadedNoteIdentityRef.current !== noteIdentity;
+    if (!noteChanged && dirty && title === entry.note.title && body === entry.note.body) {
+      setDirty(false);
+      setSaveState("saved");
+      saveBlockedRef.current = false;
+      return;
+    }
+    if (noteChanged || !dirty) {
+      loadedNoteIdentityRef.current = noteIdentity;
+      setTitle(entry.note.title);
+      setBody(entry.note.body);
+      setDirty(false);
+      setSaveState("idle");
+      saveBlockedRef.current = false;
+    }
+  }, [body, dirty, entry, noteIdentity, noteKey, title]);
+
+  useEffect(() => {
+    if (!entry || !dirty) {
+      return;
+    }
+    if (title === entry.note.title && body === entry.note.body) {
+      return;
+    }
+    if (saveBlockedRef.current) {
+      return;
+    }
+    setSaveState("pending");
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setSaveState("saving");
+      void onSave(entry, title, body)
+        .then(() => {
+          if (!cancelled) {
+            setSaveState("saved");
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            saveBlockedRef.current = true;
+            setSaveState("error");
+          }
+        });
+    }, 700);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [body, dirty, entry, onSave, title]);
+
+  if (!entry) {
+    return (
+      <div className="note-editor note-editor-empty">
+        <StickyNote size={24} />
+        <span>Select or create a note</span>
+      </div>
+    );
+  }
+
+  const note = entry.note;
+  const deleted = Boolean(note.deleted_at);
+  const archived = Boolean(note.archived_at);
+  return (
+    <div className="note-editor">
+      <div className="note-editor-toolbar">
+        <span className="note-editor-status mono">
+          {saveState === "pending"
+            ? "pending"
+            : saveState === "saving"
+              ? "saving"
+              : saveState === "saved"
+                ? "saved"
+                : saveState === "error"
+                  ? "save failed"
+                : noteStateLabel(note).label}
+        </span>
+        {note.link_state === "linked" ? (
+          <button className="icon-btn" type="button" aria-label="View pane" title="View pane" onClick={() => onViewPane(entry)}>
+            <Link2 size={16} />
+          </button>
+        ) : null}
+        {note.attachment ? (
+          <button className="icon-btn" type="button" aria-label="Detach note" title="Detach" onClick={() => onDetach(entry)}>
+            <Unlink size={16} />
+          </button>
+        ) : null}
+        <button
+          className="icon-btn"
+          type="button"
+          aria-label="Attach to current pane"
+          title="Attach to current pane"
+          disabled={!canAttachToCurrentPane}
+          onClick={() => onAttachToCurrentPane(entry)}
+        >
+          <Link2 size={16} />
+        </button>
+        {archived || deleted ? (
+          <button className="icon-btn" type="button" aria-label="Restore note" title="Restore" onClick={() => onRestore(entry)}>
+            <RotateCcw size={16} />
+          </button>
+        ) : (
+          <button className="icon-btn" type="button" aria-label="Archive note" title="Archive" onClick={() => onArchive(entry)}>
+            <Archive size={16} />
+          </button>
+        )}
+        {!deleted ? (
+          <button
+            className="icon-btn danger"
+            type="button"
+            aria-label="Delete note"
+            title="Delete"
+            onClick={() => {
+              if (window.confirm("Delete this note?")) {
+                onDelete(entry);
+              }
+            }}
+          >
+            <Trash2 size={16} />
+          </button>
+        ) : null}
+      </div>
+      <input
+        className="note-title-input"
+        value={title}
+        onChange={(event) => {
+          setTitle(event.currentTarget.value);
+          setDirty(true);
+          saveBlockedRef.current = false;
+          setSaveState("pending");
+        }}
+        placeholder="Untitled note"
+        disabled={deleted}
+      />
+      <textarea
+        className="note-body-input"
+        value={body}
+        onChange={(event) => {
+          setBody(event.currentTarget.value);
+          setDirty(true);
+          saveBlockedRef.current = false;
+          setSaveState("pending");
+        }}
+        placeholder="Write a note"
+        disabled={deleted}
+      />
+    </div>
+  );
+}
+
 function GroupHeader({
   label,
   bridgeColor,
@@ -3900,6 +4989,45 @@ function AgentRow({
           {statusLabel(pane.agent_status)}
         </span>
       ) : null}
+    </button>
+  );
+}
+
+function NoteRow({
+  entry,
+  active,
+  showBridge,
+  index,
+  onSelect,
+}: {
+  entry: ScopedNoteEntry;
+  active: boolean;
+  showBridge: boolean;
+  index: number;
+  onSelect: () => void;
+}) {
+  const state = noteStateLabel(entry.note);
+  return (
+    <button
+      className="pane-row note-row"
+      type="button"
+      data-active={active}
+      data-link={entry.note.link_state}
+      style={{ animationDelay: `${Math.min(index, 14) * 22}ms` }}
+      onClick={onSelect}
+    >
+      <span
+        className="bridge-chip-dot"
+        style={{ "--bridge-color": entry.bridgeColor } as CSSProperties}
+        aria-hidden="true"
+      />
+      <span className="pane-body">
+        <span className="pane-name">{entry.note.title || "Untitled note"}</span>
+        <span className="pane-meta mono">{noteSubtitle(entry, showBridge)}</span>
+      </span>
+      <span className="pane-word" data-status={state.status}>
+        {state.label}
+      </span>
     </button>
   );
 }
@@ -4293,6 +5421,18 @@ function selectionPaneId(event: MessageEvent) {
       : null;
   } catch {
     return null;
+  }
+}
+
+function isNotesChangedEvent(event: MessageEvent) {
+  if (typeof event.data !== "string") {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(event.data) as { type?: unknown };
+    return parsed.type === "herdr_web.notes_changed";
+  } catch {
+    return false;
   }
 }
 

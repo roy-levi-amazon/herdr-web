@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{DefaultBodyLimit, Query, State};
+use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
     ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS, HOST, ORIGIN, VARY,
@@ -43,6 +43,11 @@ use herdr_compat::protocol::{
     PROTOCOL_VERSION,
 };
 
+use crate::notes::{
+    AttachNoteRequest, CreateNoteRequest, NoteResponse, NotesError, NotesListQuery,
+    NotesListResponse, NotesManager, RevisionRequest, UpdateNoteRequest,
+};
+
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8787;
 const DEFAULT_COLS: u16 = 80;
@@ -50,6 +55,7 @@ const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_STATIC_DIR: &str = "web/dist";
 const MIN_TERMINAL_ATTACH_PROTOCOL: u32 = 13;
 const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
+const MAX_NOTES_REQUEST_BYTES: usize = 512 * 1024;
 const MAX_TERMINAL_INPUT_CHUNK_BYTES: usize = 768 * 1024;
 const DEFAULT_TERMINAL_OUTPUT_COALESCE_MS: u64 = 16;
 const MAX_TERMINAL_OUTPUT_COALESCE_MS: u64 = 256;
@@ -80,6 +86,7 @@ struct BridgeState {
     request_policy: RequestPolicy,
     terminal_sessions: Arc<Mutex<HashMap<String, SharedTerminalSession>>>,
     selected_pane_id: Arc<Mutex<Option<String>>>,
+    notes: Arc<NotesManager>,
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
     activity_tx: tokio::sync::broadcast::Sender<ActivityMessage>,
     upload_dir: PathBuf,
@@ -120,6 +127,12 @@ struct SnapshotTabInfo {
 #[derive(Debug, Serialize)]
 struct Capabilities {
     commands: &'static [&'static str],
+    notes: NotesCapability,
+}
+
+#[derive(Debug, Serialize)]
+struct NotesCapability {
+    version: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -507,6 +520,7 @@ enum BridgeError {
     Api(ApiClientError),
     Io(io::Error),
     BadRequest(String),
+    Conflict(String),
     Forbidden(String),
     Protocol(String),
 }
@@ -526,6 +540,7 @@ impl fmt::Display for BridgeError {
             Self::Api(err) => write!(f, "{err}"),
             Self::Io(err) => write!(f, "{err}"),
             Self::BadRequest(message) => write!(f, "{message}"),
+            Self::Conflict(message) => write!(f, "{message}"),
             Self::Forbidden(message) => write!(f, "{message}"),
             Self::Protocol(message) => write!(f, "{message}"),
         }
@@ -536,6 +551,7 @@ impl IntoResponse for BridgeError {
     fn into_response(self) -> Response {
         let status = match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Api(_) | Self::Io(_) | Self::Protocol(_) => StatusCode::BAD_GATEWAY,
         };
@@ -555,6 +571,17 @@ impl From<ApiClientError> for BridgeError {
 impl From<io::Error> for BridgeError {
     fn from(err: io::Error) -> Self {
         Self::Io(err)
+    }
+}
+
+impl From<NotesError> for BridgeError {
+    fn from(err: NotesError) -> Self {
+        match err {
+            NotesError::BadRequest(message) => Self::BadRequest(message),
+            NotesError::Conflict(message) => Self::Conflict(message),
+            NotesError::Io(err) => Self::Io(err),
+            NotesError::Store(message) => Self::Protocol(message),
+        }
     }
 }
 
@@ -750,6 +777,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         );
     }
     ensure_upload_dir(&options.upload_dir)?;
+    let notes = Arc::new(NotesManager::new()?);
     let request_policy = RequestPolicy {
         bind_host: options.host.clone(),
         bind_port: options.port,
@@ -769,12 +797,46 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         request_policy: request_policy.clone(),
         terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
         selected_pane_id: Arc::new(Mutex::new(None)),
+        notes,
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
         activity_tx: tokio::sync::broadcast::channel(512).0,
         upload_dir: options.upload_dir.clone(),
     };
     spawn_agent_activity_watcher(state.clone());
+    let notes_routes = Router::new()
+        .route(
+            "/api/notes",
+            get(notes_list_handler)
+                .post(notes_create_handler)
+                .options(preflight_handler),
+        )
+        .route(
+            "/api/notes/{note_id}/update",
+            post(notes_update_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/notes/{note_id}/attach",
+            post(notes_attach_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/notes/{note_id}/detach",
+            post(notes_detach_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/notes/{note_id}/archive",
+            post(notes_archive_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/notes/{note_id}/restore",
+            post(notes_restore_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/notes/{note_id}/delete",
+            post(notes_delete_handler).options(preflight_handler),
+        )
+        .layer(DefaultBodyLimit::max(MAX_NOTES_REQUEST_BYTES));
     let app = Router::new()
+        .merge(notes_routes)
         .route(
             "/api/snapshot",
             get(snapshot_handler).options(preflight_handler),
@@ -1489,6 +1551,18 @@ async fn command_handler(
     let response = tokio::task::spawn_blocking(move || api.request(request))
         .await
         .map_err(|err| BridgeError::Protocol(err.to_string()))??;
+    if let ResponseResult::PaneMove { move_result } = &response.result {
+        if move_result.changed {
+            match state
+                .notes
+                .update_for_pane_move(&move_result.previous_pane_id, &move_result.pane)
+            {
+                Ok(true) => broadcast_notes_changed(&state, None, None),
+                Ok(false) => {}
+                Err(err) => warn!(error = %err, "failed to update note attachment after pane move"),
+            }
+        }
+    }
     let value = serde_json::to_value(response.result)
         .map_err(|err| BridgeError::Protocol(err.to_string()))?;
     if should_prune_terminal_sessions {
@@ -1720,6 +1794,11 @@ async fn snapshot_handler(
         }
     };
     let panes = current_panes(&state.api)?;
+    match state.notes.observe_panes(&panes) {
+        Ok(true) => broadcast_notes_changed(&state, None, None),
+        Ok(false) => {}
+        Err(err) => warn!(error = %err, "failed to update pane note observations"),
+    }
     let layouts = collect_tab_layouts(&state.api, &tabs, &panes);
     let selected_pane_id = shared_selected_pane(&state, &panes)?;
     let workspaces = workspaces
@@ -1765,7 +1844,121 @@ async fn capabilities_handler(
     ensure_allowed_request(&headers, &state.request_policy)?;
     Ok(Json(Capabilities {
         commands: ALLOWED_COMMANDS,
+        notes: NotesCapability { version: 1 },
     }))
+}
+
+async fn notes_list_handler(
+    State(state): State<BridgeState>,
+    Query(query): Query<NotesListQuery>,
+    headers: HeaderMap,
+) -> Result<Json<NotesListResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let panes = current_panes(&state.api)?;
+    Ok(Json(state.notes.list(query, &panes)?))
+}
+
+async fn notes_create_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+    Json(body): Json<CreateNoteRequest>,
+) -> Result<Json<NoteResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let panes = current_panes(&state.api)?;
+    let note = state.notes.create(body, &panes)?;
+    broadcast_notes_changed(&state, Some(&note.note.note_id), Some(note.note.revision));
+    Ok(Json(note))
+}
+
+async fn notes_update_handler(
+    State(state): State<BridgeState>,
+    AxumPath(note_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateNoteRequest>,
+) -> Result<Json<NoteResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let panes = current_panes(&state.api)?;
+    let note = state.notes.update(&note_id, body, &panes)?;
+    broadcast_notes_changed(&state, Some(&note.note.note_id), Some(note.note.revision));
+    Ok(Json(note))
+}
+
+async fn notes_attach_handler(
+    State(state): State<BridgeState>,
+    AxumPath(note_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<AttachNoteRequest>,
+) -> Result<Json<NoteResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let panes = current_panes(&state.api)?;
+    let note = state.notes.attach(&note_id, body, &panes)?;
+    broadcast_notes_changed(&state, Some(&note.note.note_id), Some(note.note.revision));
+    Ok(Json(note))
+}
+
+async fn notes_detach_handler(
+    State(state): State<BridgeState>,
+    AxumPath(note_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<RevisionRequest>,
+) -> Result<Json<NoteResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let panes = current_panes(&state.api)?;
+    let note = state.notes.detach(&note_id, body, &panes)?;
+    broadcast_notes_changed(&state, Some(&note.note.note_id), Some(note.note.revision));
+    Ok(Json(note))
+}
+
+async fn notes_archive_handler(
+    State(state): State<BridgeState>,
+    AxumPath(note_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<RevisionRequest>,
+) -> Result<Json<NoteResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let panes = current_panes(&state.api)?;
+    let note = state.notes.archive(&note_id, body, &panes)?;
+    broadcast_notes_changed(&state, Some(&note.note.note_id), Some(note.note.revision));
+    Ok(Json(note))
+}
+
+async fn notes_restore_handler(
+    State(state): State<BridgeState>,
+    AxumPath(note_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<RevisionRequest>,
+) -> Result<Json<NoteResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let panes = current_panes(&state.api)?;
+    let note = state.notes.restore(&note_id, body, &panes)?;
+    broadcast_notes_changed(&state, Some(&note.note.note_id), Some(note.note.revision));
+    Ok(Json(note))
+}
+
+async fn notes_delete_handler(
+    State(state): State<BridgeState>,
+    AxumPath(note_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<RevisionRequest>,
+) -> Result<Json<NoteResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let panes = current_panes(&state.api)?;
+    let note = state.notes.delete(&note_id, body, &panes)?;
+    broadcast_notes_changed(&state, Some(&note.note.note_id), Some(note.note.revision));
+    Ok(Json(note))
+}
+
+fn broadcast_notes_changed(state: &BridgeState, note_id: Option<&str>, revision: Option<u64>) {
+    let mut payload = serde_json::json!({
+        "type": "herdr_web.notes_changed",
+    });
+    if let Some(note_id) = note_id {
+        payload["note_id"] = serde_json::json!(note_id);
+    }
+    if let Some(revision) = revision {
+        payload["revision"] = serde_json::json!(revision);
+    }
+    let _ = state.ui_event_tx.send(payload.to_string());
 }
 
 fn current_panes(api: &ApiClient) -> Result<Vec<PaneInfo>, BridgeError> {

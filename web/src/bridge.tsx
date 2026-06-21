@@ -36,6 +36,9 @@ export type BridgeMode = "same-origin" | "configured";
 
 export type BridgeCapabilities = {
   commands: string[];
+  notes?: {
+    version: 1;
+  };
   bridge_version?: string;
   web_compat?: number;
   min_android_app_compat?: number;
@@ -1019,6 +1022,10 @@ export function parseCapabilities(value: unknown): BridgeCapabilities {
     web_compat: typeof value.web_compat === "number" ? value.web_compat : undefined,
     min_android_app_compat:
       typeof value.min_android_app_compat === "number" ? value.min_android_app_compat : undefined,
+    notes:
+      isRecord(value.notes) && value.notes.version === 1
+        ? { version: 1 }
+        : undefined,
   };
 }
 
