@@ -1,11 +1,12 @@
 /**
  * @vitest-environment jsdom
  */
-import { act } from "react";
+import { act, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { NoteEditor, noteDraftStorageKey } from "./App";
-import type { ScopedNoteEntry } from "./App";
+import { BridgeConnectionController, NoteEditor, noteDraftStorageKey } from "./App";
+import type { BridgeConnectionRef, BridgeConnectionState, ScopedNoteEntry } from "./App";
+import type { BridgeRuntime } from "./bridge";
 
 type Deferred<T> = {
   promise: Promise<T>;
@@ -17,6 +18,7 @@ const roots: Root[] = [];
 
 beforeEach(() => {
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  FakeWebSocket.instances = [];
   vi.useFakeTimers();
 });
 
@@ -29,6 +31,41 @@ afterEach(async () => {
   document.body.innerHTML = "";
   localStorage.clear();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe("BridgeConnectionController sockets", () => {
+  it("does not recreate event sockets when only the notes callback identity changes", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(emptySnapshot()), { status: 200 })),
+    );
+    const connectionRefs = { current: {} } as MutableRefObject<Record<string, BridgeConnectionRef>>;
+    const setConnectionStates = vi.fn() as unknown as Dispatch<
+      SetStateAction<Record<string, BridgeConnectionState>>
+    >;
+    const runtime = bridgeRuntime("bridge-a");
+    const { render } = createConnectionHarness({
+      runtime,
+      connectionRefs,
+      setConnectionStates,
+    });
+
+    await render(vi.fn());
+
+    expect(FakeWebSocket.instances.map((socket) => socket.url)).toEqual([
+      "ws://bridge-a/ws/events",
+      "ws://bridge-a/ws/activity",
+      "ws://bridge-a/ws/ui-events",
+    ]);
+
+    await render(vi.fn());
+
+    expect(FakeWebSocket.instances).toHaveLength(3);
+    expect(FakeWebSocket.instances.filter((socket) => socket.closed)).toHaveLength(0);
+  });
 });
 
 describe("NoteEditor autosave conflicts", () => {
@@ -229,4 +266,82 @@ function createDeferred<T>(): Deferred<T> {
     reject = promiseReject;
   });
   return { promise, resolve, reject };
+}
+
+function createConnectionHarness({
+  runtime,
+  connectionRefs,
+  setConnectionStates,
+}: {
+  runtime: BridgeRuntime;
+  connectionRefs: MutableRefObject<Record<string, BridgeConnectionRef>>;
+  setConnectionStates: Dispatch<SetStateAction<Record<string, BridgeConnectionState>>>;
+}) {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const onPaneSelection = vi.fn();
+  roots.push(root);
+
+  const render = async (onNotesChanged: (bridgeId: string) => void) => {
+    await act(async () => {
+      root.render(
+        <BridgeConnectionController
+          runtime={runtime}
+          connectionRefs={connectionRefs}
+          setConnectionStates={setConnectionStates}
+          onPaneSelection={onPaneSelection}
+          onNotesChanged={onNotesChanged}
+        />,
+      );
+      await Promise.resolve();
+    });
+  };
+
+  return { render };
+}
+
+function bridgeRuntime(bridgeId: string): BridgeRuntime {
+  return {
+    id: bridgeId,
+    mode: "configured",
+    label: bridgeId,
+    color: "#89b4fa",
+    backend: null,
+    connectionKey: bridgeId,
+    resumeToken: 0,
+    capabilities: { commands: [], notes: { version: 1 } },
+    capabilityState: "ready",
+    capabilityError: null,
+    canConnect: true,
+    httpUrl: (path) => `http://${bridgeId}${path}`,
+    wsUrl: (path) => `ws://${bridgeId}${path}`,
+  };
+}
+
+function emptySnapshot() {
+  return {
+    workspaces: [],
+    tabs: [],
+    panes: [],
+    layouts: [],
+  };
+}
+
+class FakeWebSocket extends EventTarget {
+  static instances: FakeWebSocket[] = [];
+
+  readonly url: string;
+  closed = false;
+
+  constructor(url: string | URL) {
+    super();
+    this.url = String(url);
+    FakeWebSocket.instances.push(this);
+  }
+
+  close() {
+    this.closed = true;
+    this.dispatchEvent(new CloseEvent("close"));
+  }
 }

@@ -148,7 +148,7 @@ export type BridgeConnectionView = {
   snapshot: Snapshot | null;
   loadState: LoadState;
 };
-type BridgeConnectionState = {
+export type BridgeConnectionState = {
   connectionKey: string;
   snapshot: Snapshot | null;
   loadState: LoadState;
@@ -159,7 +159,7 @@ type BridgeNotesState = {
   loadState: LoadState;
   error: string | null;
 };
-type BridgeConnectionRef = {
+export type BridgeConnectionRef = {
   connectionKey: string;
   snapshot: Snapshot | null;
   activityGeneration: number;
@@ -2750,7 +2750,7 @@ export function shouldCollapseHostScope(
   return storeLoaded && hostScope === "all" && enabledBridgeCount <= 1;
 }
 
-function BridgeConnectionController({
+export function BridgeConnectionController({
   runtime,
   connectionRefs,
   setConnectionStates,
@@ -2765,12 +2765,17 @@ function BridgeConnectionController({
 }) {
   const httpUrlRef = useRef(runtime.httpUrl);
   const wsUrlRef = useRef(runtime.wsUrl);
+  const onNotesChangedRef = useRef(onNotesChanged);
   const refreshOffsetRef = useRef(stableBridgeRefreshOffsetMs(runtime.id));
 
   useEffect(() => {
     httpUrlRef.current = runtime.httpUrl;
     wsUrlRef.current = runtime.wsUrl;
   }, [runtime.httpUrl, runtime.wsUrl]);
+
+  useEffect(() => {
+    onNotesChangedRef.current = onNotesChanged;
+  }, [onNotesChanged]);
 
   useEffect(() => {
     let disposed = false;
@@ -2924,7 +2929,7 @@ function BridgeConnectionController({
         return;
       }
       if (isNotesChangedEvent(event)) {
-        onNotesChanged(runtime.id);
+        onNotesChangedRef.current(runtime.id);
         return;
       }
       refresh();
@@ -2944,7 +2949,6 @@ function BridgeConnectionController({
     };
   }, [
     connectionRefs,
-    onNotesChanged,
     onPaneSelection,
     runtime.canConnect,
     runtime.connectionKey,
