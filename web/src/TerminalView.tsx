@@ -12,7 +12,15 @@ import {
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, DragEvent, RefObject } from "react";
 import { ConfirmDialog } from "./overlays";
+import { addNativeResumeHandler } from "./native";
 import { shellQuote } from "./shell";
+import {
+  isNonRetryableTerminalClose,
+  parseTerminalCloseReason,
+  terminalConnectionCopy,
+  terminalConnectionOverlayDelayMs,
+} from "./terminalConnectionStatus";
+import type { TerminalConnectionState } from "./terminalConnectionStatus";
 import { findFirstUrlInSelection, openableHttpUrl } from "./terminalSelection";
 import { GhosttyRenderer } from "./terminalRenderer";
 import type { MobileTerminalTouchEvent, TerminalRenderer, TerminalSize } from "./terminalRenderer";
@@ -25,6 +33,13 @@ import {
 import type { TerminalInputTransport } from "./terminalInputTransport";
 import { DEFAULT_TERMINAL_OUTPUT_COALESCE_MS } from "./terminalOutputCoalescing";
 import { DEFAULT_TERMINAL_FONT_SIZE_PX } from "./terminalPrefs";
+import {
+  TERMINAL_FOREGROUND_FAST_ATTEMPTS,
+  TERMINAL_FOREGROUND_CONNECT_TIMEOUT_MS,
+  TERMINAL_FOREGROUND_SIGNAL_COALESCE_MS,
+  terminalReconnectPolicy,
+} from "./terminalReconnectPolicy";
+import type { TerminalReconnectMode } from "./terminalReconnectPolicy";
 import { DEFAULT_MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_MS } from "./mobileTerminalPrefs";
 import type {
   MobileLongPressBehavior,
@@ -65,7 +80,6 @@ type Props = {
   focusToken?: number;
 };
 
-type ConnectionState = "idle" | "connecting" | "attached" | "closed" | "error";
 type UploadCandidate = {
   blob: Blob;
   name: string | null;
@@ -85,8 +99,24 @@ type MobileSelectionAction = {
   text: string;
   url: string;
 };
+type ReconnectReason =
+  | "initial"
+  | "close"
+  | "error"
+  | "stalled"
+  | "resume"
+  | "visible"
+  | "online"
+  | "resize"
+  | "manual";
+type TerminalRendererReady = {
+  terminalId: string;
+  generation: number;
+  renderer: TerminalRenderer;
+  measure: (mode?: "fit" | "refresh") => TerminalSize | null;
+};
 const MAX_UPLOAD_FILES = 8;
-const TERMINAL_CONNECT_TIMEOUT_MS = 3500;
+const DEBUG_TERMINAL_RECONNECT = false;
 
 export function TerminalView({
   pane,
@@ -111,7 +141,11 @@ export function TerminalView({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const mobileCommandInputRef = useRef<HTMLInputElement | null>(null);
   const rendererRef = useRef<TerminalRenderer | null>(null);
+  const rendererGenerationRef = useRef(0);
+  const rendererReadyRef = useRef<TerminalRendererReady | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const requestReconnectRef = useRef<(reason: ReconnectReason) => void>(() => {});
+  const terminalInputBlockedRef = useRef(false);
   const uploadInputId = useId();
   const sendResizeRef = useRef<(size: TerminalSize) => void>(() => {});
   const inputQueueRef = useRef<string[]>([]);
@@ -124,8 +158,13 @@ export function TerminalView({
   const uploadConflictRef = useRef<UploadConflictState | null>(null);
   const connectionKeyRef = useRef(connectionKey);
   const terminalIdRef = useRef(pane?.terminal_id ?? null);
-  const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
+  const overlayTerminalIdRef = useRef(pane?.terminal_id ?? null);
+  const delayConnectingOverlayRef = useRef(false);
+  const [connectionState, setConnectionState] = useState<TerminalConnectionState>("idle");
   const [closeReason, setCloseReason] = useState<string | null>(null);
+  const [rendererReady, setRendererReady] = useState<TerminalRendererReady | null>(null);
+  const [hasAttachedForTerminal, setHasAttachedForTerminal] = useState(false);
+  const [showConnectionOverlay, setShowConnectionOverlay] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadConflict, setUploadConflict] = useState<UploadConflictState | null>(null);
@@ -283,6 +322,36 @@ export function TerminalView({
     }
   }, []);
 
+  const clearQueuedTerminalInput = useCallback(() => {
+    inputQueueRef.current = [];
+    if (inputFlushTimerRef.current !== null) {
+      window.clearTimeout(inputFlushTimerRef.current);
+      inputFlushTimerRef.current = null;
+    }
+  }, []);
+
+  const flushQueuedTerminalInput = useCallback(() => {
+    if (inputFlushTimerRef.current !== null) {
+      window.clearTimeout(inputFlushTimerRef.current);
+      inputFlushTimerRef.current = null;
+    }
+    const flush = () => {
+      inputFlushTimerRef.current = null;
+      const socket = socketRef.current;
+      if (socket?.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      const next = inputQueueRef.current.shift();
+      if (next !== undefined) {
+        sendTerminalInputFrame(socket, next);
+      }
+      if (inputQueueRef.current.length > 0) {
+        inputFlushTimerRef.current = window.setTimeout(flush, 35);
+      }
+    };
+    flush();
+  }, [sendTerminalInputFrame]);
+
   const flushBatchedTerminalInput = useCallback(() => {
     clearBatchedInputTimer();
     const pending = batchedInputRef.current;
@@ -362,31 +431,51 @@ export function TerminalView({
 
   useEffect(() => {
     const host = hostRef.current;
-    if (!host || !pane) {
+    const terminalId = pane?.terminal_id ?? null;
+    const previousOverlayTerminalId = overlayTerminalIdRef.current;
+    delayConnectingOverlayRef.current = Boolean(
+      terminalId && previousOverlayTerminalId && previousOverlayTerminalId !== terminalId,
+    );
+    overlayTerminalIdRef.current = terminalId;
+    rendererReadyRef.current = null;
+    setRendererReady(null);
+    setHasAttachedForTerminal(false);
+    setShowConnectionOverlay(false);
+    setCloseReason(null);
+    terminalInputBlockedRef.current = false;
+    if (!host || !terminalId) {
       setConnectionState("idle");
+      host?.replaceChildren();
       return;
     }
 
     host.replaceChildren();
     let disposed = false;
-    let socket: WebSocket | null = null;
     let disposeInput: (() => void) | null = null;
     let disposeScroll: (() => void) | null = null;
     let resizeObserver: ResizeObserver | null = null;
-    let reconnectTimer: number | null = null;
-    let connectTimer: number | null = null;
-    let reconnectAttempts = 0;
-    let lastCloseReason: string | null = null;
+    const generation = rendererGenerationRef.current + 1;
+    rendererGenerationRef.current = generation;
     const renderer: TerminalRenderer = new GhosttyRenderer(terminalFontSizePxRef.current);
     rendererRef.current = renderer;
     setConnectionState("connecting");
 
-    const sendResize = (size: TerminalSize) => {
-      if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: "resize", cols: size.cols, rows: size.rows }));
+    const measure = (mode: "fit" | "refresh" = "fit") => measureTerminal(renderer, mode);
+    const publishReady = (mode: "fit" | "refresh" = "fit") => {
+      if (disposed || rendererRef.current !== renderer) {
+        return;
       }
+      const size = measure(mode);
+      if (!size) {
+        return;
+      }
+      if (rendererReadyRef.current?.generation !== generation) {
+        const ready = { terminalId, generation, renderer, measure };
+        rendererReadyRef.current = ready;
+        setRendererReady(ready);
+      }
+      sendResizeRef.current(size);
     };
-    sendResizeRef.current = sendResize;
 
     void renderer
       .mount(host)
@@ -413,6 +502,7 @@ export function TerminalView({
           sendTerminalInputData(data);
         });
         disposeScroll = renderer.onScroll((lines) => {
+          const socket = socketRef.current;
           if (socket?.readyState !== WebSocket.OPEN || lines === 0) {
             return;
           }
@@ -426,9 +516,9 @@ export function TerminalView({
         });
 
         resizeObserver = new ResizeObserver(() => {
-          const size = measureTerminal(renderer);
-          if (size) {
-            sendResize(size);
+          publishReady();
+          if (socketRef.current?.readyState !== WebSocket.OPEN) {
+            requestReconnectRef.current("resize");
           }
         });
         resizeObserver.observe(host);
@@ -437,128 +527,12 @@ export function TerminalView({
         if (fontReady) {
           void fontReady.then(() => {
             if (!disposed) {
-              const size = measureTerminal(renderer, "refresh");
-              if (size) {
-                sendResize(size);
-              }
+              publishReady("refresh");
             }
           });
         }
 
-        const scheduleReconnect = () => {
-          if (disposed || reconnectTimer !== null) {
-            return;
-          }
-          const delay = Math.min(500 * 2 ** reconnectAttempts, 5000);
-          reconnectAttempts += 1;
-          setConnectionState("connecting");
-          reconnectTimer = window.setTimeout(() => {
-            reconnectTimer = null;
-            connectSocket();
-          }, delay);
-        };
-
-        const clearConnectTimer = () => {
-          if (connectTimer !== null) {
-            window.clearTimeout(connectTimer);
-            connectTimer = null;
-          }
-        };
-
-        const retryStalledConnect = (stalledSocket: WebSocket) => {
-          if (
-            disposed ||
-            socket !== stalledSocket ||
-            stalledSocket.readyState !== WebSocket.CONNECTING
-          ) {
-            return;
-          }
-          socket = null;
-          if (socketRef.current === stalledSocket) {
-            socketRef.current = null;
-          }
-          stalledSocket.close();
-          scheduleReconnect();
-        };
-
-        const connectSocket = () => {
-          if (disposed) {
-            return;
-          }
-          clearConnectTimer();
-          const initialSize = measureTerminal(renderer);
-          if (!initialSize) {
-            scheduleReconnect();
-            return;
-          }
-          const nextSocket = new WebSocket(
-            terminalSocketUrl(wsUrl, pane.terminal_id, initialSize, terminalOutputCoalesceMs),
-          );
-          socket = nextSocket;
-          socketRef.current = nextSocket;
-          nextSocket.binaryType = "arraybuffer";
-          connectTimer = window.setTimeout(
-            () => retryStalledConnect(nextSocket),
-            TERMINAL_CONNECT_TIMEOUT_MS,
-          );
-
-          nextSocket.addEventListener("open", () => {
-            if (!disposed && socket === nextSocket) {
-              clearConnectTimer();
-              reconnectAttempts = 0;
-              lastCloseReason = null;
-              setCloseReason(null);
-              setConnectionState("attached");
-              const size = measureTerminal(renderer);
-              if (size) {
-                sendResize(size);
-              }
-              if (autoFocusRef.current) {
-                window.setTimeout(() => renderer.focus(), 0);
-              }
-              flushBatchedTerminalInput();
-            }
-          });
-          nextSocket.addEventListener("message", (event) => {
-            if (typeof event.data === "string") {
-              lastCloseReason = parseCloseReason(event.data) ?? lastCloseReason;
-              return;
-            }
-            if (event.data instanceof ArrayBuffer) {
-              renderer.write(new Uint8Array(event.data));
-              return;
-            }
-            if (event.data instanceof Blob) {
-              void event.data.arrayBuffer().then((buffer) => {
-                if (!disposed && socket === nextSocket) {
-                  renderer.write(new Uint8Array(buffer));
-                }
-              });
-            }
-          });
-          nextSocket.addEventListener("close", () => {
-            if (!disposed && socket === nextSocket) {
-              clearConnectTimer();
-              if (lastCloseReason) {
-                console.warn("terminal websocket closed", lastCloseReason);
-              }
-              if (isNonRetryableAttachClose(lastCloseReason)) {
-                setCloseReason(lastCloseReason);
-                setConnectionState("closed");
-              } else {
-                scheduleReconnect();
-              }
-            }
-          });
-          nextSocket.addEventListener("error", () => {
-            if (!disposed && socket === nextSocket) {
-              clearConnectTimer();
-              setConnectionState("error");
-            }
-          });
-        };
-
-        connectSocket();
+        publishReady();
       })
       .catch((error: unknown) => {
         console.error("failed to mount terminal renderer", error);
@@ -571,42 +545,458 @@ export function TerminalView({
       disposed = true;
       flushBatchedTerminalInput();
       batchedInputRef.current = emptyTerminalInputBatch();
-      inputQueueRef.current = [];
-      if (inputFlushTimerRef.current !== null) {
-        window.clearTimeout(inputFlushTimerRef.current);
-        inputFlushTimerRef.current = null;
-      }
+      clearQueuedTerminalInput();
       disposeInput?.();
       disposeScroll?.();
       resizeObserver?.disconnect();
-      if (reconnectTimer !== null) {
-        window.clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-      if (connectTimer !== null) {
-        window.clearTimeout(connectTimer);
-        connectTimer = null;
-      }
-      socket?.close();
-      if (socketRef.current === socket) {
-        socketRef.current = null;
+      if (rendererReadyRef.current?.generation === generation) {
+        rendererReadyRef.current = null;
+        setRendererReady(null);
       }
       sendResizeRef.current = () => {};
       renderer.dispose();
-      rendererRef.current = null;
+      if (rendererRef.current === renderer) {
+        rendererRef.current = null;
+      }
       host.replaceChildren();
     };
   }, [
     connectionKey,
+    clearQueuedTerminalInput,
+    flushBatchedTerminalInput,
+    focusMobileCommandInput,
+    focusTerminalKeyboardInput,
+    handleMobileTerminalTouch,
     measureTerminal,
     pane?.terminal_id,
-    resumeToken,
-    flushBatchedTerminalInput,
     sendTerminalInputData,
-    sendTerminalInputFrame,
+  ]);
+
+  useEffect(() => {
+    const terminalId = pane?.terminal_id ?? null;
+    const ready = rendererReady;
+    if (!terminalId) {
+      setConnectionState("idle");
+      requestReconnectRef.current = () => {};
+      return;
+    }
+    if (
+      !ready ||
+      ready.terminalId !== terminalId ||
+      rendererReadyRef.current !== ready ||
+      rendererRef.current !== ready.renderer
+    ) {
+      setConnectionState("connecting");
+      requestReconnectRef.current = () => {};
+      return;
+    }
+
+    let disposed = false;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+    let connectTimer: number | null = null;
+    let foregroundCoalesceTimer: number | null = null;
+    let reconnectAttempts = 0;
+    let foregroundFastAttemptsRemaining = 0;
+    let lastCloseReason: string | null = null;
+    let socketGeneration = 0;
+    let socketStartedAt = 0;
+    let lastForegroundReconnectAt = Number.NEGATIVE_INFINITY;
+    let reconnectStopped = false;
+    const reconnectScheduledForSocket = new Set<number>();
+    const pendingForegroundReasons = new Set<ReconnectReason>();
+
+    const debugReconnect = (event: string, details: Record<string, unknown> = {}) => {
+      if (DEBUG_TERMINAL_RECONNECT) {
+        console.debug("terminal reconnect:", event, { terminalId, ...details });
+      }
+    };
+
+    const clearReconnectTimer = () => {
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    };
+
+    const clearConnectTimer = () => {
+      if (connectTimer !== null) {
+        window.clearTimeout(connectTimer);
+        connectTimer = null;
+      }
+    };
+
+    const clearForegroundCoalesceTimer = () => {
+      if (foregroundCoalesceTimer !== null) {
+        window.clearTimeout(foregroundCoalesceTimer);
+        foregroundCoalesceTimer = null;
+      }
+    };
+
+    const sendResize = (size: TerminalSize) => {
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "resize", cols: size.cols, rows: size.rows }));
+      }
+    };
+    sendResizeRef.current = sendResize;
+
+    const closeActiveSocket = () => {
+      const current = socket;
+      socket = null;
+      if (socketRef.current === current) {
+        socketRef.current = null;
+      }
+      current?.close();
+    };
+
+    const writeTerminalData = (socketId: number, data: Uint8Array) => {
+      if (
+        disposed ||
+        socketId !== socketGeneration ||
+        rendererReadyRef.current?.generation !== ready.generation
+      ) {
+        return;
+      }
+      ready.renderer.write(data);
+    };
+
+    const connectSocket = (reason: ReconnectReason, connectTimeoutMs: number) => {
+      if (disposed || reconnectStopped) {
+        return;
+      }
+      clearConnectTimer();
+      const initialSize = ready.measure();
+      if (!initialSize) {
+        scheduleReconnect("resize");
+        return;
+      }
+      if (socket) {
+        closeActiveSocket();
+      }
+      reconnectScheduledForSocket.clear();
+      const nextSocket = new WebSocket(
+        terminalSocketUrl(wsUrl, terminalId, initialSize, terminalOutputCoalesceMs),
+      );
+      socket = nextSocket;
+      socketRef.current = nextSocket;
+      nextSocket.binaryType = "arraybuffer";
+      const currentSocketGeneration = socketGeneration + 1;
+      socketGeneration = currentSocketGeneration;
+      socketStartedAt = performance.now();
+      setConnectionState("connecting");
+      debugReconnect("connect_start", { reason, socketGeneration, connectTimeoutMs });
+      connectTimer = window.setTimeout(
+        () => retryStalledConnect(nextSocket, currentSocketGeneration),
+        connectTimeoutMs,
+      );
+
+      nextSocket.addEventListener("open", () => {
+        if (disposed || socket !== nextSocket || socketGeneration !== currentSocketGeneration) {
+          return;
+        }
+        clearConnectTimer();
+        clearReconnectTimer();
+        reconnectAttempts = 0;
+        foregroundFastAttemptsRemaining = 0;
+        reconnectScheduledForSocket.delete(currentSocketGeneration);
+        lastCloseReason = null;
+        terminalInputBlockedRef.current = false;
+        setCloseReason(null);
+        setHasAttachedForTerminal(true);
+        setConnectionState("attached");
+        debugReconnect("open", { socketGeneration: currentSocketGeneration });
+        const size = ready.measure();
+        if (size) {
+          sendResize(size);
+        }
+        if (autoFocusRef.current) {
+          window.setTimeout(() => ready.renderer.focus(), 0);
+        }
+        flushBatchedTerminalInput();
+        flushQueuedTerminalInput();
+      });
+      nextSocket.addEventListener("message", (event) => {
+        if (disposed || socket !== nextSocket || socketGeneration !== currentSocketGeneration) {
+          return;
+        }
+        if (typeof event.data === "string") {
+          lastCloseReason = parseTerminalCloseReason(event.data) ?? lastCloseReason;
+          return;
+        }
+        if (event.data instanceof ArrayBuffer) {
+          writeTerminalData(currentSocketGeneration, new Uint8Array(event.data));
+          return;
+        }
+        if (event.data instanceof Blob) {
+          void event.data.arrayBuffer().then((buffer) => {
+            writeTerminalData(currentSocketGeneration, new Uint8Array(buffer));
+          });
+        }
+      });
+      nextSocket.addEventListener("close", () => {
+        if (disposed || socket !== nextSocket || socketGeneration !== currentSocketGeneration) {
+          return;
+        }
+        clearConnectTimer();
+        if (socketRef.current === nextSocket) {
+          socketRef.current = null;
+        }
+        socket = null;
+        if (lastCloseReason) {
+          console.warn("terminal websocket closed", lastCloseReason);
+        }
+        if (isNonRetryableTerminalClose(lastCloseReason)) {
+          reconnectStopped = true;
+          terminalInputBlockedRef.current = true;
+          clearReconnectTimer();
+          clearQueuedTerminalInput();
+          setCloseReason(lastCloseReason);
+          setConnectionState("closed");
+          return;
+        }
+        scheduleSocketReconnect("close", currentSocketGeneration);
+      });
+      nextSocket.addEventListener("error", () => {
+        if (disposed || socket !== nextSocket || socketGeneration !== currentSocketGeneration) {
+          return;
+        }
+        clearConnectTimer();
+        debugReconnect("error", { socketGeneration: currentSocketGeneration });
+        scheduleSocketReconnect("error", currentSocketGeneration);
+        nextSocket.close();
+      });
+    };
+
+    const scheduleConnect = (
+      reason: ReconnectReason,
+      mode: TerminalReconnectMode,
+      immediate: boolean,
+    ) => {
+      if (disposed || reconnectStopped) {
+        return;
+      }
+      if (reconnectTimer !== null) {
+        if (!immediate) {
+          return;
+        }
+        clearReconnectTimer();
+      }
+      const policy = terminalReconnectPolicy({
+        attempt: reconnectAttempts,
+        mode,
+        immediate,
+        foregroundFastAttemptsRemaining,
+      });
+      reconnectAttempts = policy.nextAttempt;
+      foregroundFastAttemptsRemaining = policy.nextForegroundFastAttemptsRemaining;
+      setConnectionState("connecting");
+      debugReconnect("scheduled", {
+        reason,
+        mode,
+        delayMs: policy.delayMs,
+        connectTimeoutMs: policy.connectTimeoutMs,
+      });
+      const run = () => {
+        reconnectTimer = null;
+        connectSocket(reason, policy.connectTimeoutMs);
+      };
+      if (policy.delayMs === 0) {
+        run();
+        return;
+      }
+      reconnectTimer = window.setTimeout(run, policy.delayMs);
+    };
+
+    function scheduleReconnect(reason: ReconnectReason) {
+      const mode: TerminalReconnectMode =
+        foregroundFastAttemptsRemaining > 0 ? "foreground" : "normal";
+      scheduleConnect(reason, mode, false);
+    }
+
+    function scheduleSocketReconnect(reason: ReconnectReason, socketId: number) {
+      if (reconnectScheduledForSocket.has(socketId)) {
+        return;
+      }
+      reconnectScheduledForSocket.add(socketId);
+      scheduleReconnect(reason);
+    }
+
+    function retryStalledConnect(stalledSocket: WebSocket, socketId: number) {
+      if (
+        disposed ||
+        socket !== stalledSocket ||
+        socketGeneration !== socketId ||
+        stalledSocket.readyState !== WebSocket.CONNECTING
+      ) {
+        return;
+      }
+      debugReconnect("stalled", { socketGeneration: socketId });
+      socket = null;
+      if (socketRef.current === stalledSocket) {
+        socketRef.current = null;
+      }
+      stalledSocket.close();
+      scheduleSocketReconnect("stalled", socketId);
+    }
+
+    const processForegroundReconnect = (reason: ReconnectReason) => {
+      if (reconnectStopped) {
+        return;
+      }
+      const now = performance.now();
+      lastForegroundReconnectAt = now;
+      const reasons = Array.from(pendingForegroundReasons);
+      pendingForegroundReasons.clear();
+      debugReconnect("signal", { reason, reasons });
+      const currentSocket = socket;
+      if (currentSocket?.readyState === WebSocket.OPEN) {
+        const size = ready.measure("refresh");
+        if (size) {
+          sendResize(size);
+        }
+        return;
+      }
+      if (
+        currentSocket?.readyState === WebSocket.CONNECTING &&
+        now - socketStartedAt < TERMINAL_FOREGROUND_CONNECT_TIMEOUT_MS
+      ) {
+        const socketId = socketGeneration;
+        const remainingMs = Math.max(1, TERMINAL_FOREGROUND_CONNECT_TIMEOUT_MS - (now - socketStartedAt));
+        clearConnectTimer();
+        connectTimer = window.setTimeout(
+          () => retryStalledConnect(currentSocket, socketId),
+          remainingMs,
+        );
+        return;
+      }
+      reconnectAttempts = 0;
+      foregroundFastAttemptsRemaining = TERMINAL_FOREGROUND_FAST_ATTEMPTS;
+      clearReconnectTimer();
+      if (currentSocket) {
+        closeActiveSocket();
+      }
+      scheduleConnect(reason, "foreground", true);
+    };
+
+    const requestForegroundReconnect = (reason: ReconnectReason) => {
+      if (reconnectStopped) {
+        return;
+      }
+      pendingForegroundReasons.add(reason);
+      const now = performance.now();
+      const remainingCoalesceMs =
+        TERMINAL_FOREGROUND_SIGNAL_COALESCE_MS - (now - lastForegroundReconnectAt);
+      if (remainingCoalesceMs > 0) {
+        debugReconnect("signal_coalesced", { reason });
+        if (foregroundCoalesceTimer === null) {
+          foregroundCoalesceTimer = window.setTimeout(() => {
+            foregroundCoalesceTimer = null;
+            processForegroundReconnect(reason);
+          }, remainingCoalesceMs);
+        }
+        return;
+      }
+      clearForegroundCoalesceTimer();
+      processForegroundReconnect(reason);
+    };
+
+    const requestReconnect = (reason: ReconnectReason) => {
+      if (reconnectStopped) {
+        return;
+      }
+      if (reason === "resume" || reason === "visible" || reason === "online") {
+        requestForegroundReconnect(reason);
+        return;
+      }
+      if (reason === "resize") {
+        if (socket?.readyState === WebSocket.OPEN) {
+          const size = ready.measure("refresh");
+          if (size) {
+            sendResize(size);
+          }
+          return;
+        }
+        if (socket?.readyState === WebSocket.CONNECTING) {
+          return;
+        }
+        scheduleReconnect(reason);
+        return;
+      }
+      scheduleConnect(reason, "normal", reason === "initial" || reason === "manual");
+    };
+
+    requestReconnectRef.current = requestReconnect;
+    const removeNativeResumeHandler = addNativeResumeHandler(() => requestReconnect("resume"));
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        requestReconnect("visible");
+      }
+    };
+    const handleOnline = () => requestReconnect("online");
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("online", handleOnline);
+
+    requestReconnect("initial");
+
+    return () => {
+      disposed = true;
+      removeNativeResumeHandler();
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("online", handleOnline);
+      requestReconnectRef.current = () => {};
+      flushBatchedTerminalInput();
+      batchedInputRef.current = emptyTerminalInputBatch();
+      clearReconnectTimer();
+      clearConnectTimer();
+      clearForegroundCoalesceTimer();
+      closeActiveSocket();
+      sendResizeRef.current = () => {};
+    };
+  }, [
+    connectionKey,
+    clearQueuedTerminalInput,
+    flushBatchedTerminalInput,
+    flushQueuedTerminalInput,
+    pane?.terminal_id,
+    rendererReady,
     terminalOutputCoalesceMs,
     wsUrl,
   ]);
+
+  useEffect(() => {
+    if (resumeToken > 0) {
+      requestReconnectRef.current("resume");
+    }
+  }, [resumeToken]);
+
+  useEffect(() => {
+    let overlayTimer: number | null = null;
+    if (!pane || connectionState === "idle" || connectionState === "attached") {
+      setShowConnectionOverlay(false);
+      return;
+    }
+    const overlayDelayMs = terminalConnectionOverlayDelayMs(
+      connectionState,
+      hasAttachedForTerminal || delayConnectingOverlayRef.current,
+    );
+    if (overlayDelayMs > 0) {
+      setShowConnectionOverlay(false);
+      overlayTimer = window.setTimeout(() => {
+        setShowConnectionOverlay(true);
+      }, overlayDelayMs);
+      return () => {
+        if (overlayTimer !== null) {
+          window.clearTimeout(overlayTimer);
+        }
+      };
+    }
+    setShowConnectionOverlay(true);
+    return () => {
+      if (overlayTimer !== null) {
+        window.clearTimeout(overlayTimer);
+      }
+    };
+  }, [connectionState, hasAttachedForTerminal, pane?.terminal_id]);
 
   useEffect(() => {
     rendererRef.current?.setTapFocusHandler(
@@ -767,13 +1157,14 @@ export function TerminalView({
         return;
       }
       if (uploaded.length > 0) {
-        enqueueTerminalInput([uploaded.map((file) => shellQuote(file.path)).join(" ")]);
-        showUploadStatus(
-          `Uploaded ${uploaded.length} file${uploaded.length === 1 ? "" : "s"}${
-            skippedCount > 0 ? `; skipped ${skippedCount}` : ""
-          }`,
-          2500,
-        );
+        if (enqueueTerminalInput([uploaded.map((file) => shellQuote(file.path)).join(" ")])) {
+          showUploadStatus(
+            `Uploaded ${uploaded.length} file${uploaded.length === 1 ? "" : "s"}${
+              skippedCount > 0 ? `; skipped ${skippedCount}` : ""
+            }`,
+            2500,
+          );
+        }
       } else {
         showUploadStatus(null);
       }
@@ -818,31 +1209,17 @@ export function TerminalView({
   };
 
   const enqueueTerminalInput = (parts: string[]) => {
-    inputQueueRef.current.push(...parts.filter((part) => part.length > 0));
-    if (inputFlushTimerRef.current !== null) {
-      return;
+    if (terminalInputBlockedRef.current) {
+      showUploadStatus("Terminal detached", 2500);
+      return false;
     }
-    let retryCount = 0;
-    const flush = () => {
-      inputFlushTimerRef.current = null;
-      const socket = socketRef.current;
-      if (socket?.readyState !== WebSocket.OPEN) {
-        if (inputQueueRef.current.length > 0 && retryCount < 80) {
-          retryCount += 1;
-          inputFlushTimerRef.current = window.setTimeout(flush, 125);
-        }
-        return;
-      }
-      retryCount = 0;
-      const next = inputQueueRef.current.shift();
-      if (next !== undefined) {
-        sendTerminalInputFrame(socket, next);
-      }
-      if (inputQueueRef.current.length > 0) {
-        inputFlushTimerRef.current = window.setTimeout(flush, 35);
-      }
-    };
-    inputFlushTimerRef.current = window.setTimeout(flush, 0);
+    const filteredParts = parts.filter((part) => part.length > 0);
+    if (filteredParts.length === 0) {
+      return false;
+    }
+    inputQueueRef.current.push(...filteredParts);
+    flushQueuedTerminalInput();
+    return true;
   };
 
   return (
@@ -868,8 +1245,10 @@ export function TerminalView({
         onChange={handleFileInput}
       />
       {!pane ? <div className="terminal-overlay">No panes available</div> : null}
-      {pane && connectionState !== "attached" ? (
-        <div className="terminal-overlay">{connectionCopy(connectionState, closeReason)}</div>
+      {pane && showConnectionOverlay && connectionState !== "attached" ? (
+        <div className="terminal-overlay">
+          {terminalConnectionCopy(connectionState, closeReason, hasAttachedForTerminal)}
+        </div>
       ) : null}
       {uploadStatus ? (
         <div className="terminal-upload-status" role="status" aria-live="polite">
@@ -1224,43 +1603,6 @@ function terminalSocketUrl(
     coalesce_ms: String(coalesceMs),
   });
   return wsUrl("/ws/terminal", params);
-}
-
-function parseCloseReason(message: string) {
-  try {
-    const parsed = JSON.parse(message) as { type?: unknown; reason?: unknown };
-    return parsed.type === "closed" && typeof parsed.reason === "string" ? parsed.reason : null;
-  } catch {
-    return null;
-  }
-}
-
-function isNonRetryableAttachClose(reason: string | null) {
-  return (
-    reason?.includes("already has an attached client") ||
-    reason?.includes("terminal attach taken over") ||
-    reason?.includes("terminal attach failed: terminal")
-  );
-}
-
-function connectionCopy(state: ConnectionState, reason: string | null) {
-  if (reason?.includes("already has an attached client")) {
-    return "Attached elsewhere";
-  }
-  if (reason?.includes("terminal attach taken over")) {
-    return "Detached elsewhere";
-  }
-  switch (state) {
-    case "connecting":
-      return "Connecting";
-    case "closed":
-      return "Detached";
-    case "error":
-      return "Connection failed";
-    case "idle":
-    case "attached":
-      return "";
-  }
 }
 
 async function copyToClipboard(text: string) {

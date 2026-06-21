@@ -87,6 +87,42 @@ describe("chooseSelectedPane", () => {
     expect(chooseSelectedPane(snapshot([pane("1-1"), pane("1-2", true)]), "1-1")).toBe("1-1");
   });
 
+  it("keeps the current pane while the snapshot selection catches up", () => {
+    expect(
+      chooseSelectedPane(
+        {
+          ...snapshot([pane("1-1"), pane("1-2", true)]),
+          selected_pane_id: "1-1",
+        },
+        "1-2",
+      ),
+    ).toBe("1-2");
+  });
+
+  it("uses the snapshot selection when there is no current pane", () => {
+    expect(
+      chooseSelectedPane(
+        {
+          ...snapshot([pane("1-1"), pane("1-2", true)]),
+          selected_pane_id: "1-1",
+        },
+        null,
+      ),
+    ).toBe("1-1");
+  });
+
+  it("uses the snapshot selection when the current pane is gone", () => {
+    expect(
+      chooseSelectedPane(
+        {
+          ...snapshot([pane("1-1"), pane("1-2", true)]),
+          selected_pane_id: "1-1",
+        },
+        "missing",
+      ),
+    ).toBe("1-1");
+  });
+
   it("falls back to the focused pane", () => {
     expect(chooseSelectedPane(snapshot([pane("1-1"), pane("1-2", true)]), "missing")).toBe(
       "1-2",

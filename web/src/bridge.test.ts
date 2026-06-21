@@ -310,7 +310,10 @@ describe("capabilities", () => {
     await expect(probeBridgeBaseUrl("192.168.1.20:4000")).resolves.toEqual({
       commands: ["pane.move"],
     });
-    expect(fetchMock).toHaveBeenCalledWith("http://192.168.1.20:4000/api/capabilities");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://192.168.1.20:4000/api/capabilities",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
 
     fetchMock.mockRestore();
   });

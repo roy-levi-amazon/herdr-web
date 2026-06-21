@@ -10,6 +10,7 @@ import {
 import type { ReactNode } from "react";
 import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
+import { fetchWithTimeout } from "./fetchWithTimeout";
 import { addNativeResumeHandler } from "./native";
 
 export const SAME_ORIGIN_BRIDGE_ID = "same-origin";
@@ -945,7 +946,7 @@ function normalizeEndpointPath(path: string) {
 export async function fetchCapabilities(
   httpUrl: (path: string, query?: URLSearchParams) => string,
 ): Promise<BridgeCapabilities> {
-  const response = await fetch(httpUrl("/api/capabilities"));
+  const response = await fetchWithTimeout(httpUrl("/api/capabilities"));
   if (!response.ok) {
     throw new Error(`capabilities failed: ${response.status}`);
   }

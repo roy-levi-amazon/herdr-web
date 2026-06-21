@@ -32,6 +32,7 @@ import {
 import { LaunchDialog } from "./LaunchDialog";
 import { resolveLaunchSpec } from "./launch";
 import type { LaunchTarget } from "./launch";
+import { fetchWithTimeout } from "./fetchWithTimeout";
 import {
   DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT,
   DEFAULT_MOBILE_LONG_PRESS_BEHAVIOR,
@@ -4201,7 +4202,7 @@ function stageBreadcrumb(
 }
 
 async function fetchSnapshot(httpUrl: (path: string, query?: URLSearchParams) => string) {
-  const response = await fetch(httpUrl("/api/snapshot"));
+  const response = await fetchWithTimeout(httpUrl("/api/snapshot"));
   if (!response.ok) {
     throw new Error(`snapshot failed: ${response.status}`);
   }
