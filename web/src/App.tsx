@@ -4797,7 +4797,7 @@ function NotesListItem({
   );
 }
 
-function NoteEditor({
+export function NoteEditor({
   entry,
   canAttachToCurrentPane,
   onSave,
@@ -4827,6 +4827,7 @@ function NoteEditor({
   const [body, setBody] = useState("");
   const [dirty, setDirty] = useState(false);
   const [baseRevision, setBaseRevision] = useState<number | null>(null);
+  const [editorNoteIdentity, setEditorNoteIdentity] = useState("");
   const [saveRetryCycle, setSaveRetryCycle] = useState(0);
   const [saveState, setSaveState] = useState<
     "idle" | "pending" | "saving" | "saved" | "error" | "conflict"
@@ -4840,6 +4841,7 @@ function NoteEditor({
   useEffect(() => {
     if (!entry) {
       loadedNoteIdentityRef.current = "";
+      setEditorNoteIdentity("");
       setTitle("");
       setBody("");
       setDirty(false);
@@ -4896,6 +4898,7 @@ function NoteEditor({
     if (noteChanged) {
       const draft = readNoteDraft(entry);
       loadedNoteIdentityRef.current = noteIdentity;
+      setEditorNoteIdentity(noteIdentity);
       if (draft && (draft.title !== entry.note.title || draft.body !== entry.note.body)) {
         const hasConflict = draft.baseRevision !== entry.note.revision;
         setTitle(draft.title);
@@ -4938,6 +4941,9 @@ function NoteEditor({
 
   useEffect(() => {
     if (!entry || !dirty) {
+      return;
+    }
+    if (editorNoteIdentity !== noteIdentity) {
       return;
     }
     if (title === entry.note.title && body === entry.note.body) {
@@ -5024,7 +5030,17 @@ function NoteEditor({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [baseRevision, body, dirty, entry, noteIdentity, onSave, saveRetryCycle, title]);
+  }, [
+    baseRevision,
+    body,
+    dirty,
+    editorNoteIdentity,
+    entry,
+    noteIdentity,
+    onSave,
+    saveRetryCycle,
+    title,
+  ]);
 
   if (!entry) {
     return (
