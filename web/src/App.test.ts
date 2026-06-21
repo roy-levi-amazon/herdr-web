@@ -8,6 +8,7 @@ import {
   nextVisibleAgentPaneEntry,
   nextVisibleTabEntry,
   resolveInitialSelectedBridgeId,
+  shouldBlockDirtyNoteAutosave,
   shouldCollapseHostScope,
   sortScopedAgentPanes,
   stableBridgeRefreshOffsetMs,
@@ -386,6 +387,42 @@ describe("App multi-bridge helpers", () => {
     expect(noteDraftStorageKey(first)).not.toBe(noteDraftStorageKey(changedSession));
     expect(noteDraftStorageKey(first)).toContain("store-1");
     expect(noteDraftStorageKey(first)).toContain("session%3Adefault");
+  });
+
+  it("blocks note autosave when the server revision advances under a dirty draft", () => {
+    expect(
+      shouldBlockDirtyNoteAutosave({
+        dirty: true,
+        title: "Local title",
+        body: "Local draft",
+        baseRevision: 1,
+        serverTitle: "Remote title",
+        serverBody: "Remote edit",
+        serverRevision: 2,
+      }),
+    ).toBe(true);
+    expect(
+      shouldBlockDirtyNoteAutosave({
+        dirty: true,
+        title: "Remote title",
+        body: "Remote edit",
+        baseRevision: 1,
+        serverTitle: "Remote title",
+        serverBody: "Remote edit",
+        serverRevision: 2,
+      }),
+    ).toBe(false);
+    expect(
+      shouldBlockDirtyNoteAutosave({
+        dirty: true,
+        title: "Local title",
+        body: "Local draft",
+        baseRevision: 1,
+        serverTitle: "Original title",
+        serverBody: "Original body",
+        serverRevision: 1,
+      }),
+    ).toBe(false);
   });
 });
 

@@ -216,7 +216,7 @@ type ScopedAgentGroup = {
 type NoteDraft = {
   title: string;
   body: string;
-  revision: number;
+  baseRevision: number;
   updatedAt: number;
 };
 type MenuState = {
@@ -1566,7 +1566,12 @@ export function App() {
     }
   };
 
-  const saveScopedNote = async (entry: ScopedNoteEntry, title: string, body: string) => {
+  const saveScopedNote = async (
+    entry: ScopedNoteEntry,
+    title: string,
+    body: string,
+    expectedRevision: number,
+  ) => {
     const runtime = bridge.getRuntime(entry.bridgeId);
     if (!runtime) {
       setError("Bridge is not ready");
@@ -1576,7 +1581,7 @@ export function App() {
       await updateNote(runtime.httpUrl, entry.note.note_id, {
         title,
         body,
-        expectedRevision: entry.note.revision,
+        expectedRevision,
       });
       await refreshBridgeNotes(runtime, false);
     } catch (caught) {
@@ -3304,6 +3309,29 @@ function noteSubtitle(entry: ScopedNoteEntry, showBridge: boolean) {
     .join(" · ");
 }
 
+export function shouldBlockDirtyNoteAutosave({
+  dirty,
+  title,
+  body,
+  baseRevision,
+  serverTitle,
+  serverBody,
+  serverRevision,
+}: {
+  dirty: boolean;
+  title: string;
+  body: string;
+  baseRevision: number | null;
+  serverTitle: string;
+  serverBody: string;
+  serverRevision: number;
+}) {
+  if (!dirty || baseRevision === null || serverRevision === baseRevision) {
+    return false;
+  }
+  return title !== serverTitle || body !== serverBody;
+}
+
 export function noteDraftStorageKey(entry: ScopedNoteEntry) {
   return `${NOTE_DRAFT_STORAGE_PREFIX}${[
     entry.bridgeId,
@@ -3323,13 +3351,17 @@ function readNoteDraft(entry: ScopedNoteEntry): NoteDraft | null {
       return null;
     }
     const parsed = JSON.parse(raw) as Partial<NoteDraft>;
-    if (typeof parsed.title !== "string" || typeof parsed.body !== "string") {
+    if (
+      typeof parsed.title !== "string" ||
+      typeof parsed.body !== "string" ||
+      typeof parsed.baseRevision !== "number"
+    ) {
       return null;
     }
     return {
       title: parsed.title,
       body: parsed.body,
-      revision: typeof parsed.revision === "number" ? parsed.revision : entry.note.revision,
+      baseRevision: parsed.baseRevision,
       updatedAt: typeof parsed.updatedAt === "number" ? parsed.updatedAt : 0,
     };
   } catch {
@@ -3337,12 +3369,17 @@ function readNoteDraft(entry: ScopedNoteEntry): NoteDraft | null {
   }
 }
 
-function writeNoteDraft(entry: ScopedNoteEntry, title: string, body: string) {
+function writeNoteDraft(
+  entry: ScopedNoteEntry,
+  title: string,
+  body: string,
+  baseRevision: number,
+) {
   try {
     const draft: NoteDraft = {
       title,
       body,
-      revision: entry.note.revision,
+      baseRevision,
       updatedAt: Date.now(),
     };
     globalThis.localStorage?.setItem(noteDraftStorageKey(entry), JSON.stringify(draft));
@@ -4563,7 +4600,12 @@ function NotesSurface({
   onCreateDetachedNote: () => void;
   onIncludeArchived: (include: boolean) => void;
   onIncludeDeleted: (include: boolean) => void;
-  onSaveNote: (entry: ScopedNoteEntry, title: string, body: string) => Promise<void>;
+  onSaveNote: (
+    entry: ScopedNoteEntry,
+    title: string,
+    body: string,
+    expectedRevision: number,
+  ) => Promise<void>;
   onAttachToCurrentPane: (entry: ScopedNoteEntry) => void;
   onDetach: (entry: ScopedNoteEntry) => void;
   onArchive: (entry: ScopedNoteEntry) => void;
@@ -4739,7 +4781,12 @@ function NoteEditor({
 }: {
   entry: ScopedNoteEntry | null;
   canAttachToCurrentPane: boolean;
-  onSave: (entry: ScopedNoteEntry, title: string, body: string) => Promise<void>;
+  onSave: (
+    entry: ScopedNoteEntry,
+    title: string,
+    body: string,
+    expectedRevision: number,
+  ) => Promise<void>;
   onAttachToCurrentPane: (entry: ScopedNoteEntry) => void;
   onDetach: (entry: ScopedNoteEntry) => void;
   onArchive: (entry: ScopedNoteEntry) => void;
@@ -4750,6 +4797,7 @@ function NoteEditor({
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [dirty, setDirty] = useState(false);
+  const [baseRevision, setBaseRevision] = useState<number | null>(null);
   const [saveState, setSaveState] = useState<
     "idle" | "pending" | "saving" | "saved" | "error" | "conflict"
   >("idle");
@@ -4764,6 +4812,7 @@ function NoteEditor({
       setTitle("");
       setBody("");
       setDirty(false);
+      setBaseRevision(null);
       setSaveState("idle");
       saveBlockedRef.current = false;
       return;
@@ -4771,46 +4820,95 @@ function NoteEditor({
     const noteChanged = loadedNoteIdentityRef.current !== noteIdentity;
     if (!noteChanged && dirty && title === entry.note.title && body === entry.note.body) {
       setDirty(false);
+      setBaseRevision(entry.note.revision);
       setSaveState("saved");
       saveBlockedRef.current = false;
       clearNoteDraft(entry);
       return;
     }
-    if (noteChanged || !dirty) {
+    const expectedRevision = baseRevision ?? entry.note.revision;
+    if (
+      !noteChanged &&
+      shouldBlockDirtyNoteAutosave({
+        dirty,
+        title,
+        body,
+        baseRevision: expectedRevision,
+        serverTitle: entry.note.title,
+        serverBody: entry.note.body,
+        serverRevision: entry.note.revision,
+      })
+    ) {
+      saveBlockedRef.current = true;
+      setSaveState("conflict");
+      writeNoteDraft(entry, title, body, expectedRevision);
+      return;
+    }
+    if (noteChanged) {
       const draft = readNoteDraft(entry);
       loadedNoteIdentityRef.current = noteIdentity;
       if (draft && (draft.title !== entry.note.title || draft.body !== entry.note.body)) {
+        const hasConflict = draft.baseRevision !== entry.note.revision;
         setTitle(draft.title);
         setBody(draft.body);
         setDirty(true);
-        setSaveState("pending");
+        setBaseRevision(draft.baseRevision);
+        setSaveState(hasConflict ? "conflict" : "pending");
+        saveBlockedRef.current = hasConflict;
       } else {
         setTitle(entry.note.title);
         setBody(entry.note.body);
         setDirty(false);
+        setBaseRevision(entry.note.revision);
         setSaveState("idle");
+        saveBlockedRef.current = false;
         clearNoteDraft(entry);
       }
-      saveBlockedRef.current = false;
+      return;
     }
-  }, [body, dirty, entry, noteIdentity, noteKey, title]);
+    if (!dirty) {
+      setTitle(entry.note.title);
+      setBody(entry.note.body);
+      setBaseRevision(entry.note.revision);
+      setSaveState("idle");
+      saveBlockedRef.current = false;
+      clearNoteDraft(entry);
+    }
+  }, [baseRevision, body, dirty, entry, noteIdentity, noteKey, title]);
 
   useEffect(() => {
     if (!entry) {
       return;
     }
     if (dirty && (title !== entry.note.title || body !== entry.note.body)) {
-      writeNoteDraft(entry, title, body);
+      writeNoteDraft(entry, title, body, baseRevision ?? entry.note.revision);
     } else {
       clearNoteDraft(entry);
     }
-  }, [body, dirty, entry, title]);
+  }, [baseRevision, body, dirty, entry, title]);
 
   useEffect(() => {
     if (!entry || !dirty) {
       return;
     }
     if (title === entry.note.title && body === entry.note.body) {
+      return;
+    }
+    const expectedRevision = baseRevision ?? entry.note.revision;
+    if (
+      shouldBlockDirtyNoteAutosave({
+        dirty,
+        title,
+        body,
+        baseRevision: expectedRevision,
+        serverTitle: entry.note.title,
+        serverBody: entry.note.body,
+        serverRevision: entry.note.revision,
+      })
+    ) {
+      saveBlockedRef.current = true;
+      setSaveState("conflict");
+      writeNoteDraft(entry, title, body, expectedRevision);
       return;
     }
     if (saveBlockedRef.current) {
@@ -4820,7 +4918,7 @@ function NoteEditor({
     let cancelled = false;
     const timer = window.setTimeout(() => {
       setSaveState("saving");
-      void onSave(entry, title, body)
+      void onSave(entry, title, body, expectedRevision)
         .then(() => {
           if (!cancelled) {
             setSaveState("saved");
@@ -4837,7 +4935,7 @@ function NoteEditor({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [body, dirty, entry, onSave, title]);
+  }, [baseRevision, body, dirty, entry, onSave, title]);
 
   if (!entry) {
     return (
@@ -4852,9 +4950,13 @@ function NoteEditor({
   const deleted = Boolean(note.deleted_at);
   const archived = Boolean(note.archived_at);
   const markEdited = () => {
+    const expectedRevision = baseRevision ?? entry.note.revision;
+    if (baseRevision === null) {
+      setBaseRevision(expectedRevision);
+    }
     setDirty(true);
     if (saveState === "conflict") {
-      writeNoteDraft(entry, title, body);
+      writeNoteDraft(entry, title, body, expectedRevision);
       return;
     }
     saveBlockedRef.current = false;
@@ -4863,9 +4965,10 @@ function NoteEditor({
   const overwriteConflict = () => {
     saveBlockedRef.current = false;
     setSaveState("saving");
-    void onSave(entry, title, body)
+    void onSave(entry, title, body, entry.note.revision)
       .then(() => {
         clearNoteDraft(entry);
+        setBaseRevision(entry.note.revision);
         setSaveState("saved");
       })
       .catch((caught) => {
@@ -4877,6 +4980,7 @@ function NoteEditor({
     setTitle(entry.note.title);
     setBody(entry.note.body);
     setDirty(false);
+    setBaseRevision(entry.note.revision);
     saveBlockedRef.current = false;
     setSaveState("idle");
     clearNoteDraft(entry);
