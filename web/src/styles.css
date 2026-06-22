@@ -1291,19 +1291,28 @@ button {
 }
 
 .term-input-row {
-  height: var(--mobile-input-row-height);
+  align-items: flex-end;
 }
 
 .term-native-input {
+  box-sizing: border-box;
   min-width: 0;
+  min-height: var(--mobile-input-row-height);
+  max-height: min(34vh, calc(var(--mobile-input-row-height) * 7));
   flex: 1 1 auto;
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
   outline: none;
-  padding: 0 var(--mobile-input-padding-x);
+  padding: calc(7px * var(--mobile-controls-scale)) var(--mobile-input-padding-x);
+  overflow-x: hidden;
+  overflow-y: auto;
+  resize: none;
   background: var(--crust);
   color: var(--text);
   font-size: clamp(11px, calc(13px * var(--mobile-controls-scale)), 20px);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .term-native-input:focus {

@@ -9,8 +9,9 @@ import {
   TextCursorInput,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, DragEvent, RefObject } from "react";
+import { autosizeMobileCommandTextarea } from "./mobileCommandTextarea";
 import { ConfirmDialog } from "./overlays";
 import { addNativeResumeHandler } from "./native";
 import { shellQuote } from "./shell";
@@ -139,7 +140,7 @@ export function TerminalView({
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const mobileCommandInputRef = useRef<HTMLInputElement | null>(null);
+  const mobileCommandInputRef = useRef<HTMLTextAreaElement | null>(null);
   const rendererRef = useRef<TerminalRenderer | null>(null);
   const rendererGenerationRef = useRef(0);
   const rendererReadyRef = useRef<TerminalRendererReady | null>(null);
@@ -1365,7 +1366,7 @@ function MobileTerminalControls({
   onStageCommand,
   onSubmitCommand,
 }: {
-  commandInputRef: RefObject<HTMLInputElement | null>;
+  commandInputRef: RefObject<HTMLTextAreaElement | null>;
   disabled: boolean;
   uploadDisabled: boolean;
   onInput: (data: string) => void;
@@ -1394,6 +1395,10 @@ function MobileTerminalControls({
       setCtrlLatch(false);
     }
   };
+
+  useLayoutEffect(() => {
+    autosizeMobileCommandTextarea(commandInputRef.current);
+  }, [commandInputRef, value]);
 
   return (
     <div className="terminal-mobile-controls" data-expanded={expanded ? "true" : "false"}>
@@ -1504,10 +1509,10 @@ function MobileTerminalControls({
           }
         }}
       >
-        <input
+        <textarea
           ref={commandInputRef}
           className="term-native-input mono"
-          type="text"
+          rows={1}
           autoCapitalize="none"
           autoComplete="off"
           autoCorrect="off"

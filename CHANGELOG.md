@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- Fixed the mobile terminal command input so long prompts wrap, grow taller while editing,
+  and remain viewable instead of scrolling sideways.
 - Improved terminal reconnect/resume handling so Android foregrounding and quick terminal switches
   keep the renderer stable, avoid stale tab flashes, and suppress transient connecting overlays.
   [PR #19](https://github.com/kcosr/herdr-web/pull/19)
