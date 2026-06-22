@@ -1371,6 +1371,80 @@ mod tests {
     }
 
     #[test]
+    fn observation_pruning_bounds_missing_panes_per_session() {
+        let dir = test_dir("observation_pruning_bounds_missing_panes_per_session");
+        let manager = NotesManager::for_test(dir, "session:default").unwrap();
+        let panes = (0..=MAX_OBSERVATIONS_PER_SESSION)
+            .map(|index| pane(&format!("p{index}"), &format!("t{index}"), "w1", "tab1", 1))
+            .collect::<Vec<_>>();
+
+        manager.observe_panes(&panes).unwrap();
+        manager.observe_panes(&[]).unwrap();
+
+        let observations = manager.load_observation_store_best_effort().observations;
+        let session_observations = observations
+            .iter()
+            .filter(|item| item.session_key == "session:default")
+            .collect::<Vec<_>>();
+        assert_eq!(session_observations.len(), MAX_OBSERVATIONS_PER_SESSION);
+        assert!(!session_observations.iter().any(|item| item.pane_id == "p0"));
+        assert!(session_observations
+            .iter()
+            .all(|item| item.missing_since.is_some()));
+    }
+
+    #[test]
+    fn persisted_observation_keeps_note_linked_after_restart() {
+        let dir = test_dir("persisted_observation_keeps_note_linked_after_restart");
+        let manager = NotesManager::for_test(dir.clone(), "session:default").unwrap();
+        let panes = vec![pane("p1", "t1", "w1", "tab1", 1)];
+        let note = manager
+            .create(
+                CreateNoteRequest {
+                    title: Some("Restart".to_string()),
+                    body: None,
+                    pane_id: Some("p1".to_string()),
+                },
+                &panes,
+            )
+            .unwrap();
+
+        let restarted = NotesManager::for_test(dir, "session:default").unwrap();
+        let listed = restarted.list(NotesListQuery::default(), &panes).unwrap();
+
+        assert_eq!(listed.notes[0].note.note_id, note.note.note_id);
+        assert_eq!(listed.notes[0].link_state, NoteLinkState::Linked);
+    }
+
+    #[test]
+    fn move_to_stale_observed_pane_refreshes_generation_and_stays_linked() {
+        let dir = test_dir("move_to_stale_observed_pane_refreshes_generation_and_stays_linked");
+        let manager = NotesManager::for_test(dir, "session:default").unwrap();
+        let source = pane("p1", "t1", "w1", "tab1", 1);
+        let stale_target = pane("p2", "old-terminal", "w1", "tab1", 1);
+        manager
+            .observe_panes(&[source.clone(), stale_target])
+            .unwrap();
+        let note = manager
+            .create(
+                CreateNoteRequest {
+                    title: Some("Move".to_string()),
+                    body: None,
+                    pane_id: Some("p1".to_string()),
+                },
+                &[source],
+            )
+            .unwrap();
+        let target = pane("p2", "new-terminal", "w2", "tab2", 2);
+
+        assert!(manager.update_for_pane_move("p1", &target).unwrap());
+        let listed = manager.list(NotesListQuery::default(), &[target]).unwrap();
+
+        assert_eq!(listed.notes[0].note.note_id, note.note.note_id);
+        assert_eq!(listed.notes[0].link_state, NoteLinkState::Linked);
+    }
+
+    #[test]
     fn corrupt_observations_do_not_block_notes() {
         let dir = test_dir("corrupt_observations_do_not_block_notes");
         let manager = NotesManager::for_test(dir, "session:default").unwrap();
