@@ -964,27 +964,25 @@ button {
   position: relative;
 }
 
+.notes-button::after {
+  position: absolute;
+  right: 12px;
+  bottom: 6px;
+  left: 12px;
+  height: 2px;
+  border-radius: 999px;
+  background: transparent;
+  content: "";
+}
+
+.notes-button[data-has-notes="true"]::after {
+  background: color-mix(in srgb, var(--teal) 70%, var(--overlay1));
+}
+
 .notes-button[data-active="true"] {
   border-color: color-mix(in srgb, var(--accent) 50%, var(--line));
   color: var(--text);
   background: var(--accent-soft);
-}
-
-.notes-count {
-  position: absolute;
-  top: -5px;
-  right: -5px;
-  display: inline-grid;
-  min-width: 16px;
-  height: 16px;
-  place-items: center;
-  padding: 0 4px;
-  border: 1px solid var(--crust);
-  border-radius: 999px;
-  background: var(--teal);
-  color: var(--crust);
-  font-size: 10px;
-  font-weight: 700;
 }
 
 /* --------------------------------------------------------------- notes */
@@ -1222,7 +1220,8 @@ button {
 
 .notes-list-item {
   display: grid;
-  grid-template-columns: 12px minmax(0, 1fr);
+  grid-template-columns: 12px minmax(0, 1fr) 18px;
+  align-items: center;
   gap: 9px;
   width: 100%;
   padding: 8px 7px;
@@ -1258,19 +1257,12 @@ button {
   white-space: nowrap;
 }
 
-.notes-list-item-sub,
-.notes-list-item-state {
+.notes-list-item-sub {
   overflow: hidden;
   color: var(--overlay0);
   font-size: 10.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.notes-list-item-state {
-  grid-column: 2;
-  margin-top: -1px;
-  color: var(--overlay1);
 }
 
 .note-editor {
@@ -1306,6 +1298,27 @@ button {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.note-state-icon {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--overlay1);
+}
+
+.note-state-icon[data-status="blocked"] {
+  color: var(--st-blocked);
+}
+
+.note-state-icon[data-status="working"] {
+  color: var(--st-working);
+}
+
+.note-state-icon[data-status="done"] {
+  color: var(--st-done);
 }
 
 .note-conflict {

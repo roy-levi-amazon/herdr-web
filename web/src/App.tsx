@@ -2800,12 +2800,10 @@ export function App() {
               aria-label="Notes"
               title="Notes"
               data-active={notesPanelOpen ? "true" : "false"}
+              data-has-notes={selectedPaneNotes.length > 0 ? "true" : "false"}
               onClick={openNotesPanel}
             >
               <StickyNote size={18} />
-              {selectedPaneNotes.length > 0 ? (
-                <span className="notes-count mono">{selectedPaneNotes.length}</span>
-              ) : null}
             </button>
           ) : null}
           {selectedPane ? (
@@ -3725,6 +3723,43 @@ function noteStateLabel(note: PaneNote) {
     return { label: "unresolved", status: "working" as AgentStatus };
   }
   return { label: "detached", status: "unknown" as AgentStatus };
+}
+
+function noteLifecycleStatusLabel(note: PaneNote) {
+  if (note.deleted_at) {
+    return "deleted";
+  }
+  if (note.archived_at) {
+    return "archived";
+  }
+  return "";
+}
+
+function NoteStateIcon({
+  note,
+  label,
+  status,
+}: {
+  note: PaneNote;
+  label: string;
+  status: AgentStatus;
+}) {
+  const icon = note.deleted_at ? (
+    <Trash2 size={14} />
+  ) : note.archived_at ? (
+    <Archive size={14} />
+  ) : note.link_state === "linked" ? (
+    <SquareTerminal size={14} />
+  ) : note.link_state === "unresolved" ? (
+    <Link2 size={14} />
+  ) : (
+    <Unlink size={14} />
+  );
+  return (
+    <span className="note-state-icon" data-status={status} aria-label={label}>
+      {icon}
+    </span>
+  );
 }
 
 function noteSubtitle(entry: ScopedNoteEntry, showBridge: boolean) {
@@ -5318,7 +5353,7 @@ function NotesListItem({
         <span className="notes-list-item-title">{entry.note.title || "Untitled note"}</span>
         <span className="notes-list-item-sub mono">{noteSubtitle(entry, true)}</span>
       </span>
-      <span className="notes-list-item-state">{state.label}</span>
+      <NoteStateIcon note={entry.note} label={state.label} status={state.status} />
     </button>
   );
 }
@@ -5664,7 +5699,7 @@ export function NoteEditor({
                   ? "save failed"
                   : saveState === "conflict"
                     ? "conflict"
-                : noteStateLabel(note).label}
+                : noteLifecycleStatusLabel(note)}
         </span>
         {canViewLinkedPane ? (
           <button className="icon-btn" type="button" aria-label="View pane" title="View pane" onClick={() => onViewPane(entry)}>
@@ -5948,9 +5983,7 @@ function NoteRow({
         <span className="pane-name">{entry.note.title || "Untitled note"}</span>
         <span className="pane-meta mono">{noteSubtitle(entry, showBridge)}</span>
       </span>
-      <span className="pane-word" data-status={state.status}>
-        {state.label}
-      </span>
+      <NoteStateIcon note={entry.note} label={state.label} status={state.status} />
     </button>
   );
 }
