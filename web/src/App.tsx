@@ -1736,6 +1736,10 @@ export function App() {
     if (!notesEnabled) {
       return;
     }
+    if (notesPanelOpen) {
+      setNotesPanelOpen(false);
+      return;
+    }
     const selectedNoteIsCurrentPaneNote =
       selectedScopedNote &&
       selectedRuntime &&
