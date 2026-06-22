@@ -1939,6 +1939,10 @@ export function App() {
       return;
     }
     openPane(entry.bridgeId, entry.pane);
+    if (isCompactLayout) {
+      setMobileNotesScreen("list");
+      setNotesPanelOpen(false);
+    }
   };
 
   useEffect(() => {
@@ -5232,6 +5236,7 @@ function NotesSurface({
           currentBridgeId={selectedBridgeId}
           currentPaneId={selectedPane?.pane_id ?? null}
           canAttachToCurrentPane={canAttachToCurrentPane}
+          showCurrentPaneViewAction={compact}
           onSave={onSaveNote}
           onAttachToCurrentPane={onAttachToCurrentPane}
           onDetach={onDetach}
@@ -5276,6 +5281,7 @@ export function NoteEditor({
   currentBridgeId,
   currentPaneId,
   canAttachToCurrentPane,
+  showCurrentPaneViewAction = false,
   onSave,
   onAttachToCurrentPane,
   onDetach,
@@ -5288,6 +5294,7 @@ export function NoteEditor({
   currentBridgeId: BridgeId | null;
   currentPaneId: string | null;
   canAttachToCurrentPane: boolean;
+  showCurrentPaneViewAction?: boolean;
   onSave: (
     entry: ScopedNoteEntry,
     title: string,
@@ -5533,7 +5540,9 @@ export function NoteEditor({
   const deleted = Boolean(note.deleted_at);
   const archived = Boolean(note.archived_at);
   const attachedToCurrentPane = scopedNoteLinkedToPane(entry, currentBridgeId, currentPaneId);
-  const canViewLinkedPane = Boolean(entry.pane && !attachedToCurrentPane);
+  const canViewLinkedPane = Boolean(
+    entry.pane && (!attachedToCurrentPane || showCurrentPaneViewAction),
+  );
   const canAttachCurrentPane = canAttachToCurrentPane && !attachedToCurrentPane;
   const markEdited = () => {
     const expectedRevision = baseRevision ?? entry.note.revision;

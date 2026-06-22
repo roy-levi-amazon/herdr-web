@@ -214,6 +214,26 @@ describe("NoteEditor actions", () => {
     expect(container.querySelector('[aria-label="Attach to current pane"]')).not.toBeNull();
     expect(container.querySelector('[aria-label="View pane"]')).toBeNull();
   });
+
+  it("can show the current linked pane action for compact full-screen notes", async () => {
+    const onSave = vi.fn(() => Promise.resolve(6));
+    const { container, render } = createEditorHarness(onSave);
+    const currentPaneNote = noteEntry({
+      revision: 5,
+      body: "",
+      linkState: "linked",
+      attachmentPaneId: "pane-a",
+      resolvedPaneId: "pane-a",
+    });
+
+    await render(currentPaneNote);
+
+    expect(container.querySelector('[aria-label="View pane"]')).toBeNull();
+
+    await render(currentPaneNote, { showCurrentPaneViewAction: true });
+
+    expect(container.querySelector('[aria-label="View pane"]')).not.toBeNull();
+  });
 });
 
 function createEditorHarness(
@@ -224,7 +244,10 @@ function createEditorHarness(
   const root = createRoot(container);
   roots.push(root);
 
-  const render = async (entry: ScopedNoteEntry) => {
+  const render = async (
+    entry: ScopedNoteEntry,
+    options: { showCurrentPaneViewAction?: boolean } = {},
+  ) => {
     await act(async () => {
       root.render(
         <NoteEditor
@@ -232,6 +255,7 @@ function createEditorHarness(
           currentBridgeId="bridge-a"
           currentPaneId="pane-a"
           canAttachToCurrentPane
+          showCurrentPaneViewAction={options.showCurrentPaneViewAction}
           onSave={onSave}
           onAttachToCurrentPane={vi.fn()}
           onDetach={vi.fn()}
@@ -254,6 +278,7 @@ function noteEntry({
   body,
   linkState = "detached",
   attachmentPaneId,
+  resolvedPaneId,
 }: {
   noteId?: string;
   revision: number;
@@ -261,7 +286,19 @@ function noteEntry({
   body: string;
   linkState?: "linked" | "unresolved" | "detached";
   attachmentPaneId?: string;
+  resolvedPaneId?: string;
 }): ScopedNoteEntry {
+  const resolvedPane = resolvedPaneId
+    ? {
+        pane_id: resolvedPaneId,
+        terminal_id: "terminal-a",
+        workspace_id: "workspace-a",
+        tab_id: "tab-a",
+        focused: true,
+        agent_status: "idle" as const,
+        revision: 1,
+      }
+    : undefined;
   return {
     bridgeId: "bridge-a",
     connectionKey: "http://bridge-a",
@@ -291,7 +328,9 @@ function noteEntry({
       attachment_history: [],
       revision,
       link_state: linkState,
+      resolved_pane: resolvedPane,
     },
+    pane: resolvedPane,
   };
 }
 
