@@ -3755,16 +3755,6 @@ function noteStateLabel(note: PaneNote) {
   return { label: "detached", status: "unknown" as AgentStatus };
 }
 
-function noteLifecycleStatusLabel(note: PaneNote) {
-  if (note.deleted_at) {
-    return "deleted";
-  }
-  if (note.archived_at) {
-    return "archived";
-  }
-  return "";
-}
-
 function NoteStateIcon({
   note,
   label,
@@ -5447,6 +5437,7 @@ export function NoteEditor({
   const [saveState, setSaveState] = useState<
     "idle" | "pending" | "saving" | "saved" | "error" | "conflict"
   >("idle");
+  const [showSavedStatus, setShowSavedStatus] = useState(false);
   const [editorMode, setEditorModeState] = useState<NoteEditorMode>(() => readNoteEditorMode());
   const loadedNoteIdentityRef = useRef("");
   const saveBlockedRef = useRef(false);
@@ -5686,6 +5677,16 @@ export function NoteEditor({
     title,
   ]);
 
+  useEffect(() => {
+    if (saveState !== "saved") {
+      setShowSavedStatus(false);
+      return;
+    }
+    setShowSavedStatus(true);
+    const timer = window.setTimeout(() => setShowSavedStatus(false), 1400);
+    return () => window.clearTimeout(timer);
+  }, [saveState]);
+
   if (!entry) {
     return (
       <div className="note-editor note-editor-empty">
@@ -5703,6 +5704,18 @@ export function NoteEditor({
     entry.pane && (!attachedToCurrentPane || showCurrentPaneViewAction),
   );
   const canAttachCurrentPane = canAttachToCurrentPane && !attachedToCurrentPane;
+  const saveStatusLabel =
+    saveState === "pending"
+      ? "pending"
+      : saveState === "saving"
+        ? "saving"
+        : saveState === "saved" && showSavedStatus
+          ? "saved"
+          : saveState === "error"
+            ? "save failed"
+            : saveState === "conflict"
+              ? "conflict"
+              : null;
   const markEdited = () => {
     const expectedRevision = baseRevision ?? entry.note.revision;
     if (baseRevision === null) {
@@ -5743,19 +5756,6 @@ export function NoteEditor({
     <div className="note-editor">
       <div className="note-editor-toolbar">
         <div className="note-editor-toolbar-left">
-          <span className="note-editor-status mono">
-            {saveState === "pending"
-              ? "pending"
-              : saveState === "saving"
-                ? "saving"
-                : saveState === "saved"
-                  ? "saved"
-                  : saveState === "error"
-                    ? "save failed"
-                    : saveState === "conflict"
-                      ? "conflict"
-                  : noteLifecycleStatusLabel(note)}
-          </span>
           <div className="note-editor-mode segmented-control" role="group" aria-label="Note editor mode">
             <button
               type="button"
@@ -5858,6 +5858,11 @@ export function NoteEditor({
           disabled={deleted}
         />
       )}
+      {saveStatusLabel ? (
+        <span className="note-editor-save-status mono" data-state={saveState}>
+          {saveStatusLabel}
+        </span>
+      ) : null}
     </div>
   );
 }

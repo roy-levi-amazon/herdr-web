@@ -455,7 +455,7 @@ async function advanceAutosaveTimer() {
 }
 
 function editorStatus(container: HTMLElement) {
-  return container.querySelector(".note-editor-status")?.textContent ?? "";
+  return container.querySelector(".note-editor-save-status")?.textContent ?? "";
 }
 
 function noteBodyInput(container: HTMLElement) {
