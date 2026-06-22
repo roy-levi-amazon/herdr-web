@@ -224,6 +224,76 @@ describe("NoteEditor autosave conflicts", () => {
 });
 
 describe("NoteEditor actions", () => {
+  it("renders markdown preview and persists the selected editor mode", async () => {
+    const onSave = vi.fn(() => Promise.resolve(6));
+    const { container, render } = createEditorHarness(onSave);
+
+    await render(noteEntry({ revision: 5, body: "# Heading\n\n- item" }));
+    await act(async () => {
+      buttonByText(container, "Preview").click();
+      await vi.dynamicImportSettled();
+    });
+
+    expect(container.querySelector(".note-body-input")).toBeNull();
+    expect(container.querySelector(".note-body-preview h1")?.textContent).toBe("Heading");
+    expect(container.querySelector(".note-body-preview li")?.textContent).toBe("item");
+    expect(localStorage.getItem("herdr-web:note-editor-mode:v1")).toBe("preview");
+
+    await act(async () => {
+      buttonByText(container, "Edit").click();
+    });
+
+    expect(noteBodyInput(container).value).toBe("# Heading\n\n- item");
+    expect(localStorage.getItem("herdr-web:note-editor-mode:v1")).toBe("edit");
+  });
+
+  it("restores the persisted markdown preview mode", async () => {
+    localStorage.setItem("herdr-web:note-editor-mode:v1", "preview");
+    const onSave = vi.fn(() => Promise.resolve(6));
+    const { container, render } = createEditorHarness(onSave);
+
+    await render(noteEntry({ revision: 5, body: "**bold**" }));
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
+
+    expect(container.querySelector(".note-body-input")).toBeNull();
+    expect(container.querySelector(".note-body-preview strong")?.textContent).toBe("bold");
+  });
+
+  it("escapes raw HTML, blocks remote images, and restricts markdown links", async () => {
+    const onSave = vi.fn(() => Promise.resolve(6));
+    const { container, render } = createEditorHarness(onSave);
+
+    await render(
+      noteEntry({
+        revision: 5,
+        body: [
+          "<script>alert('x')</script>",
+          "![pixel](https://attacker.example/pixel.png)",
+          "[web](https://example.com)",
+          "[mail](mailto:test@example.com)",
+          "[script](javascript:alert(1))",
+        ].join("\n\n"),
+      }),
+    );
+    await act(async () => {
+      buttonByText(container, "Preview").click();
+      await vi.dynamicImportSettled();
+    });
+
+    expect(container.querySelector(".note-body-preview script")).toBeNull();
+    expect(container.querySelector(".note-body-preview img")).toBeNull();
+    const webLink = container.querySelector<HTMLAnchorElement>(
+      '.note-body-preview a[href="https://example.com/"]',
+    );
+    expect(webLink?.target).toBe("_blank");
+    expect(webLink?.rel).toContain("noopener");
+    expect(webLink?.rel).toContain("noreferrer");
+    expect(container.querySelector('.note-body-preview a[href^="mailto:"]')).toBeNull();
+    expect(container.querySelector('.note-body-preview a[href^="javascript:"]')).toBeNull();
+  });
+
   it("allows unresolved notes with a matching stale pane id to be reattached", async () => {
     const onSave = vi.fn(() => Promise.resolve(6));
     const { container, render } = createEditorHarness(onSave);
@@ -394,6 +464,16 @@ function noteBodyInput(container: HTMLElement) {
     throw new Error("missing note body input");
   }
   return input;
+}
+
+function buttonByText(container: HTMLElement, text: string) {
+  const button = Array.from(container.querySelectorAll("button")).find(
+    (item) => item.textContent === text,
+  );
+  if (!button) {
+    throw new Error(`missing button: ${text}`);
+  }
+  return button;
 }
 
 function setNativeValue(element: HTMLTextAreaElement, value: string) {

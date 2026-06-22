@@ -16,7 +16,17 @@ import {
   Unlink,
   X,
 } from "lucide-react";
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type {
   CSSProperties,
   Dispatch,
@@ -127,6 +137,8 @@ import type {
   WorkspaceInfo,
 } from "./types";
 
+const NoteMarkdownPreview = lazy(() => import("./NoteMarkdownPreview"));
+
 type LoadState = "loading" | "ready" | "error";
 type Scope = "space" | "all";
 type HostScope = "selected" | "all";
@@ -233,6 +245,7 @@ type NoteSaveInFlight = {
   title: string;
   body: string;
 };
+type NoteEditorMode = "edit" | "preview";
 type MenuState = {
   kind: MenuKind;
   bridgeId: BridgeId;
@@ -734,7 +747,12 @@ export function App() {
   const [notesListPaneCollapsed, setNotesListPaneCollapsed] = useState(
     initialPrefs.notesListPaneCollapsed,
   );
-  const [notesEnabled, setNotesEnabled] = useState(initialPrefs.notesEnabled);
+  const notesEnabledRef = useRef(initialPrefs.notesEnabled);
+  const [notesEnabled, setNotesEnabledState] = useState(initialPrefs.notesEnabled);
+  const setNotesEnabled = useCallback((enabled: boolean) => {
+    notesEnabledRef.current = enabled;
+    setNotesEnabledState(enabled);
+  }, []);
   const [resizingSidebar, setResizingSidebar] = useState(false);
   const [resizingNotesPanel, setResizingNotesPanel] = useState(false);
   const [resizingNotesListPane, setResizingNotesListPane] = useState(false);
@@ -1223,6 +1241,7 @@ export function App() {
     }
     setNotesPanelOpen(false);
     setSelectedNoteRef(null);
+    setNotesStates({});
     if (sidebarView === "notes") {
       setSidebarView("agents");
     }
@@ -2298,6 +2317,9 @@ export function App() {
         includeDeleted: true,
         includeOtherSessions: true,
       });
+      if (!notesEnabledRef.current) {
+        return null;
+      }
       setNotesStates((current) => {
         if (!isCurrentConnection()) {
           return current;
@@ -2315,6 +2337,9 @@ export function App() {
       return response;
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Notes unavailable";
+      if (!notesEnabledRef.current) {
+        return null;
+      }
       if (!isCurrentConnection()) {
         return null;
       }
@@ -2580,7 +2605,7 @@ export function App() {
       className="app"
       style={appStyle}
       data-sidebar={sidebarOpen ? "open" : "closed"}
-      data-notes={notesPanelOpen ? "open" : "closed"}
+      data-notes={notesPanelOpen && notesEnabled ? "open" : "closed"}
       data-resizing-sidebar={resizingSidebar ? "true" : "false"}
       data-resizing-notes={resizingNotesPanel ? "true" : "false"}
       data-resizing-notes-list={resizingNotesListPane ? "true" : "false"}
@@ -3114,6 +3139,7 @@ export function App() {
 const SNAPSHOT_REFRESH_INTERVAL_MS = 10000;
 const NOTES_REFRESH_INTERVAL_MS = 15000;
 const NOTE_DRAFT_STORAGE_PREFIX = "herdr-web:note-draft:v1:";
+const NOTE_EDITOR_MODE_STORAGE_KEY = "herdr-web:note-editor-mode:v1";
 
 export function resolveInitialSelectedBridgeId(
   currentBridgeId: BridgeId | null,
@@ -3890,6 +3916,24 @@ function clearNoteDraft(entry: ScopedNoteEntry) {
   }
 }
 
+function readNoteEditorMode(): NoteEditorMode {
+  try {
+    return globalThis.localStorage?.getItem(NOTE_EDITOR_MODE_STORAGE_KEY) === "preview"
+      ? "preview"
+      : "edit";
+  } catch {
+    return "edit";
+  }
+}
+
+function writeNoteEditorMode(mode: NoteEditorMode) {
+  try {
+    globalThis.localStorage?.setItem(NOTE_EDITOR_MODE_STORAGE_KEY, mode);
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
 export function nextVisibleAgentPaneEntry(
   entries: ScopedAgentPane[],
   currentIndex: number,
@@ -4322,9 +4366,9 @@ function Switcher({
         .map((view) => notesStates[view.runtime.id]?.error)
         .find((message): message is string => Boolean(message))
     : undefined;
+  const notesViewActive = notesEnabled && sidebarView === "notes";
   const hasNotesList =
-    notesEnabled &&
-    sidebarView === "notes" &&
+    notesViewActive &&
     (notesSupported || visibleNotes.length > 0 || notesLoading || notesError);
   const hasListSnapshot =
     hasNotesList ||
@@ -4368,7 +4412,7 @@ function Switcher({
       activeSpace &&
       selectedBridgeId,
   );
-  const canCreateNoteFromHeader = notesEnabled && sidebarView === "notes" && notesSupported;
+  const canCreateNoteFromHeader = notesViewActive && notesSupported;
 
   useEffect(() => {
     if (optionsMenu && !showOptionsControl) {
@@ -4807,7 +4851,7 @@ function Switcher({
             ) : null}
 
             {/* PANES ----------------------------------------------------- */}
-            {sidebarView === "notes" ||
+            {notesViewActive ||
             (hostScope === "all" ? hasListSnapshot : snapshot && snapshot.workspaces.length > 0) ? (
             <section className="sec">
               <div className="sec-head">
@@ -4816,7 +4860,7 @@ function Switcher({
                     ? scope === "all"
                       ? "all agents"
                       : "space agents"
-                    : sidebarView === "notes"
+                    : notesViewActive
                       ? scope === "all"
                         ? "all notes"
                         : "space notes"
@@ -4871,7 +4915,7 @@ function Switcher({
                 ) : null}
               </div>
 
-              {sidebarView === "notes" ? (
+              {notesViewActive ? (
                 renderNoteRows()
               ) : sidebarView === "agents" ? (
                 agentPanes.length === 0 && disconnectedBridgeViews.length === 0 ? (
@@ -5403,6 +5447,7 @@ export function NoteEditor({
   const [saveState, setSaveState] = useState<
     "idle" | "pending" | "saving" | "saved" | "error" | "conflict"
   >("idle");
+  const [editorMode, setEditorModeState] = useState<NoteEditorMode>(() => readNoteEditorMode());
   const loadedNoteIdentityRef = useRef("");
   const saveBlockedRef = useRef(false);
   const noteSaveInFlightRef = useRef<NoteSaveInFlight | null>(null);
@@ -5421,6 +5466,11 @@ export function NoteEditor({
   useEffect(() => {
     onSaveRef.current = onSave;
   }, [onSave]);
+
+  const setEditorMode = (mode: NoteEditorMode) => {
+    setEditorModeState(mode);
+    writeNoteEditorMode(mode);
+  };
 
   useEffect(() => {
     if (!entry) {
@@ -5692,60 +5742,82 @@ export function NoteEditor({
   return (
     <div className="note-editor">
       <div className="note-editor-toolbar">
-        <span className="note-editor-status mono">
-          {saveState === "pending"
-            ? "pending"
-            : saveState === "saving"
-              ? "saving"
-              : saveState === "saved"
-                ? "saved"
-                : saveState === "error"
-                  ? "save failed"
-                  : saveState === "conflict"
-                    ? "conflict"
-                : noteLifecycleStatusLabel(note)}
-        </span>
-        {canViewLinkedPane ? (
-          <button className="icon-btn" type="button" aria-label="View pane" title="View pane" onClick={() => onViewPane(entry)}>
-            <SquareTerminal size={16} />
-          </button>
-        ) : null}
-        {note.attachment ? (
-          <button className="icon-btn" type="button" aria-label="Detach note" title="Detach" onClick={() => onDetach(entry)}>
-            <Unlink size={16} />
-          </button>
-        ) : null}
-        {canAttachCurrentPane ? (
-          <button
-            className="icon-btn"
-            type="button"
-            aria-label="Attach to current pane"
-            title="Attach to current pane"
-            onClick={() => onAttachToCurrentPane(entry)}
-          >
-            <Link2 size={16} />
-          </button>
-        ) : null}
-        {archived || deleted ? (
-          <button className="icon-btn" type="button" aria-label="Restore note" title="Restore" onClick={() => onRestore(entry)}>
-            <RotateCcw size={16} />
-          </button>
-        ) : (
-          <button className="icon-btn" type="button" aria-label="Archive note" title="Archive" onClick={() => onArchive(entry)}>
-            <Archive size={16} />
-          </button>
-        )}
-        {!deleted ? (
-          <button
-            className="icon-btn danger"
-            type="button"
-            aria-label="Delete note"
-            title="Delete"
-            onClick={() => onDelete(entry)}
-          >
-            <Trash2 size={16} />
-          </button>
-        ) : null}
+        <div className="note-editor-toolbar-left">
+          <span className="note-editor-status mono">
+            {saveState === "pending"
+              ? "pending"
+              : saveState === "saving"
+                ? "saving"
+                : saveState === "saved"
+                  ? "saved"
+                  : saveState === "error"
+                    ? "save failed"
+                    : saveState === "conflict"
+                      ? "conflict"
+                  : noteLifecycleStatusLabel(note)}
+          </span>
+          <div className="note-editor-mode segmented-control" role="group" aria-label="Note editor mode">
+            <button
+              type="button"
+              data-on={editorMode === "edit"}
+              aria-pressed={editorMode === "edit"}
+              onClick={() => setEditorMode("edit")}
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              data-on={editorMode === "preview"}
+              aria-pressed={editorMode === "preview"}
+              onClick={() => setEditorMode("preview")}
+            >
+              Preview
+            </button>
+          </div>
+        </div>
+        <div className="note-editor-actions">
+          {canViewLinkedPane ? (
+            <button className="icon-btn" type="button" aria-label="View pane" title="View pane" onClick={() => onViewPane(entry)}>
+              <SquareTerminal size={16} />
+            </button>
+          ) : null}
+          {note.attachment ? (
+            <button className="icon-btn" type="button" aria-label="Detach note" title="Detach" onClick={() => onDetach(entry)}>
+              <Unlink size={16} />
+            </button>
+          ) : null}
+          {canAttachCurrentPane ? (
+            <button
+              className="icon-btn"
+              type="button"
+              aria-label="Attach to current pane"
+              title="Attach to current pane"
+              onClick={() => onAttachToCurrentPane(entry)}
+            >
+              <Link2 size={16} />
+            </button>
+          ) : null}
+          {archived || deleted ? (
+            <button className="icon-btn" type="button" aria-label="Restore note" title="Restore" onClick={() => onRestore(entry)}>
+              <RotateCcw size={16} />
+            </button>
+          ) : (
+            <button className="icon-btn" type="button" aria-label="Archive note" title="Archive" onClick={() => onArchive(entry)}>
+              <Archive size={16} />
+            </button>
+          )}
+          {!deleted ? (
+            <button
+              className="icon-btn danger"
+              type="button"
+              aria-label="Delete note"
+              title="Delete"
+              onClick={() => onDelete(entry)}
+            >
+              <Trash2 size={16} />
+            </button>
+          ) : null}
+        </div>
       </div>
       {saveState === "conflict" ? (
         <div className="note-conflict" role="alert">
@@ -5768,16 +5840,24 @@ export function NoteEditor({
         placeholder="Untitled note"
         disabled={deleted}
       />
-      <textarea
-        className="note-body-input"
-        value={body}
-        onChange={(event) => {
-          setBody(event.currentTarget.value);
-          markEdited();
-        }}
-        placeholder="Write a note"
-        disabled={deleted}
-      />
+      {editorMode === "preview" ? (
+        <div className="note-body-preview">
+          <Suspense fallback={<span className="note-body-preview-empty">Loading preview</span>}>
+            <NoteMarkdownPreview body={body} />
+          </Suspense>
+        </div>
+      ) : (
+        <textarea
+          className="note-body-input"
+          value={body}
+          onChange={(event) => {
+            setBody(event.currentTarget.value);
+            markEdited();
+          }}
+          placeholder="Write a note"
+          disabled={deleted}
+        />
+      )}
     </div>
   );
 }
