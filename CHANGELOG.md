@@ -24,6 +24,7 @@
   the editor, deleting the selected note no longer shows a deleted note, and stale local save
   refreshes do not appear as external note changes. Also fixed mobile delete-dialog back handling
   and unresolved note recovery actions in the notes panel.
+- Kept the new-tab button pinned at the right edge of the top tab bar while the tab list scrolls.
 - Improved terminal reconnect/resume handling so Android foregrounding and quick terminal switches
   keep the renderer stable, avoid stale tab flashes, and suppress transient connecting overlays.
   [PR #19](https://github.com/kcosr/herdr-web/pull/19)

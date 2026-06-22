@@ -4053,28 +4053,30 @@ function TabBar({
       ? selectedPane.tab_id
       : activeSpace.active_tab_id;
   return (
-    <div className="tabbar" role="tablist" aria-label="Tabs">
-      {tabs.map((tab) => {
-        const label = displayTabLabel(tab, snapshot.panes);
-        return (
-          <button
-            key={tab.tab_id}
-            type="button"
-            className="tabbar-tab"
-            role="tab"
-            aria-selected={tab.tab_id === activeTabId}
-            data-active={tab.tab_id === activeTabId}
-            onClick={() => onSelectTab(tab.tab_id)}
-            onContextMenu={(event) => {
-              event.preventDefault();
-              onMenu("tab", tab.tab_id, label, event.clientX, event.clientY, canClearTabName(tab));
-            }}
-          >
-            <span className="dot" data-status={tab.agent_status} />
-            <span className="tabbar-name">{label}</span>
-          </button>
-        );
-      })}
+    <div className="tabbar">
+      <div className="tabbar-scroll" role="tablist" aria-label="Tabs">
+        {tabs.map((tab) => {
+          const label = displayTabLabel(tab, snapshot.panes);
+          return (
+            <button
+              key={tab.tab_id}
+              type="button"
+              className="tabbar-tab"
+              role="tab"
+              aria-selected={tab.tab_id === activeTabId}
+              data-active={tab.tab_id === activeTabId}
+              onClick={() => onSelectTab(tab.tab_id)}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                onMenu("tab", tab.tab_id, label, event.clientX, event.clientY, canClearTabName(tab));
+              }}
+            >
+              <span className="dot" data-status={tab.agent_status} />
+              <span className="tabbar-name">{label}</span>
+            </button>
+          );
+        })}
+      </div>
       <button
         className="tabbar-add"
         type="button"
