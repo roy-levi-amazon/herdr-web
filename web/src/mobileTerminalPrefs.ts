@@ -8,6 +8,8 @@ export type MobileTouchSelectionEndpointTimeoutMs =
   (typeof MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_OPTIONS_MS)[number];
 export const DEFAULT_MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_MS: MobileTouchSelectionEndpointTimeoutMs = 1500;
 export const DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT = true;
+export const DEFAULT_MOBILE_COMMAND_EXPANDING_INPUT = true;
+export const DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE = false;
 
 export function parseMobileTerminalTapTarget(value: unknown): MobileTerminalTapTarget {
   return value === "terminal" || value === "command-input"
@@ -33,4 +35,12 @@ export function parseMobileTouchSelectionEndpointTimeoutMs(
 
 export function parseMobileKeyboardHideRefit(value: unknown) {
   return typeof value === "boolean" ? value : DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT;
+}
+
+export function parseMobileCommandExpandingInput(value: unknown) {
+  return typeof value === "boolean" ? value : DEFAULT_MOBILE_COMMAND_EXPANDING_INPUT;
+}
+
+export function parseMobileCommandEnterNewline(value: unknown) {
+  return typeof value === "boolean" ? value : DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE;
 }

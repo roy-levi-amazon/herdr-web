@@ -9,8 +9,9 @@ import {
   TextCursorInput,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
-import type { ChangeEvent, ClipboardEvent, DragEvent, RefObject } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, RefObject } from "react";
+import { autosizeMobileCommandTextarea } from "./mobileCommandTextarea";
 import { ConfirmDialog } from "./overlays";
 import { addNativeResumeHandler } from "./native";
 import { shellQuote } from "./shell";
@@ -62,12 +63,18 @@ type Props = {
   mobileControls?: boolean;
   /** Terminal renderer font size in CSS pixels. */
   terminalFontSizePx?: number;
+  /** Percentage scale applied to mobile terminal controls. */
+  mobileControlsScalePercent?: number;
   /** Where terminal taps should send focus on mobile. */
   mobileTapTarget?: MobileTerminalTapTarget;
   /** Gesture behavior for long-presses on touch terminals. */
   mobileLongPressBehavior?: MobileLongPressBehavior;
   /** How long the loupe endpoint waits for a second drag. */
   mobileTouchSelectionEndpointTimeoutMs?: MobileTouchSelectionEndpointTimeoutMs;
+  /** Whether the mobile command input wraps and grows while editing. */
+  mobileCommandExpandingInput?: boolean;
+  /** Whether Enter inserts a newline in the expanding mobile command input. */
+  mobileCommandEnterNewline?: boolean;
   /** Browser-to-bridge transport for terminal input payloads. */
   terminalInputTransport?: TerminalInputTransport;
   /** Delay for coalescing short terminal input payloads. Zero disables batching. */
@@ -128,9 +135,12 @@ export function TerminalView({
   scrollSensitivity = 1,
   mobileControls = false,
   terminalFontSizePx = DEFAULT_TERMINAL_FONT_SIZE_PX,
+  mobileControlsScalePercent = 100,
   mobileTapTarget = "command-input",
   mobileLongPressBehavior = "off",
   mobileTouchSelectionEndpointTimeoutMs = DEFAULT_MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_MS,
+  mobileCommandExpandingInput = false,
+  mobileCommandEnterNewline = false,
   terminalInputTransport = "json",
   terminalInputBatchDelayMs = 0,
   terminalOutputCoalesceMs = DEFAULT_TERMINAL_OUTPUT_COALESCE_MS,
@@ -138,8 +148,9 @@ export function TerminalView({
   focusToken = 0,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const stageRef = useRef<HTMLElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const mobileCommandInputRef = useRef<HTMLInputElement | null>(null);
+  const mobileCommandInputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
   const rendererRef = useRef<TerminalRenderer | null>(null);
   const rendererGenerationRef = useRef(0);
   const rendererReadyRef = useRef<TerminalRendererReady | null>(null);
@@ -204,6 +215,17 @@ export function TerminalView({
     }
     input.focus();
     return true;
+  }, []);
+
+  const setMobileControlsHeight = useCallback((heightPx: number | null) => {
+    if (heightPx === null) {
+      stageRef.current?.style.removeProperty("--terminal-mobile-controls-height");
+      return;
+    }
+    stageRef.current?.style.setProperty(
+      "--terminal-mobile-controls-height",
+      `${Math.ceil(heightPx)}px`,
+    );
   }, []);
 
   const focusTerminalKeyboardInput = useCallback(() => {
@@ -1224,6 +1246,7 @@ export function TerminalView({
 
   return (
     <section
+      ref={stageRef}
       className="terminal-stage"
       aria-label="Selected pane terminal"
       onDragOverCapture={(event) => {
@@ -1272,6 +1295,10 @@ export function TerminalView({
           commandInputRef={mobileCommandInputRef}
           disabled={!pane || connectionState !== "attached"}
           uploadDisabled={uploadDisabled}
+          expandingInput={mobileCommandExpandingInput}
+          enterNewline={mobileCommandEnterNewline}
+          controlsScalePercent={mobileControlsScalePercent}
+          onControlsHeightChange={setMobileControlsHeight}
           onInput={sendTerminalInput}
           onTerminalFocus={() => rendererRef.current?.focusTextInput()}
           onUpload={openFilePicker}
@@ -1359,24 +1386,36 @@ function MobileTerminalControls({
   commandInputRef,
   disabled,
   uploadDisabled,
+  expandingInput,
+  enterNewline,
+  controlsScalePercent,
+  onControlsHeightChange,
   onInput,
   onTerminalFocus,
   onUpload,
   onStageCommand,
   onSubmitCommand,
 }: {
-  commandInputRef: RefObject<HTMLInputElement | null>;
+  commandInputRef: RefObject<HTMLInputElement | HTMLTextAreaElement | null>;
   disabled: boolean;
   uploadDisabled: boolean;
+  expandingInput: boolean;
+  enterNewline: boolean;
+  controlsScalePercent: number;
+  onControlsHeightChange: (heightPx: number | null) => void;
   onInput: (data: string) => void;
   onTerminalFocus: () => void;
   onUpload: () => void;
   onStageCommand: (command: string) => void;
   onSubmitCommand: (command: string) => void;
 }) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const [value, setValue] = useState("");
   const [expanded, setExpanded] = useState(false);
   const [ctrlLatch, setCtrlLatch] = useState(false);
+  const setCommandInputNode = (node: HTMLInputElement | HTMLTextAreaElement | null) => {
+    commandInputRef.current = node;
+  };
   const submit = () => {
     onSubmitCommand(value);
     setValue("");
@@ -1395,8 +1434,57 @@ function MobileTerminalControls({
     }
   };
 
+  useLayoutEffect(() => {
+    if (expandingInput) {
+      autosizeMobileCommandTextarea(commandInputRef.current);
+    }
+  }, [commandInputRef, controlsScalePercent, expandingInput, value]);
+
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) {
+      onControlsHeightChange(null);
+      return;
+    }
+    const report = () => onControlsHeightChange(root.getBoundingClientRect().height);
+    report();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", report);
+      return () => {
+        window.removeEventListener("resize", report);
+        onControlsHeightChange(null);
+      };
+    }
+    const observer = new ResizeObserver(report);
+    observer.observe(root);
+    return () => {
+      observer.disconnect();
+      onControlsHeightChange(null);
+    };
+  }, [onControlsHeightChange]);
+
+  const onCommandTextareaKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
+      return;
+    }
+    if (
+      event.key !== "Enter" ||
+      enterNewline ||
+      event.shiftKey ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey
+    ) {
+      return;
+    }
+    event.preventDefault();
+    if (!disabled) {
+      submit();
+    }
+  };
+
   return (
-    <div className="terminal-mobile-controls" data-expanded={expanded ? "true" : "false"}>
+    <div ref={rootRef} className="terminal-mobile-controls" data-expanded={expanded ? "true" : "false"}>
       <div className="term-key-strip" aria-label="Common terminal keys">
         <div className="term-key-group" aria-label="Terminal quick keys">
           <button
@@ -1497,6 +1585,7 @@ function MobileTerminalControls({
 
       <form
         className="term-input-row"
+        data-expanding={expandingInput ? "true" : "false"}
         onSubmit={(event) => {
           event.preventDefault();
           if (!disabled) {
@@ -1504,19 +1593,37 @@ function MobileTerminalControls({
           }
         }}
       >
-        <input
-          ref={commandInputRef}
-          className="term-native-input mono"
-          type="text"
-          autoCapitalize="none"
-          autoComplete="off"
-          autoCorrect="off"
-          spellCheck={false}
-          enterKeyHint="send"
-          disabled={disabled}
-          value={value}
-          onChange={(event) => setValue(event.target.value)}
-        />
+        {expandingInput ? (
+          <textarea
+            ref={setCommandInputNode}
+            className="term-native-input mono"
+            rows={1}
+            data-expanding="true"
+            autoCapitalize="none"
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            enterKeyHint={enterNewline ? "enter" : "send"}
+            disabled={disabled}
+            value={value}
+            onChange={(event) => setValue(event.target.value)}
+            onKeyDown={onCommandTextareaKeyDown}
+          />
+        ) : (
+          <input
+            ref={setCommandInputNode}
+            className="term-native-input mono"
+            type="text"
+            autoCapitalize="none"
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            enterKeyHint="send"
+            disabled={disabled}
+            value={value}
+            onChange={(event) => setValue(event.target.value)}
+          />
+        )}
         <button
           className="term-send term-stage-command"
           type="button"

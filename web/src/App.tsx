@@ -34,10 +34,14 @@ import { resolveLaunchSpec } from "./launch";
 import type { LaunchTarget } from "./launch";
 import { fetchWithTimeout } from "./fetchWithTimeout";
 import {
+  DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE,
+  DEFAULT_MOBILE_COMMAND_EXPANDING_INPUT,
   DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT,
   DEFAULT_MOBILE_LONG_PRESS_BEHAVIOR,
   DEFAULT_MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_MS,
   DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
+  parseMobileCommandEnterNewline,
+  parseMobileCommandExpandingInput,
   parseMobileKeyboardHideRefit,
   parseMobileLongPressBehavior,
   parseMobileTouchSelectionEndpointTimeoutMs,
@@ -204,6 +208,8 @@ type DisplayPrefs = {
   mobileLongPressBehavior: MobileLongPressBehavior;
   mobileTouchSelectionEndpointTimeoutMs: MobileTouchSelectionEndpointTimeoutMs;
   mobileKeyboardHideRefit: boolean;
+  mobileCommandExpandingInput: boolean;
+  mobileCommandEnterNewline: boolean;
 };
 type LegacyDisplaySelectionPrefs = {
   activeSpaceId: string | null;
@@ -244,6 +250,8 @@ function readDisplayPrefs(): DisplayPrefs {
     mobileLongPressBehavior: DEFAULT_MOBILE_LONG_PRESS_BEHAVIOR,
     mobileTouchSelectionEndpointTimeoutMs: DEFAULT_MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_MS,
     mobileKeyboardHideRefit: DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT,
+    mobileCommandExpandingInput: DEFAULT_MOBILE_COMMAND_EXPANDING_INPUT,
+    mobileCommandEnterNewline: DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE,
   };
   try {
     const raw = window.localStorage.getItem(DISPLAY_PREFS_KEY);
@@ -331,6 +339,12 @@ function parseDisplayPrefsValue(
       parsed.mobileTouchSelectionEndpointTimeoutMs,
     ),
     mobileKeyboardHideRefit: parseMobileKeyboardHideRefit(parsed.mobileKeyboardHideRefit),
+    mobileCommandExpandingInput: parseMobileCommandExpandingInput(
+      parsed.mobileCommandExpandingInput,
+    ),
+    mobileCommandEnterNewline: parseMobileCommandEnterNewline(
+      parsed.mobileCommandEnterNewline,
+    ),
   };
 }
 
@@ -408,6 +422,12 @@ function readLegacyDisplayPrefs(fallback: DisplayPrefs): DisplayPrefs {
         parsed.mobileTouchSelectionEndpointTimeoutMs,
       ),
       mobileKeyboardHideRefit: parseMobileKeyboardHideRefit(parsed.mobileKeyboardHideRefit),
+      mobileCommandExpandingInput: parseMobileCommandExpandingInput(
+        parsed.mobileCommandExpandingInput,
+      ),
+      mobileCommandEnterNewline: parseMobileCommandEnterNewline(
+        parsed.mobileCommandEnterNewline,
+      ),
     };
   } catch {
     return fallback;
@@ -589,6 +609,12 @@ export function App() {
   const [mobileKeyboardHideRefit, setMobileKeyboardHideRefit] = useState(
     initialPrefs.mobileKeyboardHideRefit,
   );
+  const [mobileCommandExpandingInput, setMobileCommandExpandingInput] = useState(
+    initialPrefs.mobileCommandExpandingInput,
+  );
+  const [mobileCommandEnterNewline, setMobileCommandEnterNewline] = useState(
+    initialPrefs.mobileCommandEnterNewline,
+  );
   const [launchTarget, setLaunchTarget] = useState<ScopedLaunchTarget | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -644,6 +670,8 @@ export function App() {
       setMobileLongPressBehavior(prefs.mobileLongPressBehavior);
       setMobileTouchSelectionEndpointTimeoutMs(prefs.mobileTouchSelectionEndpointTimeoutMs);
       setMobileKeyboardHideRefit(prefs.mobileKeyboardHideRefit);
+      setMobileCommandExpandingInput(prefs.mobileCommandExpandingInput);
+      setMobileCommandEnterNewline(prefs.mobileCommandEnterNewline);
       setDisplayPrefsLoaded(true);
     });
     return () => {
@@ -928,6 +956,8 @@ export function App() {
       mobileLongPressBehavior,
       mobileTouchSelectionEndpointTimeoutMs,
       mobileKeyboardHideRefit,
+      mobileCommandExpandingInput,
+      mobileCommandEnterNewline,
     });
   }, [
     displayPrefsLoaded,
@@ -954,6 +984,8 @@ export function App() {
     mobileLongPressBehavior,
     mobileTouchSelectionEndpointTimeoutMs,
     mobileKeyboardHideRefit,
+    mobileCommandExpandingInput,
+    mobileCommandEnterNewline,
   ]);
 
   useEffect(() => {
@@ -2052,9 +2084,12 @@ export function App() {
             focusToken={terminalFocusToken}
             touchInput={isTouchInput}
             terminalFontSizePx={terminalFontSizePx}
+            mobileControlsScalePercent={mobileControlsScalePercent}
             mobileTapTarget={mobileTerminalTapTarget}
             mobileLongPressBehavior={mobileLongPressBehavior}
             mobileTouchSelectionEndpointTimeoutMs={mobileTouchSelectionEndpointTimeoutMs}
+            mobileCommandExpandingInput={mobileCommandExpandingInput}
+            mobileCommandEnterNewline={mobileCommandEnterNewline}
             terminalInputTransport={terminalInputTransport}
             terminalInputBatchDelayMs={terminalInputBatchDelayMs}
             terminalOutputCoalesceMs={terminalOutputCoalesceMs}
@@ -2074,9 +2109,12 @@ export function App() {
             scrollSensitivity={isTouchInput ? 2 : 0.4}
             mobileControls={isTouchInput}
             terminalFontSizePx={terminalFontSizePx}
+            mobileControlsScalePercent={mobileControlsScalePercent}
             mobileTapTarget={mobileTerminalTapTarget}
             mobileLongPressBehavior={mobileLongPressBehavior}
             mobileTouchSelectionEndpointTimeoutMs={mobileTouchSelectionEndpointTimeoutMs}
+            mobileCommandExpandingInput={mobileCommandExpandingInput}
+            mobileCommandEnterNewline={mobileCommandEnterNewline}
             terminalInputTransport={terminalInputTransport}
             terminalInputBatchDelayMs={terminalInputBatchDelayMs}
             terminalOutputCoalesceMs={terminalOutputCoalesceMs}
@@ -2156,6 +2194,10 @@ export function App() {
           onMobileTouchSelectionEndpointTimeoutMs={
             setMobileTouchSelectionEndpointTimeoutMs
           }
+          mobileCommandExpandingInput={mobileCommandExpandingInput}
+          onMobileCommandExpandingInput={setMobileCommandExpandingInput}
+          mobileCommandEnterNewline={mobileCommandEnterNewline}
+          onMobileCommandEnterNewline={setMobileCommandEnterNewline}
           showMobileKeyboardHideRefit={showMobileKeyboardHideRefit}
           mobileKeyboardHideRefit={mobileKeyboardHideRefit}
           onMobileKeyboardHideRefit={setMobileKeyboardHideRefit}
@@ -2754,9 +2796,12 @@ function SplitGrid({
   focusToken,
   touchInput,
   terminalFontSizePx,
+  mobileControlsScalePercent,
   mobileTapTarget,
   mobileLongPressBehavior,
   mobileTouchSelectionEndpointTimeoutMs,
+  mobileCommandExpandingInput,
+  mobileCommandEnterNewline,
   terminalInputTransport,
   terminalInputBatchDelayMs,
   terminalOutputCoalesceMs,
@@ -2772,9 +2817,12 @@ function SplitGrid({
   focusToken: number;
   touchInput: boolean;
   terminalFontSizePx: number;
+  mobileControlsScalePercent: number;
   mobileTapTarget: MobileTerminalTapTarget;
   mobileLongPressBehavior: MobileLongPressBehavior;
   mobileTouchSelectionEndpointTimeoutMs: MobileTouchSelectionEndpointTimeoutMs;
+  mobileCommandExpandingInput: boolean;
+  mobileCommandEnterNewline: boolean;
   terminalInputTransport: TerminalInputTransport;
   terminalInputBatchDelayMs: number;
   terminalOutputCoalesceMs: number;
@@ -2805,9 +2853,12 @@ function SplitGrid({
               scrollSensitivity={touchInput ? 2 : 0.4}
               mobileControls={selected && touchInput}
               terminalFontSizePx={terminalFontSizePx}
+              mobileControlsScalePercent={mobileControlsScalePercent}
               mobileTapTarget={mobileTapTarget}
               mobileLongPressBehavior={mobileLongPressBehavior}
               mobileTouchSelectionEndpointTimeoutMs={mobileTouchSelectionEndpointTimeoutMs}
+              mobileCommandExpandingInput={mobileCommandExpandingInput}
+              mobileCommandEnterNewline={mobileCommandEnterNewline}
               terminalInputTransport={terminalInputTransport}
               terminalInputBatchDelayMs={terminalInputBatchDelayMs}
               terminalOutputCoalesceMs={terminalOutputCoalesceMs}

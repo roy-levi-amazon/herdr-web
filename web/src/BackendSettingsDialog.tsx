@@ -79,6 +79,10 @@ type Props = {
   onMobileTouchSelectionEndpointTimeoutMs: (
     timeoutMs: MobileTouchSelectionEndpointTimeoutMs,
   ) => void;
+  mobileCommandExpandingInput: boolean;
+  onMobileCommandExpandingInput: (enabled: boolean) => void;
+  mobileCommandEnterNewline: boolean;
+  onMobileCommandEnterNewline: (enabled: boolean) => void;
   showMobileKeyboardHideRefit: boolean;
   mobileKeyboardHideRefit: boolean;
   onMobileKeyboardHideRefit: (enabled: boolean) => void;
@@ -117,6 +121,10 @@ export function BackendSettingsDialog({
   onMobileLongPressBehavior,
   mobileTouchSelectionEndpointTimeoutMs,
   onMobileTouchSelectionEndpointTimeoutMs,
+  mobileCommandExpandingInput,
+  onMobileCommandExpandingInput,
+  mobileCommandEnterNewline,
+  onMobileCommandEnterNewline,
   showMobileKeyboardHideRefit,
   mobileKeyboardHideRefit,
   onMobileKeyboardHideRefit,
@@ -125,7 +133,6 @@ export function BackendSettingsDialog({
   const bridge = useBridge();
   const titleId = useId();
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
-  const nameInputRef = useRef<HTMLInputElement | null>(null);
   const [form, setForm] = useState<FormState>(() => newBackendForm(bridge.store.backends));
   const [selectionMode, setSelectionMode] = useState<SelectionMode>(
     initialSelectionMode(bridge.lastSelectedBridgeId, bridge.sameOriginAvailable),
@@ -142,15 +149,8 @@ export function BackendSettingsDialog({
   const sameOriginEnabled = bridge.store.enabledBridgeIds.includes(SAME_ORIGIN_BRIDGE_ID);
 
   useEffect(() => {
-    if (activeArea !== "bridge") {
-      return;
-    }
-    if (selectionMode === "same-origin") {
-      closeButtonRef.current?.focus();
-      return;
-    }
-    nameInputRef.current?.focus();
-  }, [activeArea, selectionMode]);
+    closeButtonRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     if (activeArea === "mobile" && !showMobileTerminalSettings) {
@@ -381,7 +381,6 @@ export function BackendSettingsDialog({
                         <label className="field-label">
                           <span>Display name</span>
                           <input
-                            ref={nameInputRef}
                             className="field"
                             value={form.name}
                             placeholder="Home workstation"
@@ -658,6 +657,58 @@ export function BackendSettingsDialog({
                           {timeoutMs}
                         </button>
                       ))}
+                    </div>
+                  </div>
+                ) : null}
+                <div className="settings-row">
+                  <span>Expanding command input</span>
+                  <div
+                    className="segmented-control"
+                    role="group"
+                    aria-label="Expanding command input"
+                  >
+                    <button
+                      type="button"
+                      data-on={!mobileCommandExpandingInput}
+                      aria-pressed={!mobileCommandExpandingInput}
+                      onClick={() => onMobileCommandExpandingInput(false)}
+                    >
+                      Off
+                    </button>
+                    <button
+                      type="button"
+                      data-on={mobileCommandExpandingInput}
+                      aria-pressed={mobileCommandExpandingInput}
+                      onClick={() => onMobileCommandExpandingInput(true)}
+                    >
+                      On
+                    </button>
+                  </div>
+                </div>
+                {mobileCommandExpandingInput ? (
+                  <div className="settings-row">
+                    <span>Enter inserts newline</span>
+                    <div
+                      className="segmented-control"
+                      role="group"
+                      aria-label="Enter inserts newline"
+                    >
+                      <button
+                        type="button"
+                        data-on={!mobileCommandEnterNewline}
+                        aria-pressed={!mobileCommandEnterNewline}
+                        onClick={() => onMobileCommandEnterNewline(false)}
+                      >
+                        Off
+                      </button>
+                      <button
+                        type="button"
+                        data-on={mobileCommandEnterNewline}
+                        aria-pressed={mobileCommandEnterNewline}
+                        onClick={() => onMobileCommandEnterNewline(true)}
+                      >
+                        On
+                      </button>
                     </div>
                   </div>
                 ) : null}

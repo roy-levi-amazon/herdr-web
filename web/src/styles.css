@@ -920,6 +920,7 @@ button {
 /* ------------------------------------------------------------ terminal */
 
 .terminal-stage {
+  --terminal-mobile-controls-height: calc(82px * var(--mobile-controls-scale));
   position: relative;
   display: flex;
   flex-direction: column;
@@ -1294,6 +1295,11 @@ button {
   height: var(--mobile-input-row-height);
 }
 
+.term-input-row[data-expanding="true"] {
+  align-items: flex-end;
+  height: auto;
+}
+
 .term-native-input {
   min-width: 0;
   flex: 1 1 auto;
@@ -1304,6 +1310,19 @@ button {
   background: var(--crust);
   color: var(--text);
   font-size: clamp(11px, calc(13px * var(--mobile-controls-scale)), 20px);
+}
+
+.term-native-input[data-expanding="true"] {
+  box-sizing: border-box;
+  min-height: var(--mobile-input-row-height);
+  max-height: min(34vh, calc(var(--mobile-input-row-height) * 7));
+  padding: calc(7px * var(--mobile-controls-scale)) var(--mobile-input-padding-x);
+  overflow-x: hidden;
+  overflow-y: auto;
+  resize: none;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .term-native-input:focus {
@@ -2426,31 +2445,13 @@ button {
 }
 
 .app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-overlay {
-  bottom: calc(120px * var(--mobile-controls-scale));
+  bottom: calc(var(--terminal-mobile-controls-height) + 38px * var(--mobile-controls-scale));
 }
 
 .app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-upload-status {
-  bottom: calc(90px * var(--mobile-controls-scale));
+  bottom: calc(var(--terminal-mobile-controls-height) + 8px * var(--mobile-controls-scale));
 }
 
 .app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-selection-sheet {
-  bottom: calc(90px * var(--mobile-controls-scale));
-}
-
-.app[data-touch="true"]
-  .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"])
-  .terminal-overlay {
-  bottom: calc(158px * var(--mobile-controls-scale));
-}
-
-.app[data-touch="true"]
-  .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"])
-  .terminal-upload-status {
-  bottom: calc(126px * var(--mobile-controls-scale));
-}
-
-.app[data-touch="true"]
-  .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"])
-  .terminal-selection-sheet {
-  bottom: calc(126px * var(--mobile-controls-scale));
+  bottom: calc(var(--terminal-mobile-controls-height) + 8px * var(--mobile-controls-scale));
 }

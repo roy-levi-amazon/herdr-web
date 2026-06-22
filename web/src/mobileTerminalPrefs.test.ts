@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE,
+  DEFAULT_MOBILE_COMMAND_EXPANDING_INPUT,
   DEFAULT_MOBILE_LONG_PRESS_BEHAVIOR,
   DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT,
   DEFAULT_MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_MS,
   DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
   MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_OPTIONS_MS,
+  parseMobileCommandEnterNewline,
+  parseMobileCommandExpandingInput,
   parseMobileLongPressBehavior,
   parseMobileKeyboardHideRefit,
   parseMobileTouchSelectionEndpointTimeoutMs,
@@ -51,5 +55,18 @@ describe("mobile terminal preferences", () => {
     expect(parseMobileKeyboardHideRefit(true)).toBe(true);
     expect(parseMobileKeyboardHideRefit(false)).toBe(false);
     expect(parseMobileKeyboardHideRefit("false")).toBe(DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT);
+  });
+
+  it("parses mobile command input flags", () => {
+    expect(parseMobileCommandExpandingInput(true)).toBe(true);
+    expect(parseMobileCommandExpandingInput(false)).toBe(false);
+    expect(parseMobileCommandExpandingInput("true")).toBe(
+      DEFAULT_MOBILE_COMMAND_EXPANDING_INPUT,
+    );
+    expect(parseMobileCommandEnterNewline(true)).toBe(true);
+    expect(parseMobileCommandEnterNewline(false)).toBe(false);
+    expect(parseMobileCommandEnterNewline("false")).toBe(
+      DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE,
+    );
   });
 });
