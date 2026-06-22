@@ -335,7 +335,7 @@ describe("App multi-bridge helpers", () => {
     ).toEqual(["deleted", "archived", "unresolved-other-space", "active-linked"]);
   });
 
-  it("dedupes all-host notes when two bridge profiles point at the same store", () => {
+  it("dedupes all-host notes by note identity when two bridge profiles point at the same store", () => {
     const bridgeViews = [
       bridgeView(
         "bridge-a",
@@ -346,13 +346,31 @@ describe("App multi-bridge helpers", () => {
         bridgeSnapshot("workspace-a", "tab-a", pane("pane-a", "workspace-a", "tab-a")),
       ),
     ];
+    const sharedFromOtherSession = {
+      ...note("shared", "workspace-a", "linked"),
+      session_key: "session:bridge-b",
+    };
+    const sharedFromOwningSession = {
+      ...sharedFromOtherSession,
+      resolved_pane: pane("workspace-a-pane", "workspace-a", "tab-a"),
+    };
 
     expect(
       buildVisibleScopedNotes(
         bridgeViews,
         {
-          ...notesState("bridge-a", "shared-store", [note("a", "workspace-a", "linked")]),
-          ...notesState("bridge-b", "shared-store", [note("b", "workspace-a", "linked")]),
+          ...notesState(
+            "bridge-a",
+            "shared-store",
+            [note("a", "workspace-a", "linked"), sharedFromOtherSession],
+            "session:bridge-a",
+          ),
+          ...notesState(
+            "bridge-b",
+            "shared-store",
+            [note("b", "workspace-a", "linked"), sharedFromOwningSession],
+            "session:bridge-b",
+          ),
         },
         "bridge-a",
         "all",
@@ -361,8 +379,12 @@ describe("App multi-bridge helpers", () => {
         {},
         false,
         false,
-      ).map((entry) => `${entry.bridgeId}:${entry.note.note_id}`),
-    ).toEqual(["bridge-a:a"]);
+      ).map((entry) => `${entry.bridgeId}:${entry.note.session_key}:${entry.note.note_id}`),
+    ).toEqual([
+      "bridge-a:session:default:a",
+      "bridge-b:session:default:b",
+      "bridge-b:session:bridge-b:shared",
+    ]);
   });
 
   it("scopes note drafts by bridge connection, store, session, and note id", () => {
@@ -388,6 +410,36 @@ describe("App multi-bridge helpers", () => {
     expect(noteDraftStorageKey(first)).not.toBe(noteDraftStorageKey(changedSession));
     expect(noteDraftStorageKey(first)).toContain("store-1");
     expect(noteDraftStorageKey(first)).toContain("session%3Adefault");
+  });
+
+  it("scopes note drafts by the note owner session for other-session notes", () => {
+    const bridgeViews = [
+      bridgeView(
+        "bridge-a",
+        bridgeSnapshot("workspace-a", "tab-a", pane("pane-a", "workspace-a", "tab-a")),
+      ),
+    ];
+    const [first] = buildVisibleScopedNotes(
+      bridgeViews,
+      notesState(
+        "bridge-a",
+        "store-1",
+        [{ ...note("n1", "workspace-a", "linked"), session_key: "session:note-owner" }],
+        "session:bridge-response",
+      ),
+      "bridge-a",
+      "selected",
+      "all",
+      null,
+      {},
+      false,
+      false,
+    );
+
+    expect(first.sessionKey).toBe("session:note-owner");
+    expect(first.bridgeSessionKey).toBe("session:bridge-response");
+    expect(noteDraftStorageKey(first)).toContain("session%3Anote-owner");
+    expect(noteDraftStorageKey(first)).not.toContain("session%3Abridge-response");
   });
 
   it("blocks note autosave when the server revision advances under a dirty draft", () => {
@@ -580,13 +632,18 @@ function bridgeSnapshot(workspaceId: string, tabId: string, paneInfo: PaneInfo):
   };
 }
 
-function notesState(bridgeId: string, storeId: string, notes: PaneNote[]) {
+function notesState(
+  bridgeId: string,
+  storeId: string,
+  notes: PaneNote[],
+  sessionKey = "session:default",
+) {
   return {
     [bridgeId]: {
       connectionKey: bridgeId,
       response: {
         store_id: storeId,
-        session_key: "session:default",
+        session_key: sessionKey,
         notes,
       },
       loadState: "ready" as const,

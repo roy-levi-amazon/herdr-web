@@ -204,6 +204,7 @@ export type ScopedNoteEntry = {
   connectionKey: string;
   storeId: string;
   sessionKey: string;
+  bridgeSessionKey: string;
   bridgeIndex: number;
   bridgeLabel: string;
   bridgeColor: string;
@@ -2249,7 +2250,13 @@ export function App() {
   }
 
   async function refreshBridgeNotes(runtime: BridgeRuntime, setLoading: boolean) {
+    ensureBridgeConnectionRef(connectionRefs, runtime);
     const requestConnectionKey = runtime.connectionKey;
+    const isCurrentConnection = () =>
+      isConnectionResultCurrent(
+        connectionRefs.current[runtime.id]?.connectionKey ?? "",
+        requestConnectionKey,
+      );
     if (
       !notesEnabled ||
       !runtime.canConnect ||
@@ -2288,7 +2295,7 @@ export function App() {
         includeOtherSessions: true,
       });
       setNotesStates((current) => {
-        if (bridge.getRuntime(runtime.id)?.connectionKey !== requestConnectionKey) {
+        if (!isCurrentConnection()) {
           return current;
         }
         return {
@@ -2304,6 +2311,9 @@ export function App() {
       return response;
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Notes unavailable";
+      if (!isCurrentConnection()) {
+        return null;
+      }
       setNotesStates((current) => ({
         ...current,
         [runtime.id]: {
@@ -2880,7 +2890,8 @@ export function App() {
             bridgeId: selectedRuntime.id,
             connectionKey: selectedRuntime.connectionKey,
             storeId: selectedNotesState?.response?.store_id ?? "unknown-store",
-            sessionKey: selectedNotesState?.response?.session_key ?? note.session_key,
+            sessionKey: note.session_key,
+            bridgeSessionKey: selectedNotesState?.response?.session_key ?? note.session_key,
             bridgeIndex: Math.max(
               0,
               bridgeViews.findIndex((view) => view.runtime.id === selectedRuntime.id),
@@ -3565,18 +3576,10 @@ export function buildVisibleScopedNotes(
   dedupeStores = true,
 ): ScopedNoteEntry[] {
   const hostBridgeViews = visibleHostBridgeViews(bridgeViews, selectedBridgeId, hostScope);
-  const seenStores = new Set<string>();
   const entries = hostBridgeViews.flatMap((view) => {
     const notesState = notesStates[view.runtime.id];
     if (!notesState || notesState.connectionKey !== view.runtime.connectionKey) {
       return [];
-    }
-    if (dedupeStores && hostScope === "all" && notesState.response) {
-      const storeKey = `${notesState.response.store_id}:${notesState.response.session_key}`;
-      if (seenStores.has(storeKey)) {
-        return [];
-      }
-      seenStores.add(storeKey);
     }
     const snapshot = view.snapshot;
     const bridgeIndex = Math.max(
@@ -3602,7 +3605,8 @@ export function buildVisibleScopedNotes(
           bridgeId: view.runtime.id,
           connectionKey: view.runtime.connectionKey,
           storeId: notesState.response?.store_id ?? "unknown-store",
-          sessionKey: notesState.response?.session_key ?? note.session_key,
+          sessionKey: note.session_key,
+          bridgeSessionKey: notesState.response?.session_key ?? note.session_key,
           bridgeIndex,
           bridgeLabel: view.runtime.label,
           bridgeColor: view.runtime.color,
@@ -3615,13 +3619,42 @@ export function buildVisibleScopedNotes(
         };
       });
   });
-  return entries.sort((a, b) => {
+  const visibleEntries =
+    dedupeStores && hostScope === "all" ? dedupeScopedNoteEntries(entries) : entries;
+  return visibleEntries.sort((a, b) => {
     const bridge = a.bridgeIndex - b.bridgeIndex;
     if (bridge !== 0) {
       return bridge;
     }
     return compareNotes(a.note, b.note);
   });
+}
+
+function dedupeScopedNoteEntries(entries: ScopedNoteEntry[]) {
+  const byNoteIdentity = new Map<string, ScopedNoteEntry>();
+  for (const entry of entries) {
+    const identity = scopedNoteIdentity(entry);
+    const existing = byNoteIdentity.get(identity);
+    if (!existing || shouldPreferScopedNoteEntry(entry, existing)) {
+      byNoteIdentity.set(identity, entry);
+    }
+  }
+  return Array.from(byNoteIdentity.values());
+}
+
+function scopedNoteIdentity(entry: ScopedNoteEntry) {
+  return `${entry.storeId}:${entry.note.session_key}:${entry.note.note_id}`;
+}
+
+function shouldPreferScopedNoteEntry(candidate: ScopedNoteEntry, existing: ScopedNoteEntry) {
+  const score = (entry: ScopedNoteEntry) =>
+    (entry.bridgeSessionKey === entry.note.session_key ? 2 : 0) + (entry.pane ? 1 : 0);
+  const candidateScore = score(candidate);
+  const existingScore = score(existing);
+  if (candidateScore !== existingScore) {
+    return candidateScore > existingScore;
+  }
+  return candidate.bridgeIndex < existing.bridgeIndex;
 }
 
 function noteVisibleByLifecycle(

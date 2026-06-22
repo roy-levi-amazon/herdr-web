@@ -304,6 +304,7 @@ function noteEntry({
     connectionKey: "http://bridge-a",
     storeId: "store-a",
     sessionKey: "session-a",
+    bridgeSessionKey: "session-a",
     bridgeIndex: 0,
     bridgeLabel: "Bridge A",
     bridgeColor: "#89b4fa",
