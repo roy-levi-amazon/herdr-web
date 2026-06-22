@@ -851,10 +851,6 @@ export function App() {
         return true;
       }
       if (notesPanelOpen) {
-        if (isCompactLayout && mobileNotesScreen === "editor") {
-          setMobileNotesScreen("list");
-          return true;
-        }
         setNotesPanelOpen(false);
         return true;
       }
@@ -880,10 +876,8 @@ export function App() {
     backendSettingsOpen,
     deletingNote,
     dialog,
-    isCompactLayout,
     launchTarget,
     menu,
-    mobileNotesScreen,
     noteDeleteTarget,
     notesPanelOpen,
   ]);
@@ -1728,13 +1722,20 @@ export function App() {
     if (!notesEnabled) {
       return;
     }
-    setMobileNotesScreen("list");
-    if (!selectedNoteRef && selectedRuntime && selectedPaneNotes.length > 0) {
+    const selectedNoteIsCurrentPaneNote =
+      selectedScopedNote &&
+      selectedRuntime &&
+      selectedScopedNote.bridgeId === selectedRuntime.id &&
+      selectedPaneNotes.some((note) => note.note_id === selectedScopedNote.note.note_id);
+    const firstPaneNote = selectedPaneNotes[0] ?? null;
+    const noteToOpen = selectedNoteIsCurrentPaneNote ? selectedScopedNote.note : firstPaneNote;
+    if (selectedRuntime && noteToOpen) {
       setSelectedNoteRef({
         bridgeId: selectedRuntime.id,
-        noteId: selectedPaneNotes[0].note_id,
+        noteId: noteToOpen.note_id,
       });
     }
+    setMobileNotesScreen(isCompactLayout && noteToOpen ? "editor" : "list");
     setNotesPanelOpen(true);
   };
 
@@ -2895,7 +2896,7 @@ export function App() {
               selectedScopedNote.bridgeId === selectedRuntime.id,
           )}
           onClose={() => setNotesPanelOpen(false)}
-          onMobileBackToList={() => setMobileNotesScreen("list")}
+          onShowNotesList={() => setMobileNotesScreen("list")}
           onSelectNote={selectNote}
           onCreatePaneNote={() => void createNoteForCurrentPane()}
           onCreateDetachedNote={() => void createDetachedBridgeNote()}
@@ -4987,7 +4988,7 @@ function NotesSurface({
   currentBridgeSupportsNotes,
   canAttachToCurrentPane,
   onClose,
-  onMobileBackToList,
+  onShowNotesList,
   onSelectNote,
   onCreatePaneNote,
   onCreateDetachedNote,
@@ -5023,7 +5024,7 @@ function NotesSurface({
   currentBridgeSupportsNotes: boolean;
   canAttachToCurrentPane: boolean;
   onClose: () => void;
-  onMobileBackToList: () => void;
+  onShowNotesList: () => void;
   onSelectNote: (bridgeId: BridgeId, noteId: string) => void;
   onCreatePaneNote: () => void;
   onCreateDetachedNote: () => void;
@@ -5104,11 +5105,11 @@ function NotesSurface({
           <button
             className="icon-btn"
             type="button"
-            aria-label="Back to notes"
-            title="Back"
-            onClick={onMobileBackToList}
+            aria-label="Show notes list"
+            title="Show notes list"
+            onClick={onShowNotesList}
           >
-            <ChevronLeft size={20} />
+            <PanelLeft size={18} />
           </button>
         ) : null}
         <div>

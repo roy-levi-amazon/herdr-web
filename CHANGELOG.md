@@ -26,6 +26,8 @@
   and unresolved note recovery actions in the notes panel.
 - On mobile, kept the note editor's terminal action available for the current pane and made it
   close the full-screen notes surface.
+- Changed mobile notes back navigation so back closes the notes surface from the editor, while a
+  separate header button shows the notes list.
 - Kept the new-tab button pinned at the right edge of the top tab bar while the tab list scrolls.
 - Improved terminal reconnect/resume handling so Android foregrounding and quick terminal switches
   keep the renderer stable, avoid stale tab flashes, and suppress transient connecting overlays.
