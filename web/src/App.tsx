@@ -260,6 +260,7 @@ type DisplayPrefs = {
   notesListPaneWidth: number;
   notesListPaneCollapsed: boolean;
   notesEnabled: boolean;
+  notesPanelOpen: boolean;
   sidebarOpen: boolean;
   selectedBridgeId: BridgeId | null;
   selectedPane: ScopedPaneRef | null;
@@ -312,6 +313,7 @@ function readDisplayPrefs(): DisplayPrefs {
     notesListPaneWidth: DEFAULT_NOTES_LIST_PANE_WIDTH,
     notesListPaneCollapsed: true,
     notesEnabled: true,
+    notesPanelOpen: false,
     sidebarOpen: true,
     selectedBridgeId: null,
     selectedPane: null,
@@ -413,6 +415,8 @@ function parseDisplayPrefsValue(
         : fallback.notesListPaneCollapsed,
     notesEnabled:
       typeof parsed.notesEnabled === "boolean" ? parsed.notesEnabled : fallback.notesEnabled,
+    notesPanelOpen:
+      typeof parsed.notesPanelOpen === "boolean" ? parsed.notesPanelOpen : fallback.notesPanelOpen,
     sidebarOpen,
     selectedBridgeId:
       typeof parsed.selectedBridgeId === "string" ? parsed.selectedBridgeId : fallback.selectedBridgeId,
@@ -521,6 +525,10 @@ function readLegacyDisplayPrefs(fallback: DisplayPrefs): DisplayPrefs {
           : fallback.notesListPaneCollapsed,
       notesEnabled:
         typeof parsed.notesEnabled === "boolean" ? parsed.notesEnabled : fallback.notesEnabled,
+      notesPanelOpen:
+        typeof parsed.notesPanelOpen === "boolean"
+          ? parsed.notesPanelOpen
+          : fallback.notesPanelOpen,
       sidebarOpen,
       terminalFontSizePx: parseTerminalFontSizePx(parsed.terminalFontSizePx),
       terminalInputTransport: parseTerminalInputTransport(parsed.terminalInputTransport),
@@ -697,7 +705,9 @@ export function App() {
     initialPrefs.selectedBridgeId,
   );
   const [selectedNoteRef, setSelectedNoteRef] = useState<ScopedNoteRef | null>(null);
-  const [notesPanelOpen, setNotesPanelOpen] = useState(false);
+  const [notesPanelOpen, setNotesPanelOpen] = useState(
+    initialPrefs.notesEnabled && initialPrefs.notesPanelOpen,
+  );
   const [mobileNotesScreen, setMobileNotesScreen] = useState<MobileNotesScreen>("list");
   const [notesIncludeArchived, setNotesIncludeArchived] = useState(false);
   const [notesIncludeDeleted, setNotesIncludeDeleted] = useState(false);
@@ -816,6 +826,7 @@ export function App() {
       setNotesListPaneWidth(prefs.notesListPaneWidth);
       setNotesListPaneCollapsed(prefs.notesListPaneCollapsed);
       setNotesEnabled(prefs.notesEnabled);
+      setNotesPanelOpen(prefs.notesEnabled && prefs.notesPanelOpen);
       setSidebarOpen(prefs.sidebarOpen);
       setSelectedBridgeId(prefs.selectedBridgeId);
       setSelectedPaneRefState(prefs.selectedPane);
@@ -1124,6 +1135,7 @@ export function App() {
       notesListPaneWidth,
       notesListPaneCollapsed,
       notesEnabled,
+      notesPanelOpen,
       sidebarOpen,
       selectedBridgeId,
       selectedPane: selectedPaneRefState,
@@ -1156,6 +1168,7 @@ export function App() {
     notesListPaneWidth,
     notesListPaneCollapsed,
     notesEnabled,
+    notesPanelOpen,
     sidebarOpen,
     selectedBridgeId,
     selectedPaneRefState,

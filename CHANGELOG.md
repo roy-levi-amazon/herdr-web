@@ -11,7 +11,7 @@
   same bridge request policy as terminal controls, so allowed bridge clients can read and mutate
   saved note content.
 - Added a Notes feature toggle plus persisted desktop notes panel sizing, notes list collapse
-  state, pane note tabs, and a dedicated Other notes list.
+  state, notes panel open state, pane note tabs, and a dedicated Other notes list.
 
 ### Changed
 
