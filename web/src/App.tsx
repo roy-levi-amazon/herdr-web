@@ -10,13 +10,20 @@ import {
   Settings,
   SplitSquareHorizontal,
   SplitSquareVertical,
+  SquareTerminal,
   StickyNote,
   Trash2,
   Unlink,
   X,
 } from "lucide-react";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, Dispatch, MutableRefObject, SetStateAction } from "react";
+import type {
+  CSSProperties,
+  Dispatch,
+  KeyboardEvent as ReactKeyboardEvent,
+  MutableRefObject,
+  SetStateAction,
+} from "react";
 import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 import { AgentIcon, agentIconKind } from "./AgentIcon";
@@ -249,6 +256,10 @@ type DisplayPrefs = {
   agentSort: AgentSort;
   agentGroup: AgentGroup;
   sidebarWidth: number;
+  notesPanelWidth: number;
+  notesListPaneWidth: number;
+  notesListPaneCollapsed: boolean;
+  notesEnabled: boolean;
   sidebarOpen: boolean;
   selectedBridgeId: BridgeId | null;
   selectedPane: ScopedPaneRef | null;
@@ -282,6 +293,12 @@ const MOBILE_DETAIL_HISTORY_KEY = "herdrWebMobileDetail";
 const DEFAULT_SIDEBAR_WIDTH = 320;
 const MIN_SIDEBAR_WIDTH = 260;
 const MAX_SIDEBAR_WIDTH = 560;
+const DEFAULT_NOTES_PANEL_WIDTH = 560;
+const MIN_NOTES_PANEL_WIDTH = 420;
+const MAX_NOTES_PANEL_WIDTH = 840;
+const DEFAULT_NOTES_LIST_PANE_WIDTH = 240;
+const MIN_NOTES_LIST_PANE_WIDTH = 200;
+const MAX_NOTES_LIST_PANE_WIDTH = 420;
 
 function readDisplayPrefs(): DisplayPrefs {
   const fallback: DisplayPrefs = {
@@ -291,6 +308,10 @@ function readDisplayPrefs(): DisplayPrefs {
     agentSort: "attention",
     agentGroup: "none",
     sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+    notesPanelWidth: DEFAULT_NOTES_PANEL_WIDTH,
+    notesListPaneWidth: DEFAULT_NOTES_LIST_PANE_WIDTH,
+    notesListPaneCollapsed: true,
+    notesEnabled: true,
     sidebarOpen: true,
     selectedBridgeId: null,
     selectedPane: null,
@@ -345,6 +366,16 @@ function parseDisplayPrefsValue(
   parsed: Partial<DisplayPrefs> & { mobileTouchSelection?: unknown },
   fallback: DisplayPrefs,
 ): DisplayPrefs {
+  const sidebarWidth =
+    typeof parsed.sidebarWidth === "number"
+      ? clampSidebarWidth(parsed.sidebarWidth)
+      : fallback.sidebarWidth;
+  const sidebarOpen =
+    typeof parsed.sidebarOpen === "boolean" ? parsed.sidebarOpen : fallback.sidebarOpen;
+  const notesPanelWidth =
+    typeof parsed.notesPanelWidth === "number"
+      ? clampNotesPanelWidth(parsed.notesPanelWidth, sidebarWidth, sidebarOpen)
+      : fallback.notesPanelWidth;
   return {
     hostScope:
       parsed.hostScope === "selected" || parsed.hostScope === "all"
@@ -370,12 +401,19 @@ function parseDisplayPrefsValue(
       parsed.agentGroup === "hostWorkspace"
         ? parsed.agentGroup
         : fallback.agentGroup,
-    sidebarWidth:
-      typeof parsed.sidebarWidth === "number"
-        ? clampSidebarWidth(parsed.sidebarWidth)
-        : fallback.sidebarWidth,
-    sidebarOpen:
-      typeof parsed.sidebarOpen === "boolean" ? parsed.sidebarOpen : fallback.sidebarOpen,
+    sidebarWidth,
+    notesPanelWidth,
+    notesListPaneWidth:
+      typeof parsed.notesListPaneWidth === "number"
+        ? clampNotesListPaneWidth(parsed.notesListPaneWidth, notesPanelWidth)
+        : fallback.notesListPaneWidth,
+    notesListPaneCollapsed:
+      typeof parsed.notesListPaneCollapsed === "boolean"
+        ? parsed.notesListPaneCollapsed
+        : fallback.notesListPaneCollapsed,
+    notesEnabled:
+      typeof parsed.notesEnabled === "boolean" ? parsed.notesEnabled : fallback.notesEnabled,
+    sidebarOpen,
     selectedBridgeId:
       typeof parsed.selectedBridgeId === "string" ? parsed.selectedBridgeId : fallback.selectedBridgeId,
     selectedPane: parseScopedPaneRef(parsed.selectedPane),
@@ -435,6 +473,16 @@ function readLegacyDisplayPrefs(fallback: DisplayPrefs): DisplayPrefs {
       selectedPaneId?: unknown;
       mobileTouchSelection?: unknown;
     } & Partial<DisplayPrefs>;
+    const sidebarWidth =
+      typeof parsed.sidebarWidth === "number"
+        ? clampSidebarWidth(parsed.sidebarWidth)
+        : fallback.sidebarWidth;
+    const sidebarOpen =
+      typeof parsed.sidebarOpen === "boolean" ? parsed.sidebarOpen : fallback.sidebarOpen;
+    const notesPanelWidth =
+      typeof parsed.notesPanelWidth === "number"
+        ? clampNotesPanelWidth(parsed.notesPanelWidth, sidebarWidth, sidebarOpen)
+        : fallback.notesPanelWidth;
     return {
       ...fallback,
       hostScope:
@@ -461,12 +509,19 @@ function readLegacyDisplayPrefs(fallback: DisplayPrefs): DisplayPrefs {
         parsed.agentGroup === "hostWorkspace"
           ? parsed.agentGroup
           : fallback.agentGroup,
-      sidebarWidth:
-        typeof parsed.sidebarWidth === "number"
-          ? clampSidebarWidth(parsed.sidebarWidth)
-          : fallback.sidebarWidth,
-      sidebarOpen:
-        typeof parsed.sidebarOpen === "boolean" ? parsed.sidebarOpen : fallback.sidebarOpen,
+      sidebarWidth,
+      notesPanelWidth,
+      notesListPaneWidth:
+        typeof parsed.notesListPaneWidth === "number"
+          ? clampNotesListPaneWidth(parsed.notesListPaneWidth, notesPanelWidth)
+          : fallback.notesListPaneWidth,
+      notesListPaneCollapsed:
+        typeof parsed.notesListPaneCollapsed === "boolean"
+          ? parsed.notesListPaneCollapsed
+          : fallback.notesListPaneCollapsed,
+      notesEnabled:
+        typeof parsed.notesEnabled === "boolean" ? parsed.notesEnabled : fallback.notesEnabled,
+      sidebarOpen,
       terminalFontSizePx: parseTerminalFontSizePx(parsed.terminalFontSizePx),
       terminalInputTransport: parseTerminalInputTransport(parsed.terminalInputTransport),
       terminalInputBatchDelayMs: parseTerminalInputBatchDelayMs(parsed.terminalInputBatchDelayMs),
@@ -530,6 +585,30 @@ function clampSidebarWidth(width: number) {
       ? MAX_SIDEBAR_WIDTH
       : Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, window.innerWidth - 360));
   return Math.round(Math.min(Math.max(width, MIN_SIDEBAR_WIDTH), viewportMax));
+}
+
+function clampNotesPanelWidth(
+  width: number,
+  sidebarWidth = DEFAULT_SIDEBAR_WIDTH,
+  sidebarOpen = true,
+) {
+  const reservedWidth = sidebarOpen ? sidebarWidth : 0;
+  const viewportMax =
+    typeof window === "undefined"
+      ? MAX_NOTES_PANEL_WIDTH
+      : Math.max(
+          MIN_NOTES_PANEL_WIDTH,
+          Math.min(MAX_NOTES_PANEL_WIDTH, window.innerWidth - reservedWidth - 320),
+        );
+  return Math.round(Math.min(Math.max(width, MIN_NOTES_PANEL_WIDTH), viewportMax));
+}
+
+function clampNotesListPaneWidth(width: number, notesPanelWidth = DEFAULT_NOTES_PANEL_WIDTH) {
+  const maxWidth = Math.max(
+    MIN_NOTES_LIST_PANE_WIDTH,
+    Math.min(MAX_NOTES_LIST_PANE_WIDTH, notesPanelWidth - 260),
+  );
+  return Math.round(Math.min(Math.max(width, MIN_NOTES_LIST_PANE_WIDTH), maxWidth));
 }
 
 async function writeDisplayPrefs(prefs: DisplayPrefs) {
@@ -639,11 +718,21 @@ export function App() {
   const [agentSort, setAgentSort] = useState<AgentSort>(initialPrefs.agentSort);
   const [agentGroup, setAgentGroup] = useState<AgentGroup>(initialPrefs.agentGroup);
   const [sidebarWidth, setSidebarWidth] = useState(initialPrefs.sidebarWidth);
+  const [notesPanelWidth, setNotesPanelWidth] = useState(initialPrefs.notesPanelWidth);
+  const [notesListPaneWidth, setNotesListPaneWidth] = useState(initialPrefs.notesListPaneWidth);
+  const [notesListPaneCollapsed, setNotesListPaneCollapsed] = useState(
+    initialPrefs.notesListPaneCollapsed,
+  );
+  const [notesEnabled, setNotesEnabled] = useState(initialPrefs.notesEnabled);
   const [resizingSidebar, setResizingSidebar] = useState(false);
+  const [resizingNotesPanel, setResizingNotesPanel] = useState(false);
+  const [resizingNotesListPane, setResizingNotesListPane] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(initialPrefs.sidebarOpen);
   const [showDetail, setShowDetail] = useState(false);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [noteDeleteTarget, setNoteDeleteTarget] = useState<ScopedNoteEntry | null>(null);
+  const [deletingNote, setDeletingNote] = useState(false);
   const [backendSettingsOpen, setBackendSettingsOpen] = useState(false);
   const [terminalFontSizePx, setTerminalFontSizePx] = useState(
     initialPrefs.terminalFontSizePx,
@@ -698,6 +787,8 @@ export function App() {
   const mobileSidebarHistoryRef = useRef(false);
   const mobileDetailHistoryRef = useRef(false);
   const legacySelectionAppliedRef = useRef(false);
+  const selectedNotePaneKeyRef = useRef("");
+  const notesListResizeLeftRef = useRef(0);
   const sidebarResizePressRef = useRef<{
     timer: number;
     pointerId: number;
@@ -721,6 +812,10 @@ export function App() {
       setAgentSort(prefs.agentSort);
       setAgentGroup(prefs.agentGroup);
       setSidebarWidth(prefs.sidebarWidth);
+      setNotesPanelWidth(prefs.notesPanelWidth);
+      setNotesListPaneWidth(prefs.notesListPaneWidth);
+      setNotesListPaneCollapsed(prefs.notesListPaneCollapsed);
+      setNotesEnabled(prefs.notesEnabled);
       setSidebarOpen(prefs.sidebarOpen);
       setSelectedBridgeId(prefs.selectedBridgeId);
       setSelectedPaneRefState(prefs.selectedPane);
@@ -769,6 +864,10 @@ export function App() {
         setDialog(null);
         return true;
       }
+      if (noteDeleteTarget) {
+        setNoteDeleteTarget(null);
+        return true;
+      }
       if (menu) {
         setMenu(null);
         return true;
@@ -782,6 +881,7 @@ export function App() {
     launchTarget,
     menu,
     mobileNotesScreen,
+    noteDeleteTarget,
     notesPanelOpen,
   ]);
 
@@ -1023,6 +1123,10 @@ export function App() {
       agentSort,
       agentGroup,
       sidebarWidth,
+      notesPanelWidth,
+      notesListPaneWidth,
+      notesListPaneCollapsed,
+      notesEnabled,
       sidebarOpen,
       selectedBridgeId,
       selectedPane: selectedPaneRefState,
@@ -1051,6 +1155,10 @@ export function App() {
     agentSort,
     agentGroup,
     sidebarWidth,
+    notesPanelWidth,
+    notesListPaneWidth,
+    notesListPaneCollapsed,
+    notesEnabled,
     sidebarOpen,
     selectedBridgeId,
     selectedPaneRefState,
@@ -1094,7 +1202,20 @@ export function App() {
 
   useEffect(() => {
     setSidebarWidth((width) => clampSidebarWidth(width));
-  }, [isCompactLayout]);
+    setNotesPanelWidth((width) => clampNotesPanelWidth(width, sidebarWidth, sidebarOpen));
+    setNotesListPaneWidth((width) => clampNotesListPaneWidth(width, notesPanelWidth));
+  }, [isCompactLayout, notesPanelWidth, sidebarOpen, sidebarWidth]);
+
+  useEffect(() => {
+    if (notesEnabled) {
+      return;
+    }
+    setNotesPanelOpen(false);
+    setSelectedNoteRef(null);
+    if (sidebarView === "notes") {
+      setSidebarView("agents");
+    }
+  }, [notesEnabled, sidebarView]);
 
   const clearSidebarResizePress = () => {
     const pending = sidebarResizePressRef.current;
@@ -1129,6 +1250,54 @@ export function App() {
       document.body.style.userSelect = "";
     };
   }, [resizingSidebar]);
+
+  useEffect(() => {
+    if (!resizingNotesPanel) {
+      return;
+    }
+    const onPointerMove = (event: PointerEvent) => {
+      setNotesPanelWidth(
+        clampNotesPanelWidth(window.innerWidth - event.clientX, sidebarWidth, sidebarOpen),
+      );
+    };
+    const onPointerUp = () => setResizingNotesPanel(false);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp, { once: true });
+    window.addEventListener("pointercancel", onPointerUp, { once: true });
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+  }, [resizingNotesPanel, sidebarOpen, sidebarWidth]);
+
+  useEffect(() => {
+    if (!resizingNotesListPane) {
+      return;
+    }
+    const onPointerMove = (event: PointerEvent) => {
+      setNotesListPaneWidth(
+        clampNotesListPaneWidth(event.clientX - notesListResizeLeftRef.current, notesPanelWidth),
+      );
+    };
+    const onPointerUp = () => setResizingNotesListPane(false);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp, { once: true });
+    window.addEventListener("pointercancel", onPointerUp, { once: true });
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+  }, [notesPanelWidth, resizingNotesListPane]);
 
   useEffect(
     () => () => {
@@ -1257,11 +1426,37 @@ export function App() {
     selectedRuntime && notesStates[selectedRuntime.id]?.connectionKey === selectedRuntime.connectionKey
       ? notesStates[selectedRuntime.id]
       : null;
-  const selectedBridgeNotes = selectedNotesState?.response?.notes ?? [];
+  const selectedBridgeNotes = notesEnabled ? selectedNotesState?.response?.notes ?? [] : [];
   const selectedPaneNotes = useMemo(
     () => notesForPane(selectedBridgeNotes, selectedPane?.pane_id),
     [selectedBridgeNotes, selectedPane?.pane_id],
   );
+  const selectedRuntimeId = selectedRuntime?.id ?? null;
+  const selectedPaneKey =
+    notesEnabled && selectedRuntimeId && selectedPane
+      ? `${selectedRuntimeId}:${selectedPane.pane_id}`
+      : "";
+  useEffect(() => {
+    const paneChanged = selectedNotePaneKeyRef.current !== selectedPaneKey;
+    selectedNotePaneKeyRef.current = selectedPaneKey;
+    if (!selectedPaneKey || !selectedRuntimeId) {
+      setSelectedNoteRef(null);
+      return;
+    }
+    setSelectedNoteRef((current) => {
+      const currentIsPaneNote =
+        current?.bridgeId === selectedRuntimeId &&
+        selectedPaneNotes.some((note) => note.note_id === current.noteId);
+      if (currentIsPaneNote) {
+        return current;
+      }
+      if (!paneChanged && current) {
+        return current;
+      }
+      const firstNote = selectedPaneNotes[0] ?? null;
+      return firstNote ? { bridgeId: selectedRuntimeId, noteId: firstNote.note_id } : null;
+    });
+  }, [selectedPaneKey, selectedPaneNotes, selectedRuntimeId]);
   const selectedPaneMenuPress = useLongPress((x, y) => {
     if (selectedPane && selectedRuntime) {
       setMenu({
@@ -1300,8 +1495,11 @@ export function App() {
     );
   }, [snapshot, activeWorkspaceId, selectedPane]);
   const visibleNotes = useMemo(
-    () =>
-      buildVisibleScopedNotes(
+    () => {
+      if (!notesEnabled) {
+        return [];
+      }
+      return buildVisibleScopedNotes(
         bridgeViews,
         notesStates,
         selectedRuntime?.id ?? null,
@@ -1311,12 +1509,14 @@ export function App() {
         activeWorkspacesByBridgeId,
         notesIncludeArchived,
         notesIncludeDeleted,
-      ),
+      );
+    },
     [
       activeSpace,
       activeWorkspacesByBridgeId,
       bridgeViews,
       hostScope,
+      notesEnabled,
       notesStates,
       notesIncludeArchived,
       notesIncludeDeleted,
@@ -1325,8 +1525,11 @@ export function App() {
     ],
   );
   const allScopedNotes = useMemo(
-    () =>
-      buildVisibleScopedNotes(
+    () => {
+      if (!notesEnabled) {
+        return [];
+      }
+      return buildVisibleScopedNotes(
         bridgeViews,
         notesStates,
         null,
@@ -1337,15 +1540,13 @@ export function App() {
         true,
         true,
         false,
-      ),
-    [bridgeViews, notesStates],
+      );
+    },
+    [bridgeViews, notesEnabled, notesStates],
   );
   const selectedScopedNote = useMemo(
-    () =>
-      selectedNoteRef
-        ? findScopedNote(allScopedNotes, selectedNoteRef, false)
-        : (visibleNotes[0] ?? null),
-    [allScopedNotes, selectedNoteRef, visibleNotes],
+    () => (selectedNoteRef ? findScopedNote(allScopedNotes, selectedNoteRef, false) : null),
+    [allScopedNotes, selectedNoteRef],
   );
 
   // The active tab's split layout, normalized to fractions of the tab area so we
@@ -1510,6 +1711,9 @@ export function App() {
   };
 
   const selectNote = (bridgeId: BridgeId, noteId: string) => {
+    if (!notesEnabled) {
+      return;
+    }
     setSelectedNoteRef({ bridgeId, noteId });
     if (isCompactLayout) {
       setMobileNotesScreen("editor");
@@ -1518,6 +1722,9 @@ export function App() {
   };
 
   const openNotesPanel = () => {
+    if (!notesEnabled) {
+      return;
+    }
     setMobileNotesScreen("list");
     if (!selectedNoteRef && selectedRuntime && selectedPaneNotes.length > 0) {
       setSelectedNoteRef({
@@ -1529,6 +1736,10 @@ export function App() {
   };
 
   const createNoteForCurrentPane = async () => {
+    if (!notesEnabled) {
+      setError("Notes are disabled in settings");
+      return;
+    }
     if (!selectedRuntime || !selectedPane || !supportsNotes(selectedRuntime.capabilities)) {
       setError("Notes are not available for this bridge");
       return;
@@ -1551,6 +1762,10 @@ export function App() {
   };
 
   const createDetachedBridgeNote = async (bridgeId = selectedRuntime?.id ?? null) => {
+    if (!notesEnabled) {
+      setError("Notes are disabled in settings");
+      return;
+    }
     const runtime = bridgeId ? bridge.getRuntime(bridgeId) : null;
     if (!runtime || !supportsNotes(runtime.capabilities)) {
       setError("Notes are not available for this bridge");
@@ -1672,16 +1887,46 @@ export function App() {
     const runtime = bridge.getRuntime(entry.bridgeId);
     if (!runtime) {
       setError("Bridge is not ready");
-      return;
+      return false;
     }
     try {
       await deleteNote(runtime.httpUrl, entry.note.note_id, {
         expectedRevision: entry.note.revision,
       });
       clearNoteDraft(entry);
-      await refreshBridgeNotes(runtime, false);
+      const deletedSelected =
+        selectedNoteRef?.bridgeId === entry.bridgeId &&
+        selectedNoteRef.noteId === entry.note.note_id;
+      if (deletedSelected) {
+        setSelectedNoteRef(null);
+      }
+      const response = await refreshBridgeNotes(runtime, false);
+      if (deletedSelected && selectedRuntime?.id === runtime.id && selectedPane) {
+        const nextPaneNote = notesForPane(response?.notes ?? [], selectedPane.pane_id).find(
+          (note) => note.note_id !== entry.note.note_id,
+        );
+        setSelectedNoteRef(
+          nextPaneNote ? { bridgeId: runtime.id, noteId: nextPaneNote.note_id } : null,
+        );
+      }
+      return true;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not delete note");
+      return false;
+    }
+  };
+
+  const confirmDeleteNote = async () => {
+    if (!noteDeleteTarget) {
+      return;
+    }
+    setDeletingNote(true);
+    try {
+      if (await deleteScopedNote(noteDeleteTarget)) {
+        setNoteDeleteTarget(null);
+      }
+    } finally {
+      setDeletingNote(false);
     }
   };
 
@@ -1984,7 +2229,12 @@ export function App() {
 
   async function refreshBridgeNotes(runtime: BridgeRuntime, setLoading: boolean) {
     const requestConnectionKey = runtime.connectionKey;
-    if (!runtime.canConnect || runtime.capabilityState !== "ready" || !supportsNotes(runtime.capabilities)) {
+    if (
+      !notesEnabled ||
+      !runtime.canConnect ||
+      runtime.capabilityState !== "ready" ||
+      !supportsNotes(runtime.capabilities)
+    ) {
       setNotesStates((current) => ({
         ...current,
         [runtime.id]: {
@@ -2050,6 +2300,9 @@ export function App() {
   }
 
   const refreshNotesForBridge = (bridgeId: BridgeId) => {
+    if (!notesEnabled) {
+      return;
+    }
     const runtime = bridge.getRuntime(bridgeId);
     if (runtime) {
       void refreshBridgeNotes(runtime, false);
@@ -2057,14 +2310,20 @@ export function App() {
   };
 
   useEffect(() => {
+    if (!notesEnabled) {
+      return;
+    }
     for (const runtime of bridge.enabledRuntimes) {
       if (runtime.capabilityState === "ready" && supportsNotes(runtime.capabilities)) {
         void refreshBridgeNotes(runtime, true);
       }
     }
-  }, [bridge.enabledRuntimes]);
+  }, [bridge.enabledRuntimes, notesEnabled]);
 
   useEffect(() => {
+    if (!notesEnabled) {
+      return;
+    }
     if (!notesPanelOpen && sidebarView !== "notes") {
       return;
     }
@@ -2077,7 +2336,7 @@ export function App() {
     };
     const timer = window.setInterval(refresh, NOTES_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [bridge.enabledRuntimes, notesPanelOpen, sidebarView]);
+  }, [bridge.enabledRuntimes, notesEnabled, notesPanelOpen, sidebarView]);
 
   async function exec(
     runtime: BridgeRuntime | null,
@@ -2265,12 +2524,16 @@ export function App() {
   const renderTerminal = !isCompactLayout || showDetail;
   const appStyle = {
     "--sidebar-w": `${sidebarWidth}px`,
+    "--notes-w": `${notesPanelWidth}px`,
+    "--notes-list-w": `${notesListPaneWidth}px`,
     "--content-inset-top": `${contentInsetTopPx}px`,
     "--content-inset-bottom": `${contentInsetBottomPx}px`,
     "--mobile-controls-scale": String(mobileControlsScalePercent / 100),
   } as CSSProperties &
     Record<
       | "--sidebar-w"
+      | "--notes-w"
+      | "--notes-list-w"
       | "--content-inset-top"
       | "--content-inset-bottom"
       | "--mobile-controls-scale",
@@ -2282,7 +2545,10 @@ export function App() {
       className="app"
       style={appStyle}
       data-sidebar={sidebarOpen ? "open" : "closed"}
+      data-notes={notesPanelOpen ? "open" : "closed"}
       data-resizing-sidebar={resizingSidebar ? "true" : "false"}
+      data-resizing-notes={resizingNotesPanel ? "true" : "false"}
+      data-resizing-notes-list={resizingNotesListPane ? "true" : "false"}
       data-compact={isCompactLayout ? "true" : "false"}
       data-touch={isTouchInput ? "true" : "false"}
       data-detail={isCompactLayout && showDetail ? "true" : "false"}
@@ -2311,6 +2577,7 @@ export function App() {
           capabilityState={selectedRuntime?.capabilityState ?? "idle"}
           scope={scope}
           sidebarView={sidebarView}
+          notesEnabled={notesEnabled}
           notesStates={notesStates}
           visibleNotes={visibleNotes}
           selectedNote={selectedScopedNote}
@@ -2495,7 +2762,7 @@ export function App() {
               </button>
             </>
           ) : null}
-          {selectedPane ? (
+          {selectedPane && notesEnabled ? (
             <button
               className="icon-btn notes-button"
               type="button"
@@ -2581,11 +2848,12 @@ export function App() {
         )}
       </section>
 
-      {notesPanelOpen ? (
+      {notesPanelOpen && notesEnabled ? (
         <NotesSurface
           compact={isCompactLayout}
           mobileScreen={mobileNotesScreen}
           selectedEntry={selectedScopedNote}
+          selectedBridgeId={selectedRuntime?.id ?? null}
           selectedPane={selectedPane}
           selectedPaneNotes={selectedRuntime ? selectedPaneNotes.map((note) => ({
             bridgeId: selectedRuntime.id,
@@ -2631,8 +2899,76 @@ export function App() {
           onDetach={(entry) => void detachScopedNote(entry)}
           onArchive={(entry) => void archiveScopedNote(entry)}
           onRestore={(entry) => void restoreScopedNote(entry)}
-          onDelete={(entry) => void deleteScopedNote(entry)}
+          onDelete={setNoteDeleteTarget}
           onViewPane={viewScopedNotePane}
+          width={notesPanelWidth}
+          listWidth={notesListPaneWidth}
+          listCollapsed={notesListPaneCollapsed}
+          onListCollapsed={setNotesListPaneCollapsed}
+          onResizeStart={(clientX) => {
+            if (isCompactLayout) {
+              return;
+            }
+            setNotesPanelWidth(
+              clampNotesPanelWidth(window.innerWidth - clientX, sidebarWidth, sidebarOpen),
+            );
+            setResizingNotesPanel(true);
+          }}
+          onResizeKeyDown={(event) => {
+            if (isCompactLayout) {
+              return;
+            }
+            if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+              event.preventDefault();
+              const step = event.shiftKey ? 32 : 12;
+              setNotesPanelWidth((width) =>
+                clampNotesPanelWidth(
+                  width + (event.key === "ArrowLeft" ? step : -step),
+                  sidebarWidth,
+                  sidebarOpen,
+                ),
+              );
+            } else if (event.key === "Home") {
+              event.preventDefault();
+              setNotesPanelWidth(MIN_NOTES_PANEL_WIDTH);
+            } else if (event.key === "End") {
+              event.preventDefault();
+              setNotesPanelWidth(
+                clampNotesPanelWidth(MAX_NOTES_PANEL_WIDTH, sidebarWidth, sidebarOpen),
+              );
+            }
+          }}
+          onListResizeStart={(surfaceLeft, clientX) => {
+            if (isCompactLayout || notesListPaneCollapsed) {
+              return;
+            }
+            notesListResizeLeftRef.current = surfaceLeft;
+            setNotesListPaneWidth(clampNotesListPaneWidth(clientX - surfaceLeft, notesPanelWidth));
+            setResizingNotesListPane(true);
+          }}
+          onListResizeKeyDown={(event) => {
+            if (isCompactLayout || notesListPaneCollapsed) {
+              return;
+            }
+            if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+              event.preventDefault();
+              const step = event.shiftKey ? 32 : 12;
+              setNotesListPaneWidth((width) =>
+                clampNotesListPaneWidth(
+                  width + (event.key === "ArrowRight" ? step : -step),
+                  notesPanelWidth,
+                ),
+              );
+            } else if (event.key === "Home") {
+              event.preventDefault();
+              setNotesListPaneWidth(MIN_NOTES_LIST_PANE_WIDTH);
+            } else if (event.key === "End") {
+              event.preventDefault();
+              setNotesListPaneWidth(
+                clampNotesListPaneWidth(MAX_NOTES_LIST_PANE_WIDTH, notesPanelWidth),
+              );
+            }
+          }}
         />
       ) : null}
 
@@ -2670,6 +3006,21 @@ export function App() {
         />
       ) : null}
 
+      {noteDeleteTarget ? (
+        <ConfirmDialog
+          title="Delete note"
+          message={`Delete "${noteDeleteTarget.note.title || "Untitled note"}"? This cannot be undone.`}
+          confirmLabel="Delete"
+          busy={deletingNote}
+          onCancel={() => {
+            if (!deletingNote) {
+              setNoteDeleteTarget(null);
+            }
+          }}
+          onConfirm={() => void confirmDeleteNote()}
+        />
+      ) : null}
+
       {launchTarget ? (
         <LaunchDialog
           target={launchTarget}
@@ -2682,6 +3033,8 @@ export function App() {
       {backendSettingsOpen ? (
         <BackendSettingsDialog
           showMobileTerminalSettings={isTouchInput}
+          notesEnabled={notesEnabled}
+          onNotesEnabled={setNotesEnabled}
           terminalFontSizePx={terminalFontSizePx}
           onTerminalFontSizePx={setTerminalFontSizePx}
           terminalInputTransport={terminalInputTransport}
@@ -3337,7 +3690,7 @@ export function shouldBlockDirtyNoteAutosave({
   serverBody: string;
   serverRevision: number;
 }) {
-  if (!dirty || baseRevision === null || serverRevision === baseRevision) {
+  if (!dirty || baseRevision === null || serverRevision <= baseRevision) {
     return false;
   }
   return title !== serverTitle || body !== serverBody;
@@ -3730,6 +4083,7 @@ function Switcher({
   capabilityState,
   scope,
   sidebarView,
+  notesEnabled,
   notesStates,
   visibleNotes,
   selectedNote,
@@ -3769,6 +4123,7 @@ function Switcher({
   capabilityState: "idle" | "probing" | "ready" | "error";
   scope: Scope;
   sidebarView: SidebarView;
+  notesEnabled: boolean;
   notesStates: Record<string, BridgeNotesState>;
   visibleNotes: ScopedNoteEntry[];
   selectedNote: ScopedNoteEntry | null;
@@ -3847,15 +4202,20 @@ function Switcher({
           (view) => !view.snapshot && (!view.runtime.canConnect || view.loadState === "error"),
         )
       : [];
-  const notesSupported = hostBridgeViews.some((view) => supportsNotes(view.runtime.capabilities));
-  const notesLoading = hostBridgeViews.some(
+  const notesSupported =
+    notesEnabled && hostBridgeViews.some((view) => supportsNotes(view.runtime.capabilities));
+  const notesLoading = notesEnabled && hostBridgeViews.some(
     (view) => notesStates[view.runtime.id]?.loadState === "loading",
   );
-  const notesError = hostBridgeViews
-    .map((view) => notesStates[view.runtime.id]?.error)
-    .find((message): message is string => Boolean(message));
+  const notesError = notesEnabled
+    ? hostBridgeViews
+        .map((view) => notesStates[view.runtime.id]?.error)
+        .find((message): message is string => Boolean(message))
+    : undefined;
   const hasNotesList =
-    sidebarView === "notes" && (notesSupported || visibleNotes.length > 0 || notesLoading || notesError);
+    notesEnabled &&
+    sidebarView === "notes" &&
+    (notesSupported || visibleNotes.length > 0 || notesLoading || notesError);
   const hasListSnapshot =
     hasNotesList ||
     (hostScope === "all"
@@ -3898,7 +4258,7 @@ function Switcher({
       activeSpace &&
       selectedBridgeId,
   );
-  const canCreateNoteFromHeader = sidebarView === "notes" && notesSupported;
+  const canCreateNoteFromHeader = notesEnabled && sidebarView === "notes" && notesSupported;
 
   useEffect(() => {
     if (optionsMenu && !showOptionsControl) {
@@ -4186,14 +4546,16 @@ function Switcher({
         >
           Tabs
         </button>
-        <button
-          type="button"
-          data-on={sidebarView === "notes"}
-          aria-pressed={sidebarView === "notes"}
-          onClick={() => onSidebarView("notes")}
-        >
-          Notes
-        </button>
+        {notesEnabled ? (
+          <button
+            type="button"
+            data-on={sidebarView === "notes"}
+            aria-pressed={sidebarView === "notes"}
+            onClick={() => onSidebarView("notes")}
+          >
+            Notes
+          </button>
+        ) : null}
       </div>
       <div className="sidebar-scope" role="group" aria-label="Sidebar scope">
         <button
@@ -4590,6 +4952,7 @@ function NotesSurface({
   compact,
   mobileScreen,
   selectedEntry,
+  selectedBridgeId,
   selectedPane,
   selectedPaneNotes,
   visibleNotes,
@@ -4613,10 +4976,19 @@ function NotesSurface({
   onRestore,
   onDelete,
   onViewPane,
+  width,
+  listWidth,
+  listCollapsed,
+  onListCollapsed,
+  onResizeStart,
+  onResizeKeyDown,
+  onListResizeStart,
+  onListResizeKeyDown,
 }: {
   compact: boolean;
   mobileScreen: MobileNotesScreen;
   selectedEntry: ScopedNoteEntry | null;
+  selectedBridgeId: BridgeId | null;
   selectedPane: PaneInfo | null;
   selectedPaneNotes: ScopedNoteEntry[];
   visibleNotes: ScopedNoteEntry[];
@@ -4645,16 +5017,70 @@ function NotesSurface({
   onRestore: (entry: ScopedNoteEntry) => void;
   onDelete: (entry: ScopedNoteEntry) => void;
   onViewPane: (entry: ScopedNoteEntry) => void;
+  width: number;
+  listWidth: number;
+  listCollapsed: boolean;
+  onListCollapsed: (collapsed: boolean) => void;
+  onResizeStart: (clientX: number) => void;
+  onResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  onListResizeStart: (surfaceLeft: number, clientX: number) => void;
+  onListResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
 }) {
+  const effectiveListCollapsed = !compact && listCollapsed;
+  const otherNotes = useMemo(
+    () =>
+      visibleNotes.filter(
+        (entry) =>
+          !(
+            selectedBridgeId &&
+            selectedPane &&
+            entry.bridgeId === selectedBridgeId &&
+            entry.note.attachment?.pane_id === selectedPane.pane_id
+          ),
+      ),
+    [selectedBridgeId, selectedPane, visibleNotes],
+  );
+
   return (
     <aside
       className="notes-surface"
       data-compact={compact ? "true" : "false"}
       data-mobile-screen={mobileScreen}
-      role="dialog"
+      data-list={effectiveListCollapsed ? "collapsed" : "open"}
+      role={compact ? "dialog" : "complementary"}
       aria-label="Notes"
     >
+      <div
+        className="notes-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize notes"
+        aria-valuemin={MIN_NOTES_PANEL_WIDTH}
+        aria-valuemax={MAX_NOTES_PANEL_WIDTH}
+        aria-valuenow={width}
+        tabIndex={compact ? -1 : 0}
+        onPointerDown={(event) => {
+          if (compact) {
+            return;
+          }
+          event.preventDefault();
+          onResizeStart(event.clientX);
+        }}
+        onKeyDown={onResizeKeyDown}
+      />
       <header className="notes-head">
+        {!compact ? (
+          <button
+            className="icon-btn"
+            type="button"
+            aria-label={effectiveListCollapsed ? "Show notes list" : "Hide notes list"}
+            title={effectiveListCollapsed ? "Show notes list" : "Hide notes list"}
+            aria-pressed={!effectiveListCollapsed}
+            onClick={() => onListCollapsed(!effectiveListCollapsed)}
+          >
+            <PanelLeft size={18} />
+          </button>
+        ) : null}
         {compact && mobileScreen === "editor" ? (
           <button
             className="icon-btn"
@@ -4676,41 +5102,46 @@ function NotesSurface({
           <X size={18} />
         </button>
       </header>
+      {selectedPane ? (
+        <div className="pane-note-tabs" role="tablist" aria-label="Pane notes">
+          {selectedPaneNotes.map((entry) => (
+            <button
+              key={`${entry.bridgeId}:${entry.note.note_id}`}
+              className="pane-note-tab"
+              type="button"
+              role="tab"
+              aria-selected={
+                selectedEntry?.bridgeId === entry.bridgeId &&
+                selectedEntry.note.note_id === entry.note.note_id
+              }
+              data-active={
+                selectedEntry?.bridgeId === entry.bridgeId &&
+                selectedEntry.note.note_id === entry.note.note_id
+                  ? "true"
+                  : "false"
+              }
+              onClick={() => onSelectNote(entry.bridgeId, entry.note.note_id)}
+            >
+              {entry.note.title || "Untitled note"}
+            </button>
+          ))}
+          <button
+            className="pane-note-tab pane-note-tab-new"
+            type="button"
+            aria-label="New pane note"
+            title="New pane note"
+            disabled={!currentBridgeSupportsNotes}
+            onClick={onCreatePaneNote}
+          >
+            <Plus size={15} />
+          </button>
+        </div>
+      ) : null}
       <div className="notes-shell">
         <div className="notes-list-pane">
           <section className="notes-section">
             <div className="notes-section-head">
-              <span>Pane</span>
-              <button
-                className="icon-btn"
-                type="button"
-                aria-label="New pane note"
-                title="New pane note"
-                disabled={!selectedPane || !currentBridgeSupportsNotes}
-                onClick={onCreatePaneNote}
-              >
-                <Plus size={15} />
-              </button>
-            </div>
-            {selectedPaneNotes.length === 0 ? (
-              <div className="notes-empty">No notes attached to this pane</div>
-            ) : (
-              selectedPaneNotes.map((entry) => (
-                <NotesListItem
-                  key={`${entry.bridgeId}:${entry.note.note_id}`}
-                  entry={entry}
-                  active={
-                    selectedEntry?.bridgeId === entry.bridgeId &&
-                    selectedEntry.note.note_id === entry.note.note_id
-                  }
-                  onSelect={() => onSelectNote(entry.bridgeId, entry.note.note_id)}
-                />
-              ))
-            )}
-          </section>
-          <section className="notes-section">
-            <div className="notes-section-head">
-              <span>All</span>
+              <span>Other</span>
               <label className="notes-filter">
                 <input
                   type="checkbox"
@@ -4738,14 +5169,14 @@ function NotesSurface({
                 <Plus size={15} />
               </button>
             </div>
-            {notesLoadState === "loading" && visibleNotes.length === 0 ? (
+            {notesLoadState === "loading" && otherNotes.length === 0 ? (
               <div className="notes-empty">Loading notes</div>
-            ) : notesError && visibleNotes.length === 0 ? (
+            ) : notesError && otherNotes.length === 0 ? (
               <div className="notes-empty">{notesError}</div>
-            ) : visibleNotes.length === 0 ? (
-              <div className="notes-empty">No notes yet</div>
+            ) : otherNotes.length === 0 ? (
+              <div className="notes-empty">No other notes</div>
             ) : (
-              visibleNotes.map((entry) => (
+              otherNotes.map((entry) => (
                 <NotesListItem
                   key={`${entry.bridgeId}:${entry.note.note_id}`}
                   entry={entry}
@@ -4758,9 +5189,33 @@ function NotesSurface({
               ))
             )}
           </section>
+          <div
+            className="notes-list-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize notes list"
+            aria-valuemin={MIN_NOTES_LIST_PANE_WIDTH}
+            aria-valuemax={MAX_NOTES_LIST_PANE_WIDTH}
+            aria-valuenow={listWidth}
+            tabIndex={effectiveListCollapsed ? -1 : 0}
+            onPointerDown={(event) => {
+              if (effectiveListCollapsed) {
+                return;
+              }
+              const surface = event.currentTarget.closest(".notes-surface");
+              if (!(surface instanceof HTMLElement)) {
+                return;
+              }
+              event.preventDefault();
+              onListResizeStart(surface.getBoundingClientRect().left, event.clientX);
+            }}
+            onKeyDown={onListResizeKeyDown}
+          />
         </div>
         <NoteEditor
           entry={selectedEntry}
+          currentBridgeId={selectedBridgeId}
+          currentPaneId={selectedPane?.pane_id ?? null}
           canAttachToCurrentPane={canAttachToCurrentPane}
           onSave={onSaveNote}
           onAttachToCurrentPane={onAttachToCurrentPane}
@@ -4803,6 +5258,8 @@ function NotesListItem({
 
 export function NoteEditor({
   entry,
+  currentBridgeId,
+  currentPaneId,
   canAttachToCurrentPane,
   onSave,
   onAttachToCurrentPane,
@@ -4813,6 +5270,8 @@ export function NoteEditor({
   onViewPane,
 }: {
   entry: ScopedNoteEntry | null;
+  currentBridgeId: BridgeId | null;
+  currentPaneId: string | null;
   canAttachToCurrentPane: boolean;
   onSave: (
     entry: ScopedNoteEntry,
@@ -5058,6 +5517,14 @@ export function NoteEditor({
   const note = entry.note;
   const deleted = Boolean(note.deleted_at);
   const archived = Boolean(note.archived_at);
+  const attachedToCurrentPane = Boolean(
+    currentBridgeId &&
+      currentPaneId &&
+      entry.bridgeId === currentBridgeId &&
+      note.attachment?.pane_id === currentPaneId,
+  );
+  const canViewLinkedPane = Boolean(entry.pane && !attachedToCurrentPane);
+  const canAttachCurrentPane = canAttachToCurrentPane && !attachedToCurrentPane;
   const markEdited = () => {
     const expectedRevision = baseRevision ?? entry.note.revision;
     if (baseRevision === null) {
@@ -5110,9 +5577,9 @@ export function NoteEditor({
                     ? "conflict"
                 : noteStateLabel(note).label}
         </span>
-        {note.link_state === "linked" ? (
+        {canViewLinkedPane ? (
           <button className="icon-btn" type="button" aria-label="View pane" title="View pane" onClick={() => onViewPane(entry)}>
-            <Link2 size={16} />
+            <SquareTerminal size={16} />
           </button>
         ) : null}
         {note.attachment ? (
@@ -5120,16 +5587,17 @@ export function NoteEditor({
             <Unlink size={16} />
           </button>
         ) : null}
-        <button
-          className="icon-btn"
-          type="button"
-          aria-label="Attach to current pane"
-          title="Attach to current pane"
-          disabled={!canAttachToCurrentPane}
-          onClick={() => onAttachToCurrentPane(entry)}
-        >
-          <Link2 size={16} />
-        </button>
+        {canAttachCurrentPane ? (
+          <button
+            className="icon-btn"
+            type="button"
+            aria-label="Attach to current pane"
+            title="Attach to current pane"
+            onClick={() => onAttachToCurrentPane(entry)}
+          >
+            <Link2 size={16} />
+          </button>
+        ) : null}
         {archived || deleted ? (
           <button className="icon-btn" type="button" aria-label="Restore note" title="Restore" onClick={() => onRestore(entry)}>
             <RotateCcw size={16} />
@@ -5145,11 +5613,7 @@ export function NoteEditor({
             type="button"
             aria-label="Delete note"
             title="Delete"
-            onClick={() => {
-              if (window.confirm("Delete this note?")) {
-                onDelete(entry);
-              }
-            }}
+            onClick={() => onDelete(entry)}
           >
             <Trash2 size={16} />
           </button>

@@ -53,6 +53,8 @@
   --r-md: 9px;
   --r-lg: 13px;
   --sidebar-w: 320px;
+  --notes-w: 560px;
+  --notes-list-w: 240px;
   --content-inset-top: 0px;
   --content-inset-bottom: 0px;
   --mobile-controls-scale: 1;
@@ -104,7 +106,7 @@ button {
 
 .app {
   display: grid;
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) 0;
   width: 100%;
   height: 100%;
   padding-block: var(--content-inset-top) var(--content-inset-bottom);
@@ -113,17 +115,29 @@ button {
   transition: grid-template-columns 200ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.app[data-resizing-sidebar="true"] {
+.app[data-resizing-sidebar="true"],
+.app[data-resizing-notes="true"],
+.app[data-resizing-notes-list="true"] {
   cursor: col-resize;
   transition: none;
 }
 
-.app[data-resizing-sidebar="true"] * {
+.app[data-resizing-sidebar="true"] *,
+.app[data-resizing-notes="true"] *,
+.app[data-resizing-notes-list="true"] * {
   user-select: none;
 }
 
+.app[data-notes="open"] {
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--notes-w);
+}
+
 .app[data-sidebar="closed"] {
-  grid-template-columns: 0 minmax(0, 1fr);
+  grid-template-columns: 0 minmax(0, 1fr) 0;
+}
+
+.app[data-sidebar="closed"][data-notes="open"] {
+  grid-template-columns: 0 minmax(0, 1fr) var(--notes-w);
 }
 
 /* ---------------------------------------------------------------- sidebar */
@@ -968,28 +982,62 @@ button {
 /* --------------------------------------------------------------- notes */
 
 .notes-surface {
-  position: fixed;
-  z-index: 5;
-  top: var(--content-inset-top);
-  right: 0;
+  position: relative;
+  z-index: 1;
   display: flex;
-  width: min(560px, calc(100vw - 48px));
-  height: calc(100dvh - var(--content-inset-top) - var(--content-inset-bottom));
+  width: var(--notes-w);
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
   flex-direction: column;
   border-left: 1px solid var(--line);
   background: var(--base);
-  box-shadow: -18px 0 48px rgb(0 0 0 / 0.36);
+  box-shadow: none;
+}
+
+.notes-resizer {
+  position: absolute;
+  z-index: 4;
+  top: 0;
+  left: -4px;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  outline: none;
+  touch-action: none;
+}
+
+.notes-resizer::before {
+  position: absolute;
+  top: 0;
+  left: 3px;
+  width: 1px;
+  height: 100%;
+  background: transparent;
+  content: "";
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+
+.notes-resizer:hover::before,
+.notes-resizer:focus-visible::before,
+.app[data-resizing-notes="true"] .notes-resizer::before {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-soft);
 }
 
 .notes-head {
   display: flex;
   min-height: 58px;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
   padding: 0 14px 0 16px;
   border-bottom: 1px solid var(--line);
   background: var(--mantle);
+}
+
+.notes-head > div {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .notes-title {
@@ -1001,7 +1049,7 @@ button {
 
 .notes-sub {
   display: block;
-  max-width: 360px;
+  max-width: 100%;
   overflow: hidden;
   color: var(--overlay1);
   font-size: 11px;
@@ -1009,18 +1057,106 @@ button {
   white-space: nowrap;
 }
 
+.pane-note-tabs {
+  display: flex;
+  min-width: 0;
+  min-height: 42px;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--mantle) 76%, var(--base));
+  scrollbar-width: thin;
+}
+
+.pane-note-tab {
+  display: inline-flex;
+  min-width: 64px;
+  max-width: 180px;
+  height: 28px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  color: var(--overlay1);
+  background: var(--surface0);
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-note-tab[data-active="true"] {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--line));
+  color: var(--text);
+  background: var(--accent-soft);
+}
+
+.pane-note-tab-new {
+  min-width: 32px;
+  max-width: 32px;
+  padding: 0;
+}
+
 .notes-shell {
   display: grid;
-  grid-template-columns: minmax(180px, 0.8fr) minmax(0, 1.2fr);
+  grid-template-columns: var(--notes-list-w) minmax(0, 1fr);
   min-height: 0;
   flex: 1 1 auto;
+  transition: grid-template-columns 160ms ease;
+}
+
+.notes-surface[data-list="collapsed"] .notes-shell {
+  grid-template-columns: 0 minmax(0, 1fr);
 }
 
 .notes-list-pane {
+  position: relative;
   min-width: 0;
   overflow-y: auto;
   border-right: 1px solid var(--line);
   background: var(--sidebar-bg);
+}
+
+.notes-surface[data-list="collapsed"] .notes-list-pane {
+  overflow: hidden;
+  border-right: 0;
+  visibility: hidden;
+}
+
+.notes-list-resizer {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  right: -4px;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  outline: none;
+  touch-action: none;
+}
+
+.notes-list-resizer::before {
+  position: absolute;
+  top: 0;
+  right: 3px;
+  width: 1px;
+  height: 100%;
+  background: transparent;
+  content: "";
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+
+.notes-list-resizer:hover::before,
+.notes-list-resizer:focus-visible::before,
+.app[data-resizing-notes-list="true"] .notes-list-resizer::before {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-soft);
 }
 
 .notes-section {
@@ -2730,6 +2866,8 @@ button {
 
 .app[data-compact="true"] .notes-surface,
 .notes-surface[data-compact="true"] {
+  position: fixed;
+  z-index: 5;
   top: var(--content-inset-top);
   left: 0;
   right: auto;
@@ -2737,6 +2875,13 @@ button {
   height: calc(100dvh - var(--content-inset-top) - var(--content-inset-bottom));
   border-left: 0;
   box-shadow: none;
+}
+
+.app[data-compact="true"] .notes-resizer,
+.notes-surface[data-compact="true"] .notes-resizer,
+.app[data-compact="true"] .notes-list-resizer,
+.notes-surface[data-compact="true"] .notes-list-resizer {
+  display: none;
 }
 
 .app[data-compact="true"] .notes-shell,
@@ -2767,6 +2912,16 @@ button {
 }
 
 .app[data-touch="true"] .sidebar-resizer {
+  right: -12px;
+  width: 24px;
+}
+
+.app[data-touch="true"] .notes-resizer {
+  left: -12px;
+  width: 24px;
+}
+
+.app[data-touch="true"] .notes-list-resizer {
   right: -12px;
   width: 24px;
 }

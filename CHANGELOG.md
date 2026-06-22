@@ -10,6 +10,8 @@
   attachment recovery states, and per-bridge note synchronization. Notes are exposed through the
   same bridge request policy as terminal controls, so allowed bridge clients can read and mutate
   saved note content.
+- Added a Notes feature toggle plus persisted desktop notes panel sizing, notes list collapse
+  state, pane note tabs, and a dedicated Other notes list.
 
 ### Changed
 
@@ -18,6 +20,9 @@
 - Added Mobile settings for an expanding terminal command input and Enter-as-newline
   editing, allowing long prompts to wrap and remain viewable while preserving send-on-Enter
   by default. [PR #21](https://github.com/kcosr/herdr-web/pull/21)
+- Fixed notes editor selection and autosave edge cases so switching to panes without notes clears
+  the editor, deleting the selected note no longer shows a deleted note, and stale local save
+  refreshes do not appear as external note changes.
 - Improved terminal reconnect/resume handling so Android foregrounding and quick terminal switches
   keep the renderer stable, avoid stale tab flashes, and suppress transient connecting overlays.
   [PR #19](https://github.com/kcosr/herdr-web/pull/19)

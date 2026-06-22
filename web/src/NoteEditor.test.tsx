@@ -107,6 +107,40 @@ describe("NoteEditor autosave conflicts", () => {
     expect(saves[1]).toMatchObject({ body: "abcd", expectedRevision: 6 });
   });
 
+  it("does not flag stale server props as a conflict after a local save resolves", async () => {
+    const saves: Array<{
+      body: string;
+      expectedRevision: number;
+      deferred: Deferred<number>;
+    }> = [];
+    const onSave = vi.fn((_entry: ScopedNoteEntry, _title: string, body: string, expectedRevision: number) => {
+      const deferred = createDeferred<number>();
+      saves.push({ body, expectedRevision, deferred });
+      return deferred.promise;
+    });
+    const { container, render } = createEditorHarness(onSave);
+
+    await render(noteEntry({ revision: 5, body: "" }));
+    await changeTextarea(container, "abc");
+    await advanceAutosaveTimer();
+
+    expect(saves).toHaveLength(1);
+    expect(saves[0]).toMatchObject({ body: "abc", expectedRevision: 5 });
+
+    await act(async () => {
+      saves[0].deferred.resolve(6);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await changeTextarea(container, "abcd");
+    await advanceAutosaveTimer();
+
+    expect(editorStatus(container)).not.toBe("conflict");
+    expect(noteBodyInput(container).value).toBe("abcd");
+    expect(saves).toHaveLength(2);
+    expect(saves[1]).toMatchObject({ body: "abcd", expectedRevision: 6 });
+  });
+
   it("enters conflict when a divergent server revision arrives under a dirty draft", async () => {
     const saves: Array<{ body: string; expectedRevision: number; deferred: Deferred<number> }> = [];
     const onSave = vi.fn((_entry: ScopedNoteEntry, _title: string, body: string, expectedRevision: number) => {
@@ -176,6 +210,8 @@ function createEditorHarness(
       root.render(
         <NoteEditor
           entry={entry}
+          currentBridgeId="bridge-a"
+          currentPaneId="pane-a"
           canAttachToCurrentPane
           onSave={onSave}
           onAttachToCurrentPane={vi.fn()}

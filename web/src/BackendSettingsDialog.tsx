@@ -8,6 +8,7 @@ import {
   SlidersHorizontal,
   Smartphone,
   SquareTerminal,
+  StickyNote,
   X,
 } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
@@ -57,6 +58,8 @@ import { TERMINAL_OUTPUT_COALESCE_OPTIONS_MS } from "./terminalOutputCoalescing"
 
 type Props = {
   showMobileTerminalSettings: boolean;
+  notesEnabled: boolean;
+  onNotesEnabled: (enabled: boolean) => void;
   terminalFontSizePx: number;
   onTerminalFontSizePx: (value: number) => void;
   terminalInputTransport: TerminalInputTransport;
@@ -97,10 +100,12 @@ type FormState = {
 };
 
 type SelectionMode = "same-origin" | "new" | "backend";
-type SettingsArea = "bridge" | "display" | "terminal" | "mobile";
+type SettingsArea = "bridge" | "features" | "display" | "terminal" | "mobile";
 
 export function BackendSettingsDialog({
   showMobileTerminalSettings,
+  notesEnabled,
+  onNotesEnabled,
   terminalFontSizePx,
   onTerminalFontSizePx,
   terminalInputTransport,
@@ -262,6 +267,7 @@ export function BackendSettingsDialog({
   const showSameOrigin = bridge.sameOriginAvailable;
   const areas: { id: SettingsArea; label: string; icon: typeof Server }[] = [
     { id: "bridge", label: "Bridge", icon: Server },
+    { id: "features", label: "Features", icon: StickyNote },
     { id: "display", label: "Display", icon: SlidersHorizontal },
     { id: "terminal", label: "Terminal", icon: SquareTerminal },
     ...(showMobileTerminalSettings
@@ -464,6 +470,33 @@ export function BackendSettingsDialog({
                   </div>
                 ) : null}
               </>
+            ) : null}
+
+            {activeArea === "features" ? (
+              <div className="settings-section settings-section-flat">
+                <div className="settings-label">Client features</div>
+                <div className="settings-row">
+                  <span>Notes</span>
+                  <div className="segmented-control" role="group" aria-label="Notes feature">
+                    <button
+                      type="button"
+                      data-on={!notesEnabled}
+                      aria-pressed={!notesEnabled}
+                      onClick={() => onNotesEnabled(false)}
+                    >
+                      Off
+                    </button>
+                    <button
+                      type="button"
+                      data-on={notesEnabled}
+                      aria-pressed={notesEnabled}
+                      onClick={() => onNotesEnabled(true)}
+                    >
+                      On
+                    </button>
+                  </div>
+                </div>
+              </div>
             ) : null}
 
             {activeArea === "display" ? (
