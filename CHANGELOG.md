@@ -22,7 +22,8 @@
   by default. [PR #21](https://github.com/kcosr/herdr-web/pull/21)
 - Fixed notes editor selection and autosave edge cases so switching to panes without notes clears
   the editor, deleting the selected note no longer shows a deleted note, and stale local save
-  refreshes do not appear as external note changes.
+  refreshes do not appear as external note changes. Also fixed mobile delete-dialog back handling
+  and unresolved note recovery actions in the notes panel.
 - Improved terminal reconnect/resume handling so Android foregrounding and quick terminal switches
   keep the renderer stable, avoid stale tab flashes, and suppress transient connecting overlays.
   [PR #19](https://github.com/kcosr/herdr-web/pull/19)

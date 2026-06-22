@@ -844,6 +844,12 @@ export function App() {
 
   useEffect(() => {
     return addNativeBackHandler(() => {
+      if (noteDeleteTarget) {
+        if (!deletingNote) {
+          setNoteDeleteTarget(null);
+        }
+        return true;
+      }
       if (notesPanelOpen) {
         if (isCompactLayout && mobileNotesScreen === "editor") {
           setMobileNotesScreen("list");
@@ -864,10 +870,6 @@ export function App() {
         setDialog(null);
         return true;
       }
-      if (noteDeleteTarget) {
-        setNoteDeleteTarget(null);
-        return true;
-      }
       if (menu) {
         setMenu(null);
         return true;
@@ -876,6 +878,7 @@ export function App() {
     });
   }, [
     backendSettingsOpen,
+    deletingNote,
     dialog,
     isCompactLayout,
     launchTarget,
@@ -3642,6 +3645,21 @@ function findScopedNote(
   return found ?? (fallback ? (entries[0] ?? null) : null);
 }
 
+function scopedNoteLinkedToPane(
+  entry: ScopedNoteEntry,
+  bridgeId: BridgeId | null,
+  paneId: string | null | undefined,
+) {
+  return Boolean(
+    bridgeId &&
+      paneId &&
+      entry.bridgeId === bridgeId &&
+      entry.note.link_state === "linked" &&
+      entry.note.attachment?.pane_id === paneId &&
+      entry.pane?.pane_id === paneId,
+  );
+}
+
 function noteStateLabel(note: PaneNote) {
   if (note.deleted_at) {
     return { label: "deleted", status: "blocked" as AgentStatus };
@@ -5030,16 +5048,11 @@ function NotesSurface({
   const otherNotes = useMemo(
     () =>
       visibleNotes.filter(
-        (entry) =>
-          !(
-            selectedBridgeId &&
-            selectedPane &&
-            entry.bridgeId === selectedBridgeId &&
-            entry.note.attachment?.pane_id === selectedPane.pane_id
-          ),
+        (entry) => !scopedNoteLinkedToPane(entry, selectedBridgeId, selectedPane?.pane_id),
       ),
-    [selectedBridgeId, selectedPane, visibleNotes],
+    [selectedBridgeId, selectedPane?.pane_id, visibleNotes],
   );
+  const showPaneNoteTabs = Boolean(selectedPane && !(compact && mobileScreen === "editor"));
 
   return (
     <aside
@@ -5102,7 +5115,7 @@ function NotesSurface({
           <X size={18} />
         </button>
       </header>
-      {selectedPane ? (
+      {showPaneNoteTabs ? (
         <div className="pane-note-tabs" role="tablist" aria-label="Pane notes">
           {selectedPaneNotes.map((entry) => (
             <button
@@ -5517,12 +5530,7 @@ export function NoteEditor({
   const note = entry.note;
   const deleted = Boolean(note.deleted_at);
   const archived = Boolean(note.archived_at);
-  const attachedToCurrentPane = Boolean(
-    currentBridgeId &&
-      currentPaneId &&
-      entry.bridgeId === currentBridgeId &&
-      note.attachment?.pane_id === currentPaneId,
-  );
+  const attachedToCurrentPane = scopedNoteLinkedToPane(entry, currentBridgeId, currentPaneId);
   const canViewLinkedPane = Boolean(entry.pane && !attachedToCurrentPane);
   const canAttachCurrentPane = canAttachToCurrentPane && !attachedToCurrentPane;
   const markEdited = () => {

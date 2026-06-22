@@ -197,6 +197,25 @@ describe("NoteEditor autosave conflicts", () => {
   });
 });
 
+describe("NoteEditor actions", () => {
+  it("allows unresolved notes with a matching stale pane id to be reattached", async () => {
+    const onSave = vi.fn(() => Promise.resolve(6));
+    const { container, render } = createEditorHarness(onSave);
+
+    await render(
+      noteEntry({
+        revision: 5,
+        body: "",
+        linkState: "unresolved",
+        attachmentPaneId: "pane-a",
+      }),
+    );
+
+    expect(container.querySelector('[aria-label="Attach to current pane"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="View pane"]')).toBeNull();
+  });
+});
+
 function createEditorHarness(
   onSave: (entry: ScopedNoteEntry, title: string, body: string, expectedRevision: number) => Promise<number>,
 ) {
@@ -233,11 +252,15 @@ function noteEntry({
   revision,
   title = "Server title",
   body,
+  linkState = "detached",
+  attachmentPaneId,
 }: {
   noteId?: string;
   revision: number;
   title?: string;
   body: string;
+  linkState?: "linked" | "unresolved" | "detached";
+  attachmentPaneId?: string;
 }): ScopedNoteEntry {
   return {
     bridgeId: "bridge-a",
@@ -255,9 +278,19 @@ function noteEntry({
       created_at: "1",
       updated_at: String(revision),
       session_key: "session-a",
+      attachment: attachmentPaneId
+        ? {
+            type: "pane",
+            pane_id: attachmentPaneId,
+            workspace_id: "workspace-a",
+            tab_id: "tab-a",
+            captured_at: "1",
+            context: {},
+          }
+        : undefined,
       attachment_history: [],
       revision,
-      link_state: "detached",
+      link_state: linkState,
     },
   };
 }
