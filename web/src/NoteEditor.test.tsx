@@ -218,7 +218,7 @@ describe("NoteEditor autosave conflicts", () => {
     );
     await render(matchingBaseEntry);
 
-    expect(editorStatus(container)).toBe("pending");
+    expect(editorStatus(container)).toBe("");
     expect(noteBodyInput(container).value).toBe("local draft");
   });
 });

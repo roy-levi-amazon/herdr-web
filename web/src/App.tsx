@@ -5437,7 +5437,6 @@ export function NoteEditor({
   const [saveState, setSaveState] = useState<
     "idle" | "pending" | "saving" | "saved" | "error" | "conflict"
   >("idle");
-  const [showSavedStatus, setShowSavedStatus] = useState(false);
   const [editorMode, setEditorModeState] = useState<NoteEditorMode>(() => readNoteEditorMode());
   const loadedNoteIdentityRef = useRef("");
   const saveBlockedRef = useRef(false);
@@ -5677,16 +5676,6 @@ export function NoteEditor({
     title,
   ]);
 
-  useEffect(() => {
-    if (saveState !== "saved") {
-      setShowSavedStatus(false);
-      return;
-    }
-    setShowSavedStatus(true);
-    const timer = window.setTimeout(() => setShowSavedStatus(false), 1400);
-    return () => window.clearTimeout(timer);
-  }, [saveState]);
-
   if (!entry) {
     return (
       <div className="note-editor note-editor-empty">
@@ -5705,17 +5694,7 @@ export function NoteEditor({
   );
   const canAttachCurrentPane = canAttachToCurrentPane && !attachedToCurrentPane;
   const saveStatusLabel =
-    saveState === "pending"
-      ? "pending"
-      : saveState === "saving"
-        ? "saving"
-        : saveState === "saved" && showSavedStatus
-          ? "saved"
-          : saveState === "error"
-            ? "save failed"
-            : saveState === "conflict"
-              ? "conflict"
-              : null;
+    saveState === "error" ? "save failed" : saveState === "conflict" ? "conflict" : null;
   const markEdited = () => {
     const expectedRevision = baseRevision ?? entry.note.revision;
     if (baseRevision === null) {
