@@ -161,6 +161,32 @@ describe("NoteEditor autosave conflicts", () => {
     expect(noteBodyInput(container).value).toBe("local draft");
   });
 
+  it("does not starve autosave when parent renders replace entry and save callback identities", async () => {
+    const saves: Array<{ body: string; expectedRevision: number }> = [];
+    const saveFactory = () =>
+      vi.fn((_entry: ScopedNoteEntry, _title: string, body: string, expectedRevision: number) => {
+        saves.push({ body, expectedRevision });
+        return Promise.resolve(6);
+      });
+    const { container, render } = createEditorHarness(saveFactory());
+
+    await render(noteEntry({ revision: 5, body: "" }));
+    await changeTextarea(container, "local draft");
+
+    for (let index = 0; index < 3; index += 1) {
+      await act(async () => {
+        vi.advanceTimersByTime(200);
+      });
+      await render(noteEntry({ revision: 5, body: "" }), { onSave: saveFactory() });
+    }
+    await act(async () => {
+      vi.advanceTimersByTime(100);
+      await Promise.resolve();
+    });
+
+    expect(saves).toEqual([{ body: "local draft", expectedRevision: 5 }]);
+  });
+
   it("reloads persisted dirty drafts as conflict only when the server revision advanced", async () => {
     const onSave = vi.fn(() => Promise.resolve(7));
     const { container, render } = createEditorHarness(onSave);
@@ -246,7 +272,15 @@ function createEditorHarness(
 
   const render = async (
     entry: ScopedNoteEntry,
-    options: { showCurrentPaneViewAction?: boolean } = {},
+    options: {
+      showCurrentPaneViewAction?: boolean;
+      onSave?: (
+        entry: ScopedNoteEntry,
+        title: string,
+        body: string,
+        expectedRevision: number,
+      ) => Promise<number>;
+    } = {},
   ) => {
     await act(async () => {
       root.render(
@@ -256,7 +290,7 @@ function createEditorHarness(
           currentPaneId="pane-a"
           canAttachToCurrentPane
           showCurrentPaneViewAction={options.showCurrentPaneViewAction}
-          onSave={onSave}
+          onSave={options.onSave ?? onSave}
           onAttachToCurrentPane={vi.fn()}
           onDetach={vi.fn()}
           onArchive={vi.fn()}

@@ -5,6 +5,7 @@ import {
   capabilityProbeFailure,
   capabilityProbeSuccess,
   capabilityRetryDelayMs,
+  configuredBridgeConnectionKey,
   duplicateBackend,
   loadBackendStore,
   normalizeBridgeBaseUrl,
@@ -12,6 +13,7 @@ import {
   parseBackendStore,
   parseCapabilities,
   probeBridgeBaseUrl,
+  removeNoteDraftsForBridgeConnection,
   SAME_ORIGIN_BRIDGE_ID,
 } from "./bridge";
 
@@ -251,6 +253,31 @@ describe("backend store parsing", () => {
 
     expect(duplicateBackend(backends, "192.168.1.20:4000")?.id).toBe("one");
     expect(duplicateBackend(backends, "192.168.1.20:4000", "one")).toBeNull();
+  });
+
+  it("removes note drafts scoped to a retired backend connection", () => {
+    const retained = "herdr-web:note-draft:v1:two:configured%3Atwo%3Ahttp%3A%2F%2Fold:store:session:note";
+    const removed = `herdr-web:note-draft:v1:${encodeURIComponent("one")}:${encodeURIComponent(
+      configuredBridgeConnectionKey("one", "http://old"),
+    )}:store:session:note`;
+    const storage = new Map([
+      [retained, "{}"],
+      [removed, "{}"],
+    ]);
+    vi.stubGlobal("localStorage", {
+      get length() {
+        return storage.size;
+      },
+      key: vi.fn((index: number) => Array.from(storage.keys())[index] ?? null),
+      removeItem: vi.fn((key: string) => {
+        storage.delete(key);
+      }),
+    });
+
+    removeNoteDraftsForBridgeConnection("one", configuredBridgeConnectionKey("one", "http://old"));
+
+    expect(storage.has(removed)).toBe(false);
+    expect(storage.has(retained)).toBe(true);
   });
 });
 

@@ -474,7 +474,7 @@ impl NotesManager {
         moved_pane: &PaneInfo,
     ) -> Result<bool, NotesError> {
         let attachment = self.capture_attachment_for_pane(moved_pane);
-        let changed = self.with_notes_store(|store, now| {
+        let changed = self.with_notes_store_if_changed(|store, now| {
             let mut changed = false;
             for note in store
                 .notes
@@ -493,7 +493,7 @@ impl NotesManager {
                     changed = true;
                 }
             }
-            Ok(changed)
+            Ok((changed, changed))
         })?;
         Ok(changed)
     }
@@ -588,6 +588,20 @@ impl NotesManager {
         let result = mutate(&mut store, now_ms_string())?;
         store.updated_at = now_ms_string();
         write_json_atomic(&self.notes_path, &store)?;
+        Ok(result)
+    }
+
+    fn with_notes_store_if_changed<F, T>(&self, mutate: F) -> Result<T, NotesError>
+    where
+        F: FnOnce(&mut NotesStore, String) -> Result<(T, bool), NotesError>,
+    {
+        let _lock = LockFile::exclusive(&self.notes_lock_path)?;
+        let mut store = self.load_or_create_notes_store()?;
+        let (result, changed) = mutate(&mut store, now_ms_string())?;
+        if changed {
+            store.updated_at = now_ms_string();
+            write_json_atomic(&self.notes_path, &store)?;
+        }
         Ok(result)
     }
 
@@ -1239,6 +1253,72 @@ mod tests {
     }
 
     #[test]
+    fn detach_delete_and_restore_preserve_recovery_state() {
+        let dir = test_dir("detach_delete_and_restore_preserve_recovery_state");
+        let manager = NotesManager::for_test(dir, "session:default").unwrap();
+        let panes = vec![pane("p1", "t1", "w1", "tab1", 1)];
+        let note = manager
+            .create(
+                CreateNoteRequest {
+                    title: Some("Recoverable".to_string()),
+                    body: None,
+                    pane_id: Some("p1".to_string()),
+                },
+                &panes,
+            )
+            .unwrap();
+
+        let detached = manager
+            .detach(
+                &note.note.note_id,
+                RevisionRequest {
+                    expected_revision: note.note.revision,
+                },
+                &panes,
+            )
+            .unwrap();
+        assert_eq!(detached.link_state, NoteLinkState::Detached);
+        assert!(detached.note.attachment.is_none());
+        assert_eq!(detached.note.attachment_history.len(), 1);
+
+        let deleted = manager
+            .delete(
+                &detached.note.note_id,
+                RevisionRequest {
+                    expected_revision: detached.note.revision,
+                },
+                &panes,
+            )
+            .unwrap();
+        assert!(deleted.note.deleted_at.is_some());
+        assert!(manager
+            .list(NotesListQuery::default(), &panes)
+            .unwrap()
+            .notes
+            .is_empty());
+
+        let restored = manager
+            .restore(
+                &deleted.note.note_id,
+                RevisionRequest {
+                    expected_revision: deleted.note.revision,
+                },
+                &panes,
+            )
+            .unwrap();
+        assert!(restored.note.deleted_at.is_none());
+        assert_eq!(restored.link_state, NoteLinkState::Detached);
+        assert_eq!(
+            manager
+                .list(NotesListQuery::default(), &panes)
+                .unwrap()
+                .notes
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn move_updates_attachment_and_stays_linked() {
         let dir = test_dir("move_updates_attachment_and_stays_linked");
         let manager = NotesManager::for_test(dir, "session:default").unwrap();
@@ -1263,6 +1343,31 @@ mod tests {
             listed.notes[0].note.attachment.as_ref().unwrap().pane_id,
             "p2"
         );
+    }
+
+    #[test]
+    fn no_op_pane_move_does_not_rewrite_notes_store() {
+        let dir = test_dir("no_op_pane_move_does_not_rewrite_notes_store");
+        let manager = NotesManager::for_test(dir, "session:default").unwrap();
+        let panes = vec![pane("p1", "t1", "w1", "tab1", 1)];
+        manager
+            .create(
+                CreateNoteRequest {
+                    title: Some("Plan".to_string()),
+                    body: None,
+                    pane_id: Some("p1".to_string()),
+                },
+                &panes,
+            )
+            .unwrap();
+        let before = fs::read_to_string(&manager.notes_path).unwrap();
+
+        let changed = manager
+            .update_for_pane_move("missing-pane", &pane("p2", "t2", "w2", "tab2", 2))
+            .unwrap();
+
+        assert!(!changed);
+        assert_eq!(fs::read_to_string(&manager.notes_path).unwrap(), before);
     }
 
     #[test]

@@ -3041,7 +3041,7 @@ export function App() {
       {noteDeleteTarget ? (
         <ConfirmDialog
           title="Delete note"
-          message={`Delete "${noteDeleteTarget.note.title || "Untitled note"}"? This cannot be undone.`}
+          message={`Move "${noteDeleteTarget.note.title || "Untitled note"}" to deleted notes? You can restore it later from the Deleted filter.`}
           confirmLabel="Delete"
           busy={deletingNote}
           onCancel={() => {
@@ -5367,8 +5367,21 @@ export function NoteEditor({
   const loadedNoteIdentityRef = useRef("");
   const saveBlockedRef = useRef(false);
   const noteSaveInFlightRef = useRef<NoteSaveInFlight | null>(null);
+  const entryRef = useRef(entry);
+  const onSaveRef = useRef(onSave);
   const noteIdentity = entry ? noteDraftStorageKey(entry) : "";
   const noteKey = entry ? `${entry.bridgeId}:${entry.note.note_id}:${entry.note.revision}` : "";
+  const serverTitle = entry?.note.title ?? "";
+  const serverBody = entry?.note.body ?? "";
+  const serverRevision = entry?.note.revision ?? 0;
+
+  useEffect(() => {
+    entryRef.current = entry;
+  }, [entry]);
+
+  useEffect(() => {
+    onSaveRef.current = onSave;
+  }, [onSave]);
 
   useEffect(() => {
     if (!entry) {
@@ -5472,27 +5485,31 @@ export function NoteEditor({
   }, [baseRevision, body, dirty, entry, title]);
 
   useEffect(() => {
-    if (!entry || !dirty) {
+    if (!noteIdentity || !dirty) {
       return;
     }
     if (editorNoteIdentity !== noteIdentity) {
       return;
     }
-    if (title === entry.note.title && body === entry.note.body) {
+    if (title === serverTitle && body === serverBody) {
       return;
     }
-    const expectedRevision = baseRevision ?? entry.note.revision;
+    const currentEntry = entryRef.current;
+    if (!currentEntry || noteDraftStorageKey(currentEntry) !== noteIdentity) {
+      return;
+    }
+    const expectedRevision = baseRevision ?? serverRevision;
     if (
       isInFlightNoteSaveVisible({
         inFlight: noteSaveInFlightRef.current,
         noteIdentity,
-        serverRevision: entry.note.revision,
-        serverTitle: entry.note.title,
-        serverBody: entry.note.body,
+        serverRevision,
+        serverTitle,
+        serverBody,
       })
     ) {
       setBaseRevision((current) =>
-        current === null || current < entry.note.revision ? entry.note.revision : current,
+        current === null || current < serverRevision ? serverRevision : current,
       );
       saveBlockedRef.current = false;
       setSaveState("pending");
@@ -5504,14 +5521,14 @@ export function NoteEditor({
         title,
         body,
         baseRevision: expectedRevision,
-        serverTitle: entry.note.title,
-        serverBody: entry.note.body,
-        serverRevision: entry.note.revision,
+        serverTitle,
+        serverBody,
+        serverRevision,
       })
     ) {
       saveBlockedRef.current = true;
       setSaveState("conflict");
-      writeNoteDraft(entry, title, body, expectedRevision);
+      writeNoteDraft(currentEntry, title, body, expectedRevision);
       return;
     }
     if (saveBlockedRef.current) {
@@ -5532,7 +5549,12 @@ export function NoteEditor({
         body,
       };
       noteSaveInFlightRef.current = inFlight;
-      void onSave(entry, title, body, expectedRevision)
+      const saveEntry = entryRef.current;
+      if (!saveEntry || noteDraftStorageKey(saveEntry) !== inFlight.noteIdentity) {
+        noteSaveInFlightRef.current = null;
+        return;
+      }
+      void onSaveRef.current(saveEntry, title, body, expectedRevision)
         .then((savedRevision) => {
           if (loadedNoteIdentityRef.current === inFlight.noteIdentity) {
             setBaseRevision((current) =>
@@ -5567,10 +5589,11 @@ export function NoteEditor({
     body,
     dirty,
     editorNoteIdentity,
-    entry,
     noteIdentity,
-    onSave,
     saveRetryCycle,
+    serverBody,
+    serverRevision,
+    serverTitle,
     title,
   ]);
 
