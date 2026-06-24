@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   buildVisibleAgentPaneEntries,
+  buildVisibleScopedNotes,
+  noteDraftStorageKey,
   buildVisibleScopedWorkspaces,
   buildVisibleTabEntries,
+  isInFlightNoteSaveVisible,
   nextVisibleAgentPaneEntry,
   nextVisibleTabEntry,
   resolveInitialSelectedBridgeId,
+  shouldBlockDirtyNoteAutosave,
   shouldCollapseHostScope,
   sortScopedAgentPanes,
   stableBridgeRefreshOffsetMs,
@@ -17,6 +21,7 @@ import {
   isConnectionResultCurrent,
 } from "./connectionState";
 import type { AgentStatus, PaneInfo, Snapshot, TabInfo, WorkspaceInfo } from "./types";
+import type { PaneNote } from "./notes";
 
 describe("App connection guards", () => {
   it("hides snapshots from stale backend connections", () => {
@@ -286,6 +291,240 @@ describe("App multi-bridge helpers", () => {
     expect(nextVisibleTabEntry(entries, 0, -1).tab.tab_id).toBe("tab-b");
     expect(nextVisibleTabEntry(entries, 1, 1).tab.tab_id).toBe("tab-a");
   });
+
+  it("keeps unresolved notes visible in space scope and filters archived/deleted notes explicitly", () => {
+    const bridgeViews = [
+      bridgeView(
+        "bridge-a",
+        bridgeSnapshot("workspace-a", "tab-a", pane("pane-a", "workspace-a", "tab-a")),
+      ),
+    ];
+    const notes = [
+      note("active-linked", "workspace-a", "linked"),
+      note("unresolved-other-space", "workspace-b", "unresolved"),
+      { ...note("archived", "workspace-a", "linked"), archived_at: "500" },
+      { ...note("deleted", "workspace-a", "linked"), deleted_at: "600" },
+    ];
+
+    expect(
+      buildVisibleScopedNotes(
+        bridgeViews,
+        notesState("bridge-a", "store-1", notes),
+        "bridge-a",
+        "selected",
+        "space",
+        bridgeViews[0].snapshot?.workspaces[0] ?? null,
+        { "bridge-a": "workspace-a" },
+        false,
+        false,
+      ).map((entry) => entry.note.note_id),
+    ).toEqual(["unresolved-other-space", "active-linked"]);
+
+    expect(
+      buildVisibleScopedNotes(
+        bridgeViews,
+        notesState("bridge-a", "store-1", notes),
+        "bridge-a",
+        "selected",
+        "space",
+        bridgeViews[0].snapshot?.workspaces[0] ?? null,
+        { "bridge-a": "workspace-a" },
+        true,
+        true,
+      ).map((entry) => entry.note.note_id),
+    ).toEqual(["deleted", "archived", "unresolved-other-space", "active-linked"]);
+  });
+
+  it("dedupes all-host notes by note identity when two bridge profiles point at the same store", () => {
+    const bridgeViews = [
+      bridgeView(
+        "bridge-a",
+        bridgeSnapshot("workspace-a", "tab-a", pane("pane-a", "workspace-a", "tab-a")),
+      ),
+      bridgeView(
+        "bridge-b",
+        bridgeSnapshot("workspace-a", "tab-a", pane("pane-a", "workspace-a", "tab-a")),
+      ),
+    ];
+    const sharedFromOtherSession = {
+      ...note("shared", "workspace-a", "linked"),
+      session_key: "session:bridge-b",
+    };
+    const sharedFromOwningSession = {
+      ...sharedFromOtherSession,
+      resolved_pane: pane("workspace-a-pane", "workspace-a", "tab-a"),
+    };
+
+    expect(
+      buildVisibleScopedNotes(
+        bridgeViews,
+        {
+          ...notesState(
+            "bridge-a",
+            "shared-store",
+            [note("a", "workspace-a", "linked"), sharedFromOtherSession],
+            "session:bridge-a",
+          ),
+          ...notesState(
+            "bridge-b",
+            "shared-store",
+            [note("b", "workspace-a", "linked"), sharedFromOwningSession],
+            "session:bridge-b",
+          ),
+        },
+        "bridge-a",
+        "all",
+        "all",
+        null,
+        {},
+        false,
+        false,
+      ).map((entry) => `${entry.bridgeId}:${entry.note.session_key}:${entry.note.note_id}`),
+    ).toEqual([
+      "bridge-a:session:default:a",
+      "bridge-b:session:default:b",
+      "bridge-b:session:bridge-b:shared",
+    ]);
+  });
+
+  it("scopes note drafts by bridge connection, store, session, and note id", () => {
+    const bridgeViews = [
+      bridgeView(
+        "bridge-a",
+        bridgeSnapshot("workspace-a", "tab-a", pane("pane-a", "workspace-a", "tab-a")),
+      ),
+    ];
+    const [first] = buildVisibleScopedNotes(
+      bridgeViews,
+      notesState("bridge-a", "store-1", [note("n1", "workspace-a", "linked")]),
+      "bridge-a",
+      "selected",
+      "all",
+      null,
+      {},
+      false,
+      false,
+    );
+    const changedSession = { ...first, sessionKey: "session:other" };
+
+    expect(noteDraftStorageKey(first)).not.toBe(noteDraftStorageKey(changedSession));
+    expect(noteDraftStorageKey(first)).toContain("store-1");
+    expect(noteDraftStorageKey(first)).toContain("session%3Adefault");
+  });
+
+  it("scopes note drafts by the note owner session for other-session notes", () => {
+    const bridgeViews = [
+      bridgeView(
+        "bridge-a",
+        bridgeSnapshot("workspace-a", "tab-a", pane("pane-a", "workspace-a", "tab-a")),
+      ),
+    ];
+    const [first] = buildVisibleScopedNotes(
+      bridgeViews,
+      notesState(
+        "bridge-a",
+        "store-1",
+        [{ ...note("n1", "workspace-a", "linked"), session_key: "session:note-owner" }],
+        "session:bridge-response",
+      ),
+      "bridge-a",
+      "selected",
+      "all",
+      null,
+      {},
+      false,
+      false,
+    );
+
+    expect(first.sessionKey).toBe("session:note-owner");
+    expect(first.bridgeSessionKey).toBe("session:bridge-response");
+    expect(noteDraftStorageKey(first)).toContain("session%3Anote-owner");
+    expect(noteDraftStorageKey(first)).not.toContain("session%3Abridge-response");
+  });
+
+  it("blocks note autosave when the server revision advances under a dirty draft", () => {
+    expect(
+      shouldBlockDirtyNoteAutosave({
+        dirty: true,
+        title: "Local title",
+        body: "Local draft",
+        baseRevision: 1,
+        serverTitle: "Remote title",
+        serverBody: "Remote edit",
+        serverRevision: 2,
+      }),
+    ).toBe(true);
+    expect(
+      shouldBlockDirtyNoteAutosave({
+        dirty: true,
+        title: "Remote title",
+        body: "Remote edit",
+        baseRevision: 1,
+        serverTitle: "Remote title",
+        serverBody: "Remote edit",
+        serverRevision: 2,
+      }),
+    ).toBe(false);
+    expect(
+      shouldBlockDirtyNoteAutosave({
+        dirty: true,
+        title: "Local title",
+        body: "Local draft",
+        baseRevision: 1,
+        serverTitle: "Original title",
+        serverBody: "Original body",
+        serverRevision: 1,
+      }),
+    ).toBe(false);
+    expect(
+      shouldBlockDirtyNoteAutosave({
+        dirty: true,
+        title: "Continued title",
+        body: "Continued typing",
+        baseRevision: 2,
+        serverTitle: "Saved title",
+        serverBody: "Saved body",
+        serverRevision: 2,
+      }),
+    ).toBe(false);
+  });
+
+  it("recognizes the user's in-flight note save when a refetch exposes it", () => {
+    const inFlight = {
+      noteIdentity: "note-key",
+      expectedRevision: 5,
+      title: "Saved title",
+      body: "Saved body",
+    };
+
+    expect(
+      isInFlightNoteSaveVisible({
+        inFlight,
+        noteIdentity: "note-key",
+        serverTitle: "Saved title",
+        serverBody: "Saved body",
+        serverRevision: 6,
+      }),
+    ).toBe(true);
+    expect(
+      isInFlightNoteSaveVisible({
+        inFlight,
+        noteIdentity: "note-key",
+        serverTitle: "Remote title",
+        serverBody: "Saved body",
+        serverRevision: 6,
+      }),
+    ).toBe(false);
+    expect(
+      isInFlightNoteSaveVisible({
+        inFlight,
+        noteIdentity: "note-key",
+        serverTitle: "Saved title",
+        serverBody: "Saved body",
+        serverRevision: 5,
+      }),
+    ).toBe(false);
+  });
 });
 
 function entry(
@@ -390,5 +629,64 @@ function bridgeSnapshot(workspaceId: string, tabId: string, paneInfo: PaneInfo):
     tabs: [tabInfo],
     panes: [paneInfo],
     layouts: [],
+  };
+}
+
+function notesState(
+  bridgeId: string,
+  storeId: string,
+  notes: PaneNote[],
+  sessionKey = "session:default",
+) {
+  return {
+    [bridgeId]: {
+      connectionKey: bridgeId,
+      response: {
+        store_id: storeId,
+        session_key: sessionKey,
+        notes,
+      },
+      loadState: "ready" as const,
+      error: null,
+    },
+  };
+}
+
+function note(
+  noteId: string,
+  workspaceId: string,
+  linkState: PaneNote["link_state"],
+): PaneNote {
+  const paneId = `${workspaceId}-pane`;
+  return {
+    note_id: noteId,
+    title: noteId,
+    body: "",
+    created_at: "100",
+    updated_at:
+      noteId === "deleted"
+        ? "600"
+        : noteId === "archived"
+          ? "500"
+          : noteId === "unresolved-other-space"
+            ? "300"
+            : "200",
+    session_key: "session:default",
+    attachment: {
+      type: "pane",
+      pane_id: paneId,
+      workspace_id: workspaceId,
+      tab_id: "tab-a",
+      terminal_id: `${paneId}-terminal`,
+      captured_at: "100",
+      context: {},
+    },
+    attachment_history: [],
+    revision: 1,
+    link_state: linkState,
+    resolved_pane:
+      linkState === "linked"
+        ? pane(paneId, workspaceId, "tab-a")
+        : undefined,
   };
 }

@@ -1,3 +1,4 @@
+mod notes;
 mod session;
 mod web_bridge;
 mod workspace;

@@ -6,6 +6,16 @@
 
 ### Added
 
+- Added bridge-owned pane notes with a sidebar Notes view, desktop/mobile notes editor, pane
+  attachment recovery states, and per-bridge note synchronization. Notes are exposed through the
+  same bridge request policy as terminal controls, so allowed bridge clients can read and mutate
+  saved note content. [PR #20](https://github.com/kcosr/herdr-web/pull/20)
+- Added a Notes feature toggle plus persisted desktop notes panel sizing, notes list collapse
+  state, notes panel open state, pane note tabs, and a dedicated Other notes list.
+  [PR #20](https://github.com/kcosr/herdr-web/pull/20)
+- Added a Markdown preview mode for notes that remembers Edit/Preview preference locally and keeps
+  the Markdown renderer lazy-loaded until preview is used. [PR #20](https://github.com/kcosr/herdr-web/pull/20)
+
 ### Changed
 
 ### Fixed
@@ -13,6 +23,16 @@
 - Added Mobile settings for an expanding terminal command input and Enter-as-newline
   editing, allowing long prompts to wrap and remain viewable while preserving send-on-Enter
   by default. [PR #21](https://github.com/kcosr/herdr-web/pull/21)
+- Fixed notes editor selection and autosave edge cases so switching to panes without notes clears
+  the editor, deleting the selected note no longer shows a deleted note, and stale local save
+  refreshes do not appear as external note changes. Also fixed mobile delete-dialog back handling
+  and unresolved note recovery actions in the notes panel. [PR #20](https://github.com/kcosr/herdr-web/pull/20)
+- On mobile, kept the note editor's terminal action available for the current pane and made it
+  close the full-screen notes surface. [PR #20](https://github.com/kcosr/herdr-web/pull/20)
+- Changed mobile notes back navigation so back closes the notes surface from the editor, while a
+  separate header button shows the notes list. [PR #20](https://github.com/kcosr/herdr-web/pull/20)
+- Kept the new-tab button pinned at the right edge of the top tab bar while the tab list scrolls.
+  [PR #20](https://github.com/kcosr/herdr-web/pull/20)
 - Improved terminal reconnect/resume handling so Android foregrounding and quick terminal switches
   keep the renderer stable, avoid stale tab flashes, and suppress transient connecting overlays.
   [PR #19](https://github.com/kcosr/herdr-web/pull/19)

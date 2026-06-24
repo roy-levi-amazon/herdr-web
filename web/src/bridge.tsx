@@ -36,6 +36,9 @@ export type BridgeMode = "same-origin" | "configured";
 
 export type BridgeCapabilities = {
   commands: string[];
+  notes?: {
+    version: 1;
+  };
   bridge_version?: string;
   web_compat?: number;
   min_android_app_compat?: number;
@@ -94,6 +97,7 @@ export type BackendInput = {
 
 const STORE_KEY = "herdrWeb.bridgeBackends.v2";
 const LEGACY_STORE_KEY = "herdrWeb.bridgeBackends.v1";
+const NOTE_DRAFT_STORAGE_PREFIX = "herdr-web:note-draft:v1:";
 const STORE_VERSION = 2;
 const APP_MIN_WEB_COMPAT = 1;
 export const SAME_ORIGIN_BRIDGE_COLOR = "#b4befe";
@@ -309,6 +313,9 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
     }
     storeEditedRef.current = true;
     const baseUrl = normalizeBridgeBaseUrl(input.baseUrl);
+    if (baseUrl !== existing.baseUrl) {
+      removeNoteDraftsForBridgeConnection(id, configuredBridgeConnectionKey(id, existing.baseUrl));
+    }
     const otherBackends = store.backends.filter((backend) => backend.id !== id);
     const updated: BridgeBackendProfile = {
       ...existing,
@@ -330,6 +337,10 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
   }, [store.backends, store.enabledBridgeIds]);
 
   const deleteBackend = useCallback((id: string) => {
+    const existing = store.backends.find((backend) => backend.id === id);
+    if (existing) {
+      removeNoteDraftsForBridgeConnection(id, configuredBridgeConnectionKey(id, existing.baseUrl));
+    }
     storeEditedRef.current = true;
     setStore((current) => {
       const backends = current.backends.filter((backend) => backend.id !== id);
@@ -343,7 +354,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
         backends,
       };
     });
-  }, []);
+  }, [store.backends]);
 
   const probeBackend = useCallback((baseUrl: string) => probeBridgeBaseUrl(baseUrl), []);
 
@@ -565,7 +576,10 @@ function createBridgeRuntime({
   probeState: BridgeProbeState | undefined;
   resumeToken: number;
 }): BridgeRuntime {
-  const connectionKey = mode === "same-origin" ? SAME_ORIGIN_BRIDGE_ID : `configured:${id}:${baseUrl}`;
+  const connectionKey =
+    mode === "same-origin"
+      ? SAME_ORIGIN_BRIDGE_ID
+      : configuredBridgeConnectionKey(id, baseUrl ?? "");
   const currentProbeState = probeState?.connectionKey === connectionKey ? probeState : undefined;
   const httpUrl = (path: string, query?: URLSearchParams) => buildHttpUrl(baseUrl, path, query);
   const wsUrl = (path: string, query?: URLSearchParams) => buildWsUrl(baseUrl, path, query);
@@ -936,6 +950,34 @@ export function buildWsUrl(
   return url.toString();
 }
 
+export function configuredBridgeConnectionKey(id: BridgeId, baseUrl: string) {
+  return `configured:${id}:${baseUrl}`;
+}
+
+export function removeNoteDraftsForBridgeConnection(bridgeId: BridgeId, connectionKey: string) {
+  const draftPrefix = `${NOTE_DRAFT_STORAGE_PREFIX}${encodeURIComponent(
+    bridgeId,
+  )}:${encodeURIComponent(connectionKey)}:`;
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage) {
+      return;
+    }
+    const keys: string[] = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (key?.startsWith(draftPrefix)) {
+        keys.push(key);
+      }
+    }
+    for (const key of keys) {
+      storage.removeItem(key);
+    }
+  } catch {
+    // Draft cleanup is best-effort; stale keys are isolated by connection key.
+  }
+}
+
 function normalizeEndpointPath(path: string) {
   if (!path.startsWith("/")) {
     throw new Error("Bridge endpoint path must start with /");
@@ -1019,6 +1061,10 @@ export function parseCapabilities(value: unknown): BridgeCapabilities {
     web_compat: typeof value.web_compat === "number" ? value.web_compat : undefined,
     min_android_app_compat:
       typeof value.min_android_app_compat === "number" ? value.min_android_app_compat : undefined,
+    notes:
+      isRecord(value.notes) && value.notes.version === 1
+        ? { version: 1 }
+        : undefined,
   };
 }
 

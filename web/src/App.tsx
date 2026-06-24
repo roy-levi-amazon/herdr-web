@@ -1,15 +1,39 @@
 import {
   ChevronLeft,
+  Archive,
+  Link2,
   MoreVertical,
   PanelLeft,
   Plus,
   RefreshCw,
+  RotateCcw,
   Settings,
   SplitSquareHorizontal,
   SplitSquareVertical,
+  SquareTerminal,
+  StickyNote,
+  Trash2,
+  Unlink,
+  X,
 } from "lucide-react";
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, Dispatch, MutableRefObject, SetStateAction } from "react";
+import {
+  Fragment,
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type {
+  CSSProperties,
+  Dispatch,
+  KeyboardEvent as ReactKeyboardEvent,
+  MutableRefObject,
+  SetStateAction,
+} from "react";
 import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 import { AgentIcon, agentIconKind } from "./AgentIcon";
@@ -53,6 +77,21 @@ import type {
   MobileTouchSelectionEndpointTimeoutMs,
 } from "./mobileTerminalPrefs";
 import { addNativeBackHandler, addNativeKeyboardHideHandler, isNativeAndroid } from "./native";
+import {
+  archiveNote,
+  attachNote,
+  compareNotes,
+  createNote,
+  deleteNote,
+  detachNote,
+  fetchNotes,
+  isNotesConflictError,
+  notesForPane,
+  restoreNote,
+  supportsNotes,
+  updateNote,
+} from "./notes";
+import type { NotesListResponse, PaneNote } from "./notes";
 import { ActionMenu, ConfirmDialog, RenameDialog, useLongPress } from "./overlays";
 import type { MenuItem } from "./overlays";
 import { createSnapshotRefreshController } from "./refreshCoordinator";
@@ -98,10 +137,12 @@ import type {
   WorkspaceInfo,
 } from "./types";
 
+const NoteMarkdownPreview = lazy(() => import("./NoteMarkdownPreview"));
+
 type LoadState = "loading" | "ready" | "error";
 type Scope = "space" | "all";
 type HostScope = "selected" | "all";
-type SidebarView = "agents" | "tabs";
+type SidebarView = "agents" | "tabs" | "notes";
 type AgentSort = "attention" | "status" | "workspace";
 type AgentGroup = "none" | "host" | "workspace" | "hostWorkspace";
 type MenuKind = "space" | "tab" | "pane";
@@ -109,6 +150,11 @@ type ScopedPaneRef = {
   bridgeId: BridgeId;
   paneId: string;
 };
+type ScopedNoteRef = {
+  bridgeId: BridgeId;
+  noteId: string;
+};
+type MobileNotesScreen = "list" | "editor";
 type ScopedWorkspaceRef = {
   bridgeId: BridgeId;
   workspaceId: string;
@@ -121,12 +167,18 @@ export type BridgeConnectionView = {
   snapshot: Snapshot | null;
   loadState: LoadState;
 };
-type BridgeConnectionState = {
+export type BridgeConnectionState = {
   connectionKey: string;
   snapshot: Snapshot | null;
   loadState: LoadState;
 };
-type BridgeConnectionRef = {
+type BridgeNotesState = {
+  connectionKey: string;
+  response: NotesListResponse | null;
+  loadState: LoadState;
+  error: string | null;
+};
+export type BridgeConnectionRef = {
   connectionKey: string;
   snapshot: Snapshot | null;
   activityGeneration: number;
@@ -159,6 +211,20 @@ export type ScopedTabEntry = ScopedWorkspace & {
   tab: TabInfo;
   panes: PaneInfo[];
 };
+export type ScopedNoteEntry = {
+  bridgeId: BridgeId;
+  connectionKey: string;
+  storeId: string;
+  sessionKey: string;
+  bridgeSessionKey: string;
+  bridgeIndex: number;
+  bridgeLabel: string;
+  bridgeColor: string;
+  note: PaneNote;
+  snapshot: Snapshot | null;
+  workspace?: WorkspaceInfo;
+  pane?: PaneInfo;
+};
 type ScopedAgentGroup = {
   key: string;
   bridgeId: BridgeId;
@@ -167,6 +233,19 @@ type ScopedAgentGroup = {
   status?: AgentStatus;
   panes: ScopedAgentPane[];
 };
+type NoteDraft = {
+  title: string;
+  body: string;
+  baseRevision: number;
+  updatedAt: number;
+};
+type NoteSaveInFlight = {
+  noteIdentity: string;
+  expectedRevision: number;
+  title: string;
+  body: string;
+};
+type NoteEditorMode = "edit" | "preview";
 type MenuState = {
   kind: MenuKind;
   bridgeId: BridgeId;
@@ -191,6 +270,11 @@ type DisplayPrefs = {
   agentSort: AgentSort;
   agentGroup: AgentGroup;
   sidebarWidth: number;
+  notesPanelWidth: number;
+  notesListPaneWidth: number;
+  notesListPaneCollapsed: boolean;
+  notesEnabled: boolean;
+  notesPanelOpen: boolean;
   sidebarOpen: boolean;
   selectedBridgeId: BridgeId | null;
   selectedPane: ScopedPaneRef | null;
@@ -224,6 +308,12 @@ const MOBILE_DETAIL_HISTORY_KEY = "herdrWebMobileDetail";
 const DEFAULT_SIDEBAR_WIDTH = 320;
 const MIN_SIDEBAR_WIDTH = 260;
 const MAX_SIDEBAR_WIDTH = 560;
+const DEFAULT_NOTES_PANEL_WIDTH = 560;
+const MIN_NOTES_PANEL_WIDTH = 420;
+const MAX_NOTES_PANEL_WIDTH = 840;
+const DEFAULT_NOTES_LIST_PANE_WIDTH = 240;
+const MIN_NOTES_LIST_PANE_WIDTH = 200;
+const MAX_NOTES_LIST_PANE_WIDTH = 420;
 
 function readDisplayPrefs(): DisplayPrefs {
   const fallback: DisplayPrefs = {
@@ -233,6 +323,11 @@ function readDisplayPrefs(): DisplayPrefs {
     agentSort: "attention",
     agentGroup: "none",
     sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+    notesPanelWidth: DEFAULT_NOTES_PANEL_WIDTH,
+    notesListPaneWidth: DEFAULT_NOTES_LIST_PANE_WIDTH,
+    notesListPaneCollapsed: true,
+    notesEnabled: true,
+    notesPanelOpen: false,
     sidebarOpen: true,
     selectedBridgeId: null,
     selectedPane: null,
@@ -287,6 +382,16 @@ function parseDisplayPrefsValue(
   parsed: Partial<DisplayPrefs> & { mobileTouchSelection?: unknown },
   fallback: DisplayPrefs,
 ): DisplayPrefs {
+  const sidebarWidth =
+    typeof parsed.sidebarWidth === "number"
+      ? clampSidebarWidth(parsed.sidebarWidth)
+      : fallback.sidebarWidth;
+  const sidebarOpen =
+    typeof parsed.sidebarOpen === "boolean" ? parsed.sidebarOpen : fallback.sidebarOpen;
+  const notesPanelWidth =
+    typeof parsed.notesPanelWidth === "number"
+      ? clampNotesPanelWidth(parsed.notesPanelWidth, sidebarWidth, sidebarOpen)
+      : fallback.notesPanelWidth;
   return {
     hostScope:
       parsed.hostScope === "selected" || parsed.hostScope === "all"
@@ -294,7 +399,9 @@ function parseDisplayPrefsValue(
         : fallback.hostScope,
     scope: parsed.scope === "all" || parsed.scope === "space" ? parsed.scope : fallback.scope,
     sidebarView:
-      parsed.sidebarView === "agents" || parsed.sidebarView === "tabs"
+      parsed.sidebarView === "agents" ||
+      parsed.sidebarView === "tabs" ||
+      parsed.sidebarView === "notes"
         ? parsed.sidebarView
         : fallback.sidebarView,
     agentSort:
@@ -310,12 +417,21 @@ function parseDisplayPrefsValue(
       parsed.agentGroup === "hostWorkspace"
         ? parsed.agentGroup
         : fallback.agentGroup,
-    sidebarWidth:
-      typeof parsed.sidebarWidth === "number"
-        ? clampSidebarWidth(parsed.sidebarWidth)
-        : fallback.sidebarWidth,
-    sidebarOpen:
-      typeof parsed.sidebarOpen === "boolean" ? parsed.sidebarOpen : fallback.sidebarOpen,
+    sidebarWidth,
+    notesPanelWidth,
+    notesListPaneWidth:
+      typeof parsed.notesListPaneWidth === "number"
+        ? clampNotesListPaneWidth(parsed.notesListPaneWidth, notesPanelWidth)
+        : fallback.notesListPaneWidth,
+    notesListPaneCollapsed:
+      typeof parsed.notesListPaneCollapsed === "boolean"
+        ? parsed.notesListPaneCollapsed
+        : fallback.notesListPaneCollapsed,
+    notesEnabled:
+      typeof parsed.notesEnabled === "boolean" ? parsed.notesEnabled : fallback.notesEnabled,
+    notesPanelOpen:
+      typeof parsed.notesPanelOpen === "boolean" ? parsed.notesPanelOpen : fallback.notesPanelOpen,
+    sidebarOpen,
     selectedBridgeId:
       typeof parsed.selectedBridgeId === "string" ? parsed.selectedBridgeId : fallback.selectedBridgeId,
     selectedPane: parseScopedPaneRef(parsed.selectedPane),
@@ -375,6 +491,16 @@ function readLegacyDisplayPrefs(fallback: DisplayPrefs): DisplayPrefs {
       selectedPaneId?: unknown;
       mobileTouchSelection?: unknown;
     } & Partial<DisplayPrefs>;
+    const sidebarWidth =
+      typeof parsed.sidebarWidth === "number"
+        ? clampSidebarWidth(parsed.sidebarWidth)
+        : fallback.sidebarWidth;
+    const sidebarOpen =
+      typeof parsed.sidebarOpen === "boolean" ? parsed.sidebarOpen : fallback.sidebarOpen;
+    const notesPanelWidth =
+      typeof parsed.notesPanelWidth === "number"
+        ? clampNotesPanelWidth(parsed.notesPanelWidth, sidebarWidth, sidebarOpen)
+        : fallback.notesPanelWidth;
     return {
       ...fallback,
       hostScope:
@@ -383,7 +509,9 @@ function readLegacyDisplayPrefs(fallback: DisplayPrefs): DisplayPrefs {
           : fallback.hostScope,
       scope: parsed.scope === "all" || parsed.scope === "space" ? parsed.scope : fallback.scope,
       sidebarView:
-        parsed.sidebarView === "agents" || parsed.sidebarView === "tabs"
+        parsed.sidebarView === "agents" ||
+        parsed.sidebarView === "tabs" ||
+        parsed.sidebarView === "notes"
           ? parsed.sidebarView
           : fallback.sidebarView,
       agentSort:
@@ -399,12 +527,23 @@ function readLegacyDisplayPrefs(fallback: DisplayPrefs): DisplayPrefs {
         parsed.agentGroup === "hostWorkspace"
           ? parsed.agentGroup
           : fallback.agentGroup,
-      sidebarWidth:
-        typeof parsed.sidebarWidth === "number"
-          ? clampSidebarWidth(parsed.sidebarWidth)
-          : fallback.sidebarWidth,
-      sidebarOpen:
-        typeof parsed.sidebarOpen === "boolean" ? parsed.sidebarOpen : fallback.sidebarOpen,
+      sidebarWidth,
+      notesPanelWidth,
+      notesListPaneWidth:
+        typeof parsed.notesListPaneWidth === "number"
+          ? clampNotesListPaneWidth(parsed.notesListPaneWidth, notesPanelWidth)
+          : fallback.notesListPaneWidth,
+      notesListPaneCollapsed:
+        typeof parsed.notesListPaneCollapsed === "boolean"
+          ? parsed.notesListPaneCollapsed
+          : fallback.notesListPaneCollapsed,
+      notesEnabled:
+        typeof parsed.notesEnabled === "boolean" ? parsed.notesEnabled : fallback.notesEnabled,
+      notesPanelOpen:
+        typeof parsed.notesPanelOpen === "boolean"
+          ? parsed.notesPanelOpen
+          : fallback.notesPanelOpen,
+      sidebarOpen,
       terminalFontSizePx: parseTerminalFontSizePx(parsed.terminalFontSizePx),
       terminalInputTransport: parseTerminalInputTransport(parsed.terminalInputTransport),
       terminalInputBatchDelayMs: parseTerminalInputBatchDelayMs(parsed.terminalInputBatchDelayMs),
@@ -468,6 +607,30 @@ function clampSidebarWidth(width: number) {
       ? MAX_SIDEBAR_WIDTH
       : Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, window.innerWidth - 360));
   return Math.round(Math.min(Math.max(width, MIN_SIDEBAR_WIDTH), viewportMax));
+}
+
+function clampNotesPanelWidth(
+  width: number,
+  sidebarWidth = DEFAULT_SIDEBAR_WIDTH,
+  sidebarOpen = true,
+) {
+  const reservedWidth = sidebarOpen ? sidebarWidth : 0;
+  const viewportMax =
+    typeof window === "undefined"
+      ? MAX_NOTES_PANEL_WIDTH
+      : Math.max(
+          MIN_NOTES_PANEL_WIDTH,
+          Math.min(MAX_NOTES_PANEL_WIDTH, window.innerWidth - reservedWidth - 320),
+        );
+  return Math.round(Math.min(Math.max(width, MIN_NOTES_PANEL_WIDTH), viewportMax));
+}
+
+function clampNotesListPaneWidth(width: number, notesPanelWidth = DEFAULT_NOTES_PANEL_WIDTH) {
+  const maxWidth = Math.max(
+    MIN_NOTES_LIST_PANE_WIDTH,
+    Math.min(MAX_NOTES_LIST_PANE_WIDTH, notesPanelWidth - 260),
+  );
+  return Math.round(Math.min(Math.max(width, MIN_NOTES_LIST_PANE_WIDTH), maxWidth));
 }
 
 async function writeDisplayPrefs(prefs: DisplayPrefs) {
@@ -551,9 +714,17 @@ export function App() {
   const legacySelectionPrefs = useMemo(readLegacyDisplaySelectionPrefs, []);
   const [displayPrefsLoaded, setDisplayPrefsLoaded] = useState(() => !isNativeApp());
   const [connectionStates, setConnectionStates] = useState<Record<string, BridgeConnectionState>>({});
+  const [notesStates, setNotesStates] = useState<Record<string, BridgeNotesState>>({});
   const [selectedBridgeId, setSelectedBridgeId] = useState<BridgeId | null>(
     initialPrefs.selectedBridgeId,
   );
+  const [selectedNoteRef, setSelectedNoteRef] = useState<ScopedNoteRef | null>(null);
+  const [notesPanelOpen, setNotesPanelOpen] = useState(
+    initialPrefs.notesEnabled && initialPrefs.notesPanelOpen,
+  );
+  const [mobileNotesScreen, setMobileNotesScreen] = useState<MobileNotesScreen>("list");
+  const [notesIncludeArchived, setNotesIncludeArchived] = useState(false);
+  const [notesIncludeDeleted, setNotesIncludeDeleted] = useState(false);
   const [selectedPaneRefState, setSelectedPaneRefState] = useState<ScopedPaneRef | null>(
     initialPrefs.selectedPane,
   );
@@ -571,11 +742,26 @@ export function App() {
   const [agentSort, setAgentSort] = useState<AgentSort>(initialPrefs.agentSort);
   const [agentGroup, setAgentGroup] = useState<AgentGroup>(initialPrefs.agentGroup);
   const [sidebarWidth, setSidebarWidth] = useState(initialPrefs.sidebarWidth);
+  const [notesPanelWidth, setNotesPanelWidth] = useState(initialPrefs.notesPanelWidth);
+  const [notesListPaneWidth, setNotesListPaneWidth] = useState(initialPrefs.notesListPaneWidth);
+  const [notesListPaneCollapsed, setNotesListPaneCollapsed] = useState(
+    initialPrefs.notesListPaneCollapsed,
+  );
+  const notesEnabledRef = useRef(initialPrefs.notesEnabled);
+  const [notesEnabled, setNotesEnabledState] = useState(initialPrefs.notesEnabled);
+  const setNotesEnabled = useCallback((enabled: boolean) => {
+    notesEnabledRef.current = enabled;
+    setNotesEnabledState(enabled);
+  }, []);
   const [resizingSidebar, setResizingSidebar] = useState(false);
+  const [resizingNotesPanel, setResizingNotesPanel] = useState(false);
+  const [resizingNotesListPane, setResizingNotesListPane] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(initialPrefs.sidebarOpen);
   const [showDetail, setShowDetail] = useState(false);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [noteDeleteTarget, setNoteDeleteTarget] = useState<ScopedNoteEntry | null>(null);
+  const [deletingNote, setDeletingNote] = useState(false);
   const [backendSettingsOpen, setBackendSettingsOpen] = useState(false);
   const [terminalFontSizePx, setTerminalFontSizePx] = useState(
     initialPrefs.terminalFontSizePx,
@@ -630,6 +816,8 @@ export function App() {
   const mobileSidebarHistoryRef = useRef(false);
   const mobileDetailHistoryRef = useRef(false);
   const legacySelectionAppliedRef = useRef(false);
+  const selectedNotePaneKeyRef = useRef("");
+  const notesListResizeLeftRef = useRef(0);
   const sidebarResizePressRef = useRef<{
     timer: number;
     pointerId: number;
@@ -653,6 +841,11 @@ export function App() {
       setAgentSort(prefs.agentSort);
       setAgentGroup(prefs.agentGroup);
       setSidebarWidth(prefs.sidebarWidth);
+      setNotesPanelWidth(prefs.notesPanelWidth);
+      setNotesListPaneWidth(prefs.notesListPaneWidth);
+      setNotesListPaneCollapsed(prefs.notesListPaneCollapsed);
+      setNotesEnabled(prefs.notesEnabled);
+      setNotesPanelOpen(prefs.notesEnabled && prefs.notesPanelOpen);
       setSidebarOpen(prefs.sidebarOpen);
       setSelectedBridgeId(prefs.selectedBridgeId);
       setSelectedPaneRefState(prefs.selectedPane);
@@ -681,6 +874,16 @@ export function App() {
 
   useEffect(() => {
     return addNativeBackHandler(() => {
+      if (noteDeleteTarget) {
+        if (!deletingNote) {
+          setNoteDeleteTarget(null);
+        }
+        return true;
+      }
+      if (notesPanelOpen) {
+        setNotesPanelOpen(false);
+        return true;
+      }
       if (backendSettingsOpen) {
         setBackendSettingsOpen(false);
         return true;
@@ -699,7 +902,15 @@ export function App() {
       }
       return false;
     });
-  }, [backendSettingsOpen, dialog, launchTarget, menu]);
+  }, [
+    backendSettingsOpen,
+    deletingNote,
+    dialog,
+    launchTarget,
+    menu,
+    noteDeleteTarget,
+    notesPanelOpen,
+  ]);
 
   const bridgeViews = useMemo<BridgeConnectionView[]>(
     () =>
@@ -939,6 +1150,11 @@ export function App() {
       agentSort,
       agentGroup,
       sidebarWidth,
+      notesPanelWidth,
+      notesListPaneWidth,
+      notesListPaneCollapsed,
+      notesEnabled,
+      notesPanelOpen,
       sidebarOpen,
       selectedBridgeId,
       selectedPane: selectedPaneRefState,
@@ -967,6 +1183,11 @@ export function App() {
     agentSort,
     agentGroup,
     sidebarWidth,
+    notesPanelWidth,
+    notesListPaneWidth,
+    notesListPaneCollapsed,
+    notesEnabled,
+    notesPanelOpen,
     sidebarOpen,
     selectedBridgeId,
     selectedPaneRefState,
@@ -1010,7 +1231,21 @@ export function App() {
 
   useEffect(() => {
     setSidebarWidth((width) => clampSidebarWidth(width));
-  }, [isCompactLayout]);
+    setNotesPanelWidth((width) => clampNotesPanelWidth(width, sidebarWidth, sidebarOpen));
+    setNotesListPaneWidth((width) => clampNotesListPaneWidth(width, notesPanelWidth));
+  }, [isCompactLayout, notesPanelWidth, sidebarOpen, sidebarWidth]);
+
+  useEffect(() => {
+    if (notesEnabled) {
+      return;
+    }
+    setNotesPanelOpen(false);
+    setSelectedNoteRef(null);
+    setNotesStates({});
+    if (sidebarView === "notes") {
+      setSidebarView("agents");
+    }
+  }, [notesEnabled, sidebarView]);
 
   const clearSidebarResizePress = () => {
     const pending = sidebarResizePressRef.current;
@@ -1045,6 +1280,54 @@ export function App() {
       document.body.style.userSelect = "";
     };
   }, [resizingSidebar]);
+
+  useEffect(() => {
+    if (!resizingNotesPanel) {
+      return;
+    }
+    const onPointerMove = (event: PointerEvent) => {
+      setNotesPanelWidth(
+        clampNotesPanelWidth(window.innerWidth - event.clientX, sidebarWidth, sidebarOpen),
+      );
+    };
+    const onPointerUp = () => setResizingNotesPanel(false);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp, { once: true });
+    window.addEventListener("pointercancel", onPointerUp, { once: true });
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+  }, [resizingNotesPanel, sidebarOpen, sidebarWidth]);
+
+  useEffect(() => {
+    if (!resizingNotesListPane) {
+      return;
+    }
+    const onPointerMove = (event: PointerEvent) => {
+      setNotesListPaneWidth(
+        clampNotesListPaneWidth(event.clientX - notesListResizeLeftRef.current, notesPanelWidth),
+      );
+    };
+    const onPointerUp = () => setResizingNotesListPane(false);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp, { once: true });
+    window.addEventListener("pointercancel", onPointerUp, { once: true });
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+  }, [notesPanelWidth, resizingNotesListPane]);
 
   useEffect(
     () => () => {
@@ -1111,6 +1394,18 @@ export function App() {
       }
       return changed ? next : current;
     });
+    setNotesStates((current) => {
+      let changed = false;
+      const next: Record<string, BridgeNotesState> = {};
+      for (const [bridgeId, state] of Object.entries(current)) {
+        if (activeBridgeIds.has(bridgeId)) {
+          next[bridgeId] = state;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
   }, [bridge.enabledRuntimes]);
 
   useEffect(() => {
@@ -1157,6 +1452,41 @@ export function App() {
     () => snapshot?.panes.find((pane) => pane.pane_id === resolvedPaneId) ?? null,
     [snapshot, resolvedPaneId],
   );
+  const selectedNotesState =
+    selectedRuntime && notesStates[selectedRuntime.id]?.connectionKey === selectedRuntime.connectionKey
+      ? notesStates[selectedRuntime.id]
+      : null;
+  const selectedBridgeNotes = notesEnabled ? selectedNotesState?.response?.notes ?? [] : [];
+  const selectedPaneNotes = useMemo(
+    () => notesForPane(selectedBridgeNotes, selectedPane?.pane_id),
+    [selectedBridgeNotes, selectedPane?.pane_id],
+  );
+  const selectedRuntimeId = selectedRuntime?.id ?? null;
+  const selectedPaneKey =
+    notesEnabled && selectedRuntimeId && selectedPane
+      ? `${selectedRuntimeId}:${selectedPane.pane_id}`
+      : "";
+  useEffect(() => {
+    const paneChanged = selectedNotePaneKeyRef.current !== selectedPaneKey;
+    selectedNotePaneKeyRef.current = selectedPaneKey;
+    if (!selectedPaneKey || !selectedRuntimeId) {
+      setSelectedNoteRef(null);
+      return;
+    }
+    setSelectedNoteRef((current) => {
+      const currentIsPaneNote =
+        current?.bridgeId === selectedRuntimeId &&
+        selectedPaneNotes.some((note) => note.note_id === current.noteId);
+      if (currentIsPaneNote) {
+        return current;
+      }
+      if (!paneChanged && current) {
+        return current;
+      }
+      const firstNote = selectedPaneNotes[0] ?? null;
+      return firstNote ? { bridgeId: selectedRuntimeId, noteId: firstNote.note_id } : null;
+    });
+  }, [selectedPaneKey, selectedPaneNotes, selectedRuntimeId]);
   const selectedPaneMenuPress = useLongPress((x, y) => {
     if (selectedPane && selectedRuntime) {
       setMenu({
@@ -1194,6 +1524,60 @@ export function App() {
       null
     );
   }, [snapshot, activeWorkspaceId, selectedPane]);
+  const visibleNotes = useMemo(
+    () => {
+      if (!notesEnabled) {
+        return [];
+      }
+      return buildVisibleScopedNotes(
+        bridgeViews,
+        notesStates,
+        selectedRuntime?.id ?? null,
+        hostScope,
+        scope,
+        activeSpace,
+        activeWorkspacesByBridgeId,
+        notesIncludeArchived,
+        notesIncludeDeleted,
+      );
+    },
+    [
+      activeSpace,
+      activeWorkspacesByBridgeId,
+      bridgeViews,
+      hostScope,
+      notesEnabled,
+      notesStates,
+      notesIncludeArchived,
+      notesIncludeDeleted,
+      scope,
+      selectedRuntime?.id,
+    ],
+  );
+  const allScopedNotes = useMemo(
+    () => {
+      if (!notesEnabled) {
+        return [];
+      }
+      return buildVisibleScopedNotes(
+        bridgeViews,
+        notesStates,
+        null,
+        "all",
+        "all",
+        null,
+        {},
+        true,
+        true,
+        false,
+      );
+    },
+    [bridgeViews, notesEnabled, notesStates],
+  );
+  const selectedScopedNote = useMemo(
+    () => (selectedNoteRef ? findScopedNote(allScopedNotes, selectedNoteRef, false) : null),
+    [allScopedNotes, selectedNoteRef],
+  );
 
   // The active tab's split layout, normalized to fractions of the tab area so we
   // can reproduce the herdr split geometry in the browser. Null when the tab has
@@ -1354,6 +1738,249 @@ export function App() {
   const focusPane = (bridgeId: BridgeId, pane: PaneInfo) => {
     openPane(bridgeId, pane);
     requestTerminalFocus();
+  };
+
+  const selectNote = (bridgeId: BridgeId, noteId: string) => {
+    if (!notesEnabled) {
+      return;
+    }
+    setSelectedNoteRef({ bridgeId, noteId });
+    if (isCompactLayout) {
+      setMobileNotesScreen("editor");
+    }
+    setNotesPanelOpen(true);
+  };
+
+  const openNotesPanel = () => {
+    if (!notesEnabled) {
+      return;
+    }
+    if (notesPanelOpen) {
+      setNotesPanelOpen(false);
+      return;
+    }
+    const selectedNoteIsCurrentPaneNote =
+      selectedScopedNote &&
+      selectedRuntime &&
+      selectedScopedNote.bridgeId === selectedRuntime.id &&
+      selectedPaneNotes.some((note) => note.note_id === selectedScopedNote.note.note_id);
+    const firstPaneNote = selectedPaneNotes[0] ?? null;
+    const noteToOpen = selectedNoteIsCurrentPaneNote ? selectedScopedNote.note : firstPaneNote;
+    if (selectedRuntime && noteToOpen) {
+      setSelectedNoteRef({
+        bridgeId: selectedRuntime.id,
+        noteId: noteToOpen.note_id,
+      });
+    }
+    setMobileNotesScreen(isCompactLayout && noteToOpen ? "editor" : "list");
+    setNotesPanelOpen(true);
+  };
+
+  const createNoteForCurrentPane = async () => {
+    if (!notesEnabled) {
+      setError("Notes are disabled in settings");
+      return;
+    }
+    if (!selectedRuntime || !selectedPane || !supportsNotes(selectedRuntime.capabilities)) {
+      setError("Notes are not available for this bridge");
+      return;
+    }
+    try {
+      const note = await createNote(selectedRuntime.httpUrl, {
+        title: "Untitled note",
+        body: "",
+        paneId: selectedPane.pane_id,
+      });
+      setSelectedNoteRef({ bridgeId: selectedRuntime.id, noteId: note.note_id });
+      if (isCompactLayout) {
+        setMobileNotesScreen("editor");
+      }
+      setNotesPanelOpen(true);
+      await refreshBridgeNotes(selectedRuntime, false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not create note");
+    }
+  };
+
+  const createDetachedBridgeNote = async (bridgeId = selectedRuntime?.id ?? null) => {
+    if (!notesEnabled) {
+      setError("Notes are disabled in settings");
+      return;
+    }
+    const runtime = bridgeId ? bridge.getRuntime(bridgeId) : null;
+    if (!runtime || !supportsNotes(runtime.capabilities)) {
+      setError("Notes are not available for this bridge");
+      return;
+    }
+    try {
+      const note = await createNote(runtime.httpUrl, {
+        title: "Untitled note",
+        body: "",
+      });
+      setSelectedNoteRef({ bridgeId: runtime.id, noteId: note.note_id });
+      if (isCompactLayout) {
+        setMobileNotesScreen("editor");
+      }
+      setNotesPanelOpen(true);
+      await refreshBridgeNotes(runtime, false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not create note");
+    }
+  };
+
+  const saveScopedNote = async (
+    entry: ScopedNoteEntry,
+    title: string,
+    body: string,
+    expectedRevision: number,
+  ) => {
+    const runtime = bridge.getRuntime(entry.bridgeId);
+    if (!runtime) {
+      setError("Bridge is not ready");
+      throw new Error("Bridge is not ready");
+    }
+    try {
+      const savedNote = await updateNote(runtime.httpUrl, entry.note.note_id, {
+        title,
+        body,
+        expectedRevision,
+      });
+      await refreshBridgeNotes(runtime, false);
+      return savedNote.revision;
+    } catch (caught) {
+      setError(
+        isNotesConflictError(caught)
+          ? "Note changed in another client"
+          : caught instanceof Error
+            ? caught.message
+            : "Could not save note",
+      );
+      await refreshBridgeNotes(runtime, false);
+      throw caught;
+    }
+  };
+
+  const attachScopedNoteToCurrentPane = async (entry: ScopedNoteEntry) => {
+    if (!selectedRuntime || !selectedPane || selectedRuntime.id !== entry.bridgeId) {
+      setError("Select a pane on the same bridge first");
+      return;
+    }
+    try {
+      await attachNote(selectedRuntime.httpUrl, entry.note.note_id, {
+        paneId: selectedPane.pane_id,
+        expectedRevision: entry.note.revision,
+      });
+      await refreshBridgeNotes(selectedRuntime, false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not attach note");
+    }
+  };
+
+  const detachScopedNote = async (entry: ScopedNoteEntry) => {
+    const runtime = bridge.getRuntime(entry.bridgeId);
+    if (!runtime) {
+      setError("Bridge is not ready");
+      return;
+    }
+    try {
+      await detachNote(runtime.httpUrl, entry.note.note_id, {
+        expectedRevision: entry.note.revision,
+      });
+      await refreshBridgeNotes(runtime, false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not detach note");
+    }
+  };
+
+  const archiveScopedNote = async (entry: ScopedNoteEntry) => {
+    const runtime = bridge.getRuntime(entry.bridgeId);
+    if (!runtime) {
+      setError("Bridge is not ready");
+      return;
+    }
+    try {
+      await archiveNote(runtime.httpUrl, entry.note.note_id, {
+        expectedRevision: entry.note.revision,
+      });
+      await refreshBridgeNotes(runtime, false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not archive note");
+    }
+  };
+
+  const restoreScopedNote = async (entry: ScopedNoteEntry) => {
+    const runtime = bridge.getRuntime(entry.bridgeId);
+    if (!runtime) {
+      setError("Bridge is not ready");
+      return;
+    }
+    try {
+      await restoreNote(runtime.httpUrl, entry.note.note_id, {
+        expectedRevision: entry.note.revision,
+      });
+      await refreshBridgeNotes(runtime, false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not restore note");
+    }
+  };
+
+  const deleteScopedNote = async (entry: ScopedNoteEntry) => {
+    const runtime = bridge.getRuntime(entry.bridgeId);
+    if (!runtime) {
+      setError("Bridge is not ready");
+      return false;
+    }
+    try {
+      await deleteNote(runtime.httpUrl, entry.note.note_id, {
+        expectedRevision: entry.note.revision,
+      });
+      clearNoteDraft(entry);
+      const deletedSelected =
+        selectedNoteRef?.bridgeId === entry.bridgeId &&
+        selectedNoteRef.noteId === entry.note.note_id;
+      if (deletedSelected) {
+        setSelectedNoteRef(null);
+      }
+      const response = await refreshBridgeNotes(runtime, false);
+      if (deletedSelected && selectedRuntime?.id === runtime.id && selectedPane) {
+        const nextPaneNote = notesForPane(response?.notes ?? [], selectedPane.pane_id).find(
+          (note) => note.note_id !== entry.note.note_id,
+        );
+        setSelectedNoteRef(
+          nextPaneNote ? { bridgeId: runtime.id, noteId: nextPaneNote.note_id } : null,
+        );
+      }
+      return true;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not delete note");
+      return false;
+    }
+  };
+
+  const confirmDeleteNote = async () => {
+    if (!noteDeleteTarget) {
+      return;
+    }
+    setDeletingNote(true);
+    try {
+      if (await deleteScopedNote(noteDeleteTarget)) {
+        setNoteDeleteTarget(null);
+      }
+    } finally {
+      setDeletingNote(false);
+    }
+  };
+
+  const viewScopedNotePane = (entry: ScopedNoteEntry) => {
+    if (!entry.pane) {
+      setError("That note is not linked to an open pane");
+      return;
+    }
+    openPane(entry.bridgeId, entry.pane);
+    if (isCompactLayout) {
+      setMobileNotesScreen("list");
+      setNotesPanelOpen(false);
+    }
   };
 
   useEffect(() => {
@@ -1645,6 +2272,132 @@ export function App() {
     }
   }
 
+  async function refreshBridgeNotes(runtime: BridgeRuntime, setLoading: boolean) {
+    ensureBridgeConnectionRef(connectionRefs, runtime);
+    const requestConnectionKey = runtime.connectionKey;
+    const isCurrentConnection = () =>
+      isConnectionResultCurrent(
+        connectionRefs.current[runtime.id]?.connectionKey ?? "",
+        requestConnectionKey,
+      );
+    if (
+      !notesEnabled ||
+      !runtime.canConnect ||
+      runtime.capabilityState !== "ready" ||
+      !supportsNotes(runtime.capabilities)
+    ) {
+      setNotesStates((current) => ({
+        ...current,
+        [runtime.id]: {
+          connectionKey: requestConnectionKey,
+          response: null,
+          loadState: "ready",
+          error: null,
+        },
+      }));
+      return null;
+    }
+    if (setLoading) {
+      setNotesStates((current) => ({
+        ...current,
+        [runtime.id]: {
+          connectionKey: requestConnectionKey,
+          response:
+            current[runtime.id]?.connectionKey === requestConnectionKey
+              ? current[runtime.id]?.response ?? null
+              : null,
+          loadState: "loading",
+          error: null,
+        },
+      }));
+    }
+    try {
+      const response = await fetchNotes(runtime.httpUrl, {
+        includeArchived: true,
+        includeDeleted: true,
+        includeOtherSessions: true,
+      });
+      if (!notesEnabledRef.current) {
+        return null;
+      }
+      setNotesStates((current) => {
+        if (!isCurrentConnection()) {
+          return current;
+        }
+        return {
+          ...current,
+          [runtime.id]: {
+            connectionKey: requestConnectionKey,
+            response,
+            loadState: "ready",
+            error: null,
+          },
+        };
+      });
+      return response;
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Notes unavailable";
+      if (!notesEnabledRef.current) {
+        return null;
+      }
+      if (!isCurrentConnection()) {
+        return null;
+      }
+      setNotesStates((current) => ({
+        ...current,
+        [runtime.id]: {
+          connectionKey: requestConnectionKey,
+          response:
+            current[runtime.id]?.connectionKey === requestConnectionKey
+              ? current[runtime.id]?.response ?? null
+              : null,
+          loadState: "error",
+          error: message,
+        },
+      }));
+      return null;
+    }
+  }
+
+  const refreshNotesForBridge = (bridgeId: BridgeId) => {
+    if (!notesEnabled) {
+      return;
+    }
+    const runtime = bridge.getRuntime(bridgeId);
+    if (runtime) {
+      void refreshBridgeNotes(runtime, false);
+    }
+  };
+
+  useEffect(() => {
+    if (!notesEnabled) {
+      return;
+    }
+    for (const runtime of bridge.enabledRuntimes) {
+      if (runtime.capabilityState === "ready" && supportsNotes(runtime.capabilities)) {
+        void refreshBridgeNotes(runtime, true);
+      }
+    }
+  }, [bridge.enabledRuntimes, notesEnabled]);
+
+  useEffect(() => {
+    if (!notesEnabled) {
+      return;
+    }
+    if (!notesPanelOpen && sidebarView !== "notes") {
+      return;
+    }
+    const refresh = () => {
+      for (const runtime of bridge.enabledRuntimes) {
+        if (runtime.capabilityState === "ready" && supportsNotes(runtime.capabilities)) {
+          void refreshBridgeNotes(runtime, false);
+        }
+      }
+    };
+    const timer = window.setInterval(refresh, NOTES_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [bridge.enabledRuntimes, notesEnabled, notesPanelOpen, sidebarView]);
+
   async function exec(
     runtime: BridgeRuntime | null,
     action: () => Promise<{ [key: string]: unknown }>,
@@ -1831,12 +2584,16 @@ export function App() {
   const renderTerminal = !isCompactLayout || showDetail;
   const appStyle = {
     "--sidebar-w": `${sidebarWidth}px`,
+    "--notes-w": `${notesPanelWidth}px`,
+    "--notes-list-w": `${notesListPaneWidth}px`,
     "--content-inset-top": `${contentInsetTopPx}px`,
     "--content-inset-bottom": `${contentInsetBottomPx}px`,
     "--mobile-controls-scale": String(mobileControlsScalePercent / 100),
   } as CSSProperties &
     Record<
       | "--sidebar-w"
+      | "--notes-w"
+      | "--notes-list-w"
       | "--content-inset-top"
       | "--content-inset-bottom"
       | "--mobile-controls-scale",
@@ -1848,7 +2605,10 @@ export function App() {
       className="app"
       style={appStyle}
       data-sidebar={sidebarOpen ? "open" : "closed"}
+      data-notes={notesPanelOpen && notesEnabled ? "open" : "closed"}
       data-resizing-sidebar={resizingSidebar ? "true" : "false"}
+      data-resizing-notes={resizingNotesPanel ? "true" : "false"}
+      data-resizing-notes-list={resizingNotesListPane ? "true" : "false"}
       data-compact={isCompactLayout ? "true" : "false"}
       data-touch={isTouchInput ? "true" : "false"}
       data-detail={isCompactLayout && showDetail ? "true" : "false"}
@@ -1860,6 +2620,7 @@ export function App() {
           connectionRefs={connectionRefs}
           setConnectionStates={setConnectionStates}
           onPaneSelection={rememberPaneSelection}
+          onNotesChanged={refreshNotesForBridge}
         />
       ))}
       <aside className="sidebar" aria-label="Switcher">
@@ -1876,6 +2637,10 @@ export function App() {
           capabilityState={selectedRuntime?.capabilityState ?? "idle"}
           scope={scope}
           sidebarView={sidebarView}
+          notesEnabled={notesEnabled}
+          notesStates={notesStates}
+          visibleNotes={visibleNotes}
+          selectedNote={selectedScopedNote}
           agentSort={agentSort}
           agentGroup={agentGroup}
           activeSpace={activeSpace}
@@ -1884,6 +2649,8 @@ export function App() {
           onHostScope={setHostScope}
           onScope={setScope}
           onSidebarView={setSidebarView}
+          onSelectNote={selectNote}
+          onCreateNote={() => void createDetachedBridgeNote()}
           onAgentSort={setAgentSort}
           onAgentGroup={setAgentGroup}
           onSelectBridge={setSelectedBridgeId}
@@ -2055,6 +2822,19 @@ export function App() {
               </button>
             </>
           ) : null}
+          {selectedPane && notesEnabled ? (
+            <button
+              className="icon-btn notes-button"
+              type="button"
+              aria-label="Notes"
+              title="Notes"
+              data-active={notesPanelOpen ? "true" : "false"}
+              data-has-notes={selectedPaneNotes.length > 0 ? "true" : "false"}
+              onClick={openNotesPanel}
+            >
+              <StickyNote size={18} />
+            </button>
+          ) : null}
           {selectedPane ? (
             <button
               className="icon-btn"
@@ -2126,6 +2906,131 @@ export function App() {
         )}
       </section>
 
+      {notesPanelOpen && notesEnabled ? (
+        <NotesSurface
+          compact={isCompactLayout}
+          mobileScreen={mobileNotesScreen}
+          selectedEntry={selectedScopedNote}
+          selectedBridgeId={selectedRuntime?.id ?? null}
+          selectedPane={selectedPane}
+          selectedPaneNotes={selectedRuntime ? selectedPaneNotes.map((note) => ({
+            bridgeId: selectedRuntime.id,
+            connectionKey: selectedRuntime.connectionKey,
+            storeId: selectedNotesState?.response?.store_id ?? "unknown-store",
+            sessionKey: note.session_key,
+            bridgeSessionKey: selectedNotesState?.response?.session_key ?? note.session_key,
+            bridgeIndex: Math.max(
+              0,
+              bridgeViews.findIndex((view) => view.runtime.id === selectedRuntime.id),
+            ),
+            bridgeLabel: selectedRuntime.label,
+            bridgeColor: selectedRuntime.color,
+            note,
+            snapshot,
+            workspace: snapshot?.workspaces.find(
+              (workspace) => workspace.workspace_id === note.attachment?.workspace_id,
+            ),
+            pane: note.resolved_pane,
+          })) : []}
+          visibleNotes={visibleNotes}
+          notesLoadState={selectedNotesState?.loadState ?? "ready"}
+          notesError={selectedNotesState?.error ?? null}
+          includeArchived={notesIncludeArchived}
+          includeDeleted={notesIncludeDeleted}
+          currentBridgeSupportsNotes={Boolean(
+            selectedRuntime && supportsNotes(selectedRuntime.capabilities),
+          )}
+          canAttachToCurrentPane={Boolean(
+            selectedRuntime &&
+              selectedPane &&
+              selectedScopedNote &&
+              selectedScopedNote.bridgeId === selectedRuntime.id,
+          )}
+          onClose={() => setNotesPanelOpen(false)}
+          onShowNotesList={() => setMobileNotesScreen("list")}
+          onSelectNote={selectNote}
+          onCreatePaneNote={() => void createNoteForCurrentPane()}
+          onCreateDetachedNote={() => void createDetachedBridgeNote()}
+          onIncludeArchived={setNotesIncludeArchived}
+          onIncludeDeleted={setNotesIncludeDeleted}
+          onSaveNote={saveScopedNote}
+          onAttachToCurrentPane={(entry) => void attachScopedNoteToCurrentPane(entry)}
+          onDetach={(entry) => void detachScopedNote(entry)}
+          onArchive={(entry) => void archiveScopedNote(entry)}
+          onRestore={(entry) => void restoreScopedNote(entry)}
+          onDelete={setNoteDeleteTarget}
+          onViewPane={viewScopedNotePane}
+          width={notesPanelWidth}
+          listWidth={notesListPaneWidth}
+          listCollapsed={notesListPaneCollapsed}
+          onListCollapsed={setNotesListPaneCollapsed}
+          onResizeStart={(clientX) => {
+            if (isCompactLayout) {
+              return;
+            }
+            setNotesPanelWidth(
+              clampNotesPanelWidth(window.innerWidth - clientX, sidebarWidth, sidebarOpen),
+            );
+            setResizingNotesPanel(true);
+          }}
+          onResizeKeyDown={(event) => {
+            if (isCompactLayout) {
+              return;
+            }
+            if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+              event.preventDefault();
+              const step = event.shiftKey ? 32 : 12;
+              setNotesPanelWidth((width) =>
+                clampNotesPanelWidth(
+                  width + (event.key === "ArrowLeft" ? step : -step),
+                  sidebarWidth,
+                  sidebarOpen,
+                ),
+              );
+            } else if (event.key === "Home") {
+              event.preventDefault();
+              setNotesPanelWidth(MIN_NOTES_PANEL_WIDTH);
+            } else if (event.key === "End") {
+              event.preventDefault();
+              setNotesPanelWidth(
+                clampNotesPanelWidth(MAX_NOTES_PANEL_WIDTH, sidebarWidth, sidebarOpen),
+              );
+            }
+          }}
+          onListResizeStart={(surfaceLeft, clientX) => {
+            if (isCompactLayout || notesListPaneCollapsed) {
+              return;
+            }
+            notesListResizeLeftRef.current = surfaceLeft;
+            setNotesListPaneWidth(clampNotesListPaneWidth(clientX - surfaceLeft, notesPanelWidth));
+            setResizingNotesListPane(true);
+          }}
+          onListResizeKeyDown={(event) => {
+            if (isCompactLayout || notesListPaneCollapsed) {
+              return;
+            }
+            if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+              event.preventDefault();
+              const step = event.shiftKey ? 32 : 12;
+              setNotesListPaneWidth((width) =>
+                clampNotesListPaneWidth(
+                  width + (event.key === "ArrowRight" ? step : -step),
+                  notesPanelWidth,
+                ),
+              );
+            } else if (event.key === "Home") {
+              event.preventDefault();
+              setNotesListPaneWidth(MIN_NOTES_LIST_PANE_WIDTH);
+            } else if (event.key === "End") {
+              event.preventDefault();
+              setNotesListPaneWidth(
+                clampNotesListPaneWidth(MAX_NOTES_LIST_PANE_WIDTH, notesPanelWidth),
+              );
+            }
+          }}
+        />
+      ) : null}
+
       {menu && activeMenuItems.length > 0 ? (
         <ActionMenu
           x={menu.x}
@@ -2160,6 +3065,21 @@ export function App() {
         />
       ) : null}
 
+      {noteDeleteTarget ? (
+        <ConfirmDialog
+          title="Delete note"
+          message={`Move "${noteDeleteTarget.note.title || "Untitled note"}" to deleted notes? You can restore it later from the Deleted filter.`}
+          confirmLabel="Delete"
+          busy={deletingNote}
+          onCancel={() => {
+            if (!deletingNote) {
+              setNoteDeleteTarget(null);
+            }
+          }}
+          onConfirm={() => void confirmDeleteNote()}
+        />
+      ) : null}
+
       {launchTarget ? (
         <LaunchDialog
           target={launchTarget}
@@ -2172,6 +3092,8 @@ export function App() {
       {backendSettingsOpen ? (
         <BackendSettingsDialog
           showMobileTerminalSettings={isTouchInput}
+          notesEnabled={notesEnabled}
+          onNotesEnabled={setNotesEnabled}
           terminalFontSizePx={terminalFontSizePx}
           onTerminalFontSizePx={setTerminalFontSizePx}
           terminalInputTransport={terminalInputTransport}
@@ -2215,6 +3137,9 @@ export function App() {
 }
 
 const SNAPSHOT_REFRESH_INTERVAL_MS = 10000;
+const NOTES_REFRESH_INTERVAL_MS = 15000;
+const NOTE_DRAFT_STORAGE_PREFIX = "herdr-web:note-draft:v1:";
+const NOTE_EDITOR_MODE_STORAGE_KEY = "herdr-web:note-editor-mode:v1";
 
 export function resolveInitialSelectedBridgeId(
   currentBridgeId: BridgeId | null,
@@ -2238,25 +3163,32 @@ export function shouldCollapseHostScope(
   return storeLoaded && hostScope === "all" && enabledBridgeCount <= 1;
 }
 
-function BridgeConnectionController({
+export function BridgeConnectionController({
   runtime,
   connectionRefs,
   setConnectionStates,
   onPaneSelection,
+  onNotesChanged,
 }: {
   runtime: BridgeRuntime;
   connectionRefs: MutableRefObject<Record<string, BridgeConnectionRef>>;
   setConnectionStates: Dispatch<SetStateAction<Record<string, BridgeConnectionState>>>;
   onPaneSelection: (bridgeId: BridgeId, paneId: string, workspaceId?: string) => void;
+  onNotesChanged: (bridgeId: BridgeId) => void;
 }) {
   const httpUrlRef = useRef(runtime.httpUrl);
   const wsUrlRef = useRef(runtime.wsUrl);
+  const onNotesChangedRef = useRef(onNotesChanged);
   const refreshOffsetRef = useRef(stableBridgeRefreshOffsetMs(runtime.id));
 
   useEffect(() => {
     httpUrlRef.current = runtime.httpUrl;
     wsUrlRef.current = runtime.wsUrl;
   }, [runtime.httpUrl, runtime.wsUrl]);
+
+  useEffect(() => {
+    onNotesChangedRef.current = onNotesChanged;
+  }, [onNotesChanged]);
 
   useEffect(() => {
     let disposed = false;
@@ -2406,6 +3338,12 @@ function BridgeConnectionController({
           (item) => item.pane_id === paneId,
         );
         onPaneSelection(runtime.id, paneId, pane?.workspace_id);
+        refresh();
+        return;
+      }
+      if (isNotesChangedEvent(event)) {
+        onNotesChangedRef.current(runtime.id);
+        return;
       }
       refresh();
     });
@@ -2651,6 +3589,339 @@ export function buildVisibleTabEntries(
     );
   }
   return spaceGroups.flatMap(flattenGroup);
+}
+
+export function buildVisibleScopedNotes(
+  bridgeViews: BridgeConnectionView[],
+  notesStates: Record<string, BridgeNotesState>,
+  selectedBridgeId: BridgeId | null,
+  hostScope: HostScope,
+  scope: Scope,
+  activeSpace: WorkspaceInfo | null,
+  activeWorkspacesByBridgeId: Record<string, string>,
+  includeArchived: boolean,
+  includeDeleted: boolean,
+  dedupeStores = true,
+): ScopedNoteEntry[] {
+  const hostBridgeViews = visibleHostBridgeViews(bridgeViews, selectedBridgeId, hostScope);
+  const entries = hostBridgeViews.flatMap((view) => {
+    const notesState = notesStates[view.runtime.id];
+    if (!notesState || notesState.connectionKey !== view.runtime.connectionKey) {
+      return [];
+    }
+    const snapshot = view.snapshot;
+    const bridgeIndex = Math.max(
+      0,
+      bridgeViews.findIndex((candidate) => candidate.runtime.id === view.runtime.id),
+    );
+    const activeWorkspace =
+      scope === "space"
+        ? activeWorkspaceForBridgeView(
+            view,
+            selectedBridgeId,
+            activeSpace,
+            activeWorkspacesByBridgeId,
+          )
+        : null;
+    return (notesState.response?.notes ?? [])
+      .filter((note) => noteVisibleByLifecycle(note, includeArchived, includeDeleted))
+      .filter((note) => noteVisibleInScope(note, activeWorkspace))
+      .map((note) => {
+        const pane = note.resolved_pane;
+        const workspaceId = pane?.workspace_id ?? note.attachment?.workspace_id;
+        return {
+          bridgeId: view.runtime.id,
+          connectionKey: view.runtime.connectionKey,
+          storeId: notesState.response?.store_id ?? "unknown-store",
+          sessionKey: note.session_key,
+          bridgeSessionKey: notesState.response?.session_key ?? note.session_key,
+          bridgeIndex,
+          bridgeLabel: view.runtime.label,
+          bridgeColor: view.runtime.color,
+          note,
+          snapshot,
+          workspace: workspaceId
+            ? snapshot?.workspaces.find((workspace) => workspace.workspace_id === workspaceId)
+            : undefined,
+          pane,
+        };
+      });
+  });
+  const visibleEntries =
+    dedupeStores && hostScope === "all" ? dedupeScopedNoteEntries(entries) : entries;
+  return visibleEntries.sort((a, b) => {
+    const bridge = a.bridgeIndex - b.bridgeIndex;
+    if (bridge !== 0) {
+      return bridge;
+    }
+    return compareNotes(a.note, b.note);
+  });
+}
+
+function dedupeScopedNoteEntries(entries: ScopedNoteEntry[]) {
+  const byNoteIdentity = new Map<string, ScopedNoteEntry>();
+  for (const entry of entries) {
+    const identity = scopedNoteIdentity(entry);
+    const existing = byNoteIdentity.get(identity);
+    if (!existing || shouldPreferScopedNoteEntry(entry, existing)) {
+      byNoteIdentity.set(identity, entry);
+    }
+  }
+  return Array.from(byNoteIdentity.values());
+}
+
+function scopedNoteIdentity(entry: ScopedNoteEntry) {
+  return `${entry.storeId}:${entry.note.session_key}:${entry.note.note_id}`;
+}
+
+function shouldPreferScopedNoteEntry(candidate: ScopedNoteEntry, existing: ScopedNoteEntry) {
+  const score = (entry: ScopedNoteEntry) =>
+    (entry.bridgeSessionKey === entry.note.session_key ? 2 : 0) + (entry.pane ? 1 : 0);
+  const candidateScore = score(candidate);
+  const existingScore = score(existing);
+  if (candidateScore !== existingScore) {
+    return candidateScore > existingScore;
+  }
+  return candidate.bridgeIndex < existing.bridgeIndex;
+}
+
+function noteVisibleByLifecycle(
+  note: PaneNote,
+  includeArchived: boolean,
+  includeDeleted: boolean,
+) {
+  if (note.deleted_at) {
+    return includeDeleted;
+  }
+  if (note.archived_at) {
+    return includeArchived;
+  }
+  return true;
+}
+
+function noteVisibleInScope(note: PaneNote, activeWorkspace: WorkspaceInfo | null) {
+  if (!activeWorkspace) {
+    return true;
+  }
+  if (note.link_state !== "linked") {
+    return true;
+  }
+  const workspaceId = note.resolved_pane?.workspace_id ?? note.attachment?.workspace_id;
+  return !workspaceId || workspaceId === activeWorkspace.workspace_id;
+}
+
+function findScopedNote(
+  entries: ScopedNoteEntry[],
+  ref: ScopedNoteRef | null,
+  fallback = true,
+) {
+  if (!ref) {
+    return fallback ? (entries[0] ?? null) : null;
+  }
+  const found = entries.find(
+    (entry) => entry.bridgeId === ref.bridgeId && entry.note.note_id === ref.noteId,
+  );
+  return found ?? (fallback ? (entries[0] ?? null) : null);
+}
+
+function scopedNoteLinkedToPane(
+  entry: ScopedNoteEntry,
+  bridgeId: BridgeId | null,
+  paneId: string | null | undefined,
+) {
+  return Boolean(
+    bridgeId &&
+      paneId &&
+      entry.bridgeId === bridgeId &&
+      entry.note.link_state === "linked" &&
+      entry.note.attachment?.pane_id === paneId &&
+      entry.pane?.pane_id === paneId,
+  );
+}
+
+function noteStateLabel(note: PaneNote) {
+  if (note.deleted_at) {
+    return { label: "deleted", status: "blocked" as AgentStatus };
+  }
+  if (note.archived_at) {
+    return { label: "archived", status: "idle" as AgentStatus };
+  }
+  if (note.link_state === "linked") {
+    return { label: "linked", status: "done" as AgentStatus };
+  }
+  if (note.link_state === "unresolved") {
+    return { label: "unresolved", status: "working" as AgentStatus };
+  }
+  return { label: "detached", status: "unknown" as AgentStatus };
+}
+
+function NoteStateIcon({
+  note,
+  label,
+  status,
+}: {
+  note: PaneNote;
+  label: string;
+  status: AgentStatus;
+}) {
+  const icon = note.deleted_at ? (
+    <Trash2 size={14} />
+  ) : note.archived_at ? (
+    <Archive size={14} />
+  ) : note.link_state === "linked" ? (
+    <SquareTerminal size={14} />
+  ) : note.link_state === "unresolved" ? (
+    <Link2 size={14} />
+  ) : (
+    <Unlink size={14} />
+  );
+  return (
+    <span className="note-state-icon" data-status={status} aria-label={label}>
+      {icon}
+    </span>
+  );
+}
+
+function noteSubtitle(entry: ScopedNoteEntry, showBridge: boolean) {
+  const context = entry.note.attachment?.context;
+  const paneLabel =
+    entry.pane ? paneTitle(entry.pane) : context?.pane_label || context?.pane_title;
+  const cwd = basename(context?.foreground_cwd || context?.cwd);
+  return [
+    showBridge ? entry.bridgeLabel : null,
+    entry.workspace?.label,
+    paneLabel,
+    cwd,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+export function shouldBlockDirtyNoteAutosave({
+  dirty,
+  title,
+  body,
+  baseRevision,
+  serverTitle,
+  serverBody,
+  serverRevision,
+}: {
+  dirty: boolean;
+  title: string;
+  body: string;
+  baseRevision: number | null;
+  serverTitle: string;
+  serverBody: string;
+  serverRevision: number;
+}) {
+  if (!dirty || baseRevision === null || serverRevision <= baseRevision) {
+    return false;
+  }
+  return title !== serverTitle || body !== serverBody;
+}
+
+export function isInFlightNoteSaveVisible({
+  inFlight,
+  noteIdentity,
+  serverRevision,
+  serverTitle,
+  serverBody,
+}: {
+  inFlight: NoteSaveInFlight | null;
+  noteIdentity: string;
+  serverRevision: number;
+  serverTitle: string;
+  serverBody: string;
+}) {
+  return Boolean(
+    inFlight &&
+      inFlight.noteIdentity === noteIdentity &&
+      serverRevision > inFlight.expectedRevision &&
+      serverTitle === inFlight.title &&
+      serverBody === inFlight.body,
+  );
+}
+
+export function noteDraftStorageKey(entry: ScopedNoteEntry) {
+  return `${NOTE_DRAFT_STORAGE_PREFIX}${[
+    entry.bridgeId,
+    entry.connectionKey,
+    entry.storeId,
+    entry.sessionKey,
+    entry.note.note_id,
+  ]
+    .map((part) => encodeURIComponent(part))
+    .join(":")}`;
+}
+
+function readNoteDraft(entry: ScopedNoteEntry): NoteDraft | null {
+  try {
+    const raw = globalThis.localStorage?.getItem(noteDraftStorageKey(entry));
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as Partial<NoteDraft>;
+    if (
+      typeof parsed.title !== "string" ||
+      typeof parsed.body !== "string" ||
+      typeof parsed.baseRevision !== "number"
+    ) {
+      return null;
+    }
+    return {
+      title: parsed.title,
+      body: parsed.body,
+      baseRevision: parsed.baseRevision,
+      updatedAt: typeof parsed.updatedAt === "number" ? parsed.updatedAt : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeNoteDraft(
+  entry: ScopedNoteEntry,
+  title: string,
+  body: string,
+  baseRevision: number,
+) {
+  try {
+    const draft: NoteDraft = {
+      title,
+      body,
+      baseRevision,
+      updatedAt: Date.now(),
+    };
+    globalThis.localStorage?.setItem(noteDraftStorageKey(entry), JSON.stringify(draft));
+  } catch {
+    // Draft persistence is best-effort; the bridge remains the durable source.
+  }
+}
+
+function clearNoteDraft(entry: ScopedNoteEntry) {
+  try {
+    globalThis.localStorage?.removeItem(noteDraftStorageKey(entry));
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function readNoteEditorMode(): NoteEditorMode {
+  try {
+    return globalThis.localStorage?.getItem(NOTE_EDITOR_MODE_STORAGE_KEY) === "preview"
+      ? "preview"
+      : "edit";
+  } catch {
+    return "edit";
+  }
+}
+
+function writeNoteEditorMode(mode: NoteEditorMode) {
+  try {
+    globalThis.localStorage?.setItem(NOTE_EDITOR_MODE_STORAGE_KEY, mode);
+  } catch {
+    // Ignore storage failures.
+  }
 }
 
 export function nextVisibleAgentPaneEntry(
@@ -2906,28 +4177,30 @@ function TabBar({
       ? selectedPane.tab_id
       : activeSpace.active_tab_id;
   return (
-    <div className="tabbar" role="tablist" aria-label="Tabs">
-      {tabs.map((tab) => {
-        const label = displayTabLabel(tab, snapshot.panes);
-        return (
-          <button
-            key={tab.tab_id}
-            type="button"
-            className="tabbar-tab"
-            role="tab"
-            aria-selected={tab.tab_id === activeTabId}
-            data-active={tab.tab_id === activeTabId}
-            onClick={() => onSelectTab(tab.tab_id)}
-            onContextMenu={(event) => {
-              event.preventDefault();
-              onMenu("tab", tab.tab_id, label, event.clientX, event.clientY, canClearTabName(tab));
-            }}
-          >
-            <span className="dot" data-status={tab.agent_status} />
-            <span className="tabbar-name">{label}</span>
-          </button>
-        );
-      })}
+    <div className="tabbar">
+      <div className="tabbar-scroll" role="tablist" aria-label="Tabs">
+        {tabs.map((tab) => {
+          const label = displayTabLabel(tab, snapshot.panes);
+          return (
+            <button
+              key={tab.tab_id}
+              type="button"
+              className="tabbar-tab"
+              role="tab"
+              aria-selected={tab.tab_id === activeTabId}
+              data-active={tab.tab_id === activeTabId}
+              onClick={() => onSelectTab(tab.tab_id)}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                onMenu("tab", tab.tab_id, label, event.clientX, event.clientY, canClearTabName(tab));
+              }}
+            >
+              <span className="dot" data-status={tab.agent_status} />
+              <span className="tabbar-name">{label}</span>
+            </button>
+          );
+        })}
+      </div>
       <button
         className="tabbar-add"
         type="button"
@@ -2954,6 +4227,10 @@ function Switcher({
   capabilityState,
   scope,
   sidebarView,
+  notesEnabled,
+  notesStates,
+  visibleNotes,
+  selectedNote,
   agentSort,
   agentGroup,
   activeSpace,
@@ -2962,6 +4239,8 @@ function Switcher({
   onHostScope,
   onScope,
   onSidebarView,
+  onSelectNote,
+  onCreateNote,
   onAgentSort,
   onAgentGroup,
   onSelectBridge,
@@ -2988,6 +4267,10 @@ function Switcher({
   capabilityState: "idle" | "probing" | "ready" | "error";
   scope: Scope;
   sidebarView: SidebarView;
+  notesEnabled: boolean;
+  notesStates: Record<string, BridgeNotesState>;
+  visibleNotes: ScopedNoteEntry[];
+  selectedNote: ScopedNoteEntry | null;
   agentSort: AgentSort;
   agentGroup: AgentGroup;
   activeSpace: WorkspaceInfo | null;
@@ -2996,6 +4279,8 @@ function Switcher({
   onHostScope: (scope: HostScope) => void;
   onScope: (scope: Scope) => void;
   onSidebarView: (view: SidebarView) => void;
+  onSelectNote: (bridgeId: BridgeId, noteId: string) => void;
+  onCreateNote: () => void;
   onAgentSort: (sort: AgentSort) => void;
   onAgentGroup: (group: AgentGroup) => void;
   onSelectBridge: (bridgeId: BridgeId) => void;
@@ -3061,10 +4346,25 @@ function Switcher({
           (view) => !view.snapshot && (!view.runtime.canConnect || view.loadState === "error"),
         )
       : [];
+  const notesSupported =
+    notesEnabled && hostBridgeViews.some((view) => supportsNotes(view.runtime.capabilities));
+  const notesLoading = notesEnabled && hostBridgeViews.some(
+    (view) => notesStates[view.runtime.id]?.loadState === "loading",
+  );
+  const notesError = notesEnabled
+    ? hostBridgeViews
+        .map((view) => notesStates[view.runtime.id]?.error)
+        .find((message): message is string => Boolean(message))
+    : undefined;
+  const notesViewActive = notesEnabled && sidebarView === "notes";
+  const hasNotesList =
+    notesViewActive &&
+    (notesSupported || visibleNotes.length > 0 || notesLoading || notesError);
   const hasListSnapshot =
-    hostScope === "all"
+    hasNotesList ||
+    (hostScope === "all"
       ? hostBridgeViews.some((view) => view.snapshot) || disconnectedBridgeViews.length > 0
-      : Boolean(snapshot);
+      : Boolean(snapshot));
 
   const agentPanes = useMemo<ScopedAgentPane[]>(() => {
     return buildVisibleAgentPaneEntries(
@@ -3093,14 +4393,16 @@ function Switcher({
   );
   const showGroupedHostContext = hostScope === "all";
   const showGroupControl =
-    sidebarView === "agents" || hostScope === "all" || scope === "all" || agentGroup !== "none";
-  const showOptionsControl = sidebarView === "agents" || showGroupControl;
+    sidebarView !== "notes" &&
+    (sidebarView === "agents" || hostScope === "all" || scope === "all" || agentGroup !== "none");
+  const showOptionsControl = sidebarView !== "notes" && (sidebarView === "agents" || showGroupControl);
   const canCreateTabFromHeader = Boolean(
     sidebarView === "tabs" &&
       scope === "space" &&
       activeSpace &&
       selectedBridgeId,
   );
+  const canCreateNoteFromHeader = notesViewActive && notesSupported;
 
   useEffect(() => {
     if (optionsMenu && !showOptionsControl) {
@@ -3267,6 +4569,37 @@ function Switcher({
       );
     });
   };
+  const renderNoteRows = () => {
+    if (!notesSupported) {
+      return (
+        <div className="empty">
+          <strong>Notes unavailable</strong>
+          <span>Update the selected bridge to use pane notes.</span>
+        </div>
+      );
+    }
+    if (visibleNotes.length === 0) {
+      return (
+        <div className="empty">
+          <strong>{notesLoading ? "Loading notes" : "No notes"}</strong>
+          <span>{notesError || (notesLoading ? "" : "Create a note from the terminal header.")}</span>
+        </div>
+      );
+    }
+    return visibleNotes.map((entry, index) => (
+      <NoteRow
+        key={`${entry.bridgeId}:${entry.note.note_id}`}
+        entry={entry}
+        index={index}
+        active={
+          selectedNote?.bridgeId === entry.bridgeId &&
+          selectedNote.note.note_id === entry.note.note_id
+        }
+        showBridge={hostScope === "all"}
+        onSelect={() => onSelectNote(entry.bridgeId, entry.note.note_id)}
+      />
+    ));
+  };
 
   return (
     <>
@@ -3357,6 +4690,16 @@ function Switcher({
         >
           Tabs
         </button>
+        {notesEnabled ? (
+          <button
+            type="button"
+            data-on={sidebarView === "notes"}
+            aria-pressed={sidebarView === "notes"}
+            onClick={() => onSidebarView("notes")}
+          >
+            Notes
+          </button>
+        ) : null}
       </div>
       <div className="sidebar-scope" role="group" aria-label="Sidebar scope">
         <button
@@ -3498,7 +4841,8 @@ function Switcher({
             ) : null}
 
             {/* PANES ----------------------------------------------------- */}
-            {(hostScope === "all" ? hasListSnapshot : snapshot && snapshot.workspaces.length > 0) ? (
+            {notesViewActive ||
+            (hostScope === "all" ? hasListSnapshot : snapshot && snapshot.workspaces.length > 0) ? (
             <section className="sec">
               <div className="sec-head">
                 <span className="sec-label">
@@ -3506,6 +4850,10 @@ function Switcher({
                     ? scope === "all"
                       ? "all agents"
                       : "space agents"
+                    : notesViewActive
+                      ? scope === "all"
+                        ? "all notes"
+                        : "space notes"
                     : scope === "all"
                       ? "all tabs"
                       : hostScope === "all"
@@ -3528,6 +4876,17 @@ function Switcher({
                     <Plus size={14} />
                   </button>
                 ) : null}
+                {canCreateNoteFromHeader ? (
+                  <button
+                    className="sec-add"
+                    type="button"
+                    aria-label="New note"
+                    title="New note"
+                    onClick={onCreateNote}
+                  >
+                    <Plus size={14} />
+                  </button>
+                ) : null}
                 {showOptionsControl ? (
                   <button
                     className="sec-add"
@@ -3546,7 +4905,9 @@ function Switcher({
                 ) : null}
               </div>
 
-              {sidebarView === "agents" ? (
+              {notesViewActive ? (
+                renderNoteRows()
+              ) : sidebarView === "agents" ? (
                 agentPanes.length === 0 && disconnectedBridgeViews.length === 0 ? (
                   <div className="empty">
                     <strong>No detected agents</strong>
@@ -3731,6 +5092,760 @@ function SidebarOptionsMenu({
   );
 }
 
+function NotesSurface({
+  compact,
+  mobileScreen,
+  selectedEntry,
+  selectedBridgeId,
+  selectedPane,
+  selectedPaneNotes,
+  visibleNotes,
+  notesLoadState,
+  notesError,
+  includeArchived,
+  includeDeleted,
+  currentBridgeSupportsNotes,
+  canAttachToCurrentPane,
+  onClose,
+  onShowNotesList,
+  onSelectNote,
+  onCreatePaneNote,
+  onCreateDetachedNote,
+  onIncludeArchived,
+  onIncludeDeleted,
+  onSaveNote,
+  onAttachToCurrentPane,
+  onDetach,
+  onArchive,
+  onRestore,
+  onDelete,
+  onViewPane,
+  width,
+  listWidth,
+  listCollapsed,
+  onListCollapsed,
+  onResizeStart,
+  onResizeKeyDown,
+  onListResizeStart,
+  onListResizeKeyDown,
+}: {
+  compact: boolean;
+  mobileScreen: MobileNotesScreen;
+  selectedEntry: ScopedNoteEntry | null;
+  selectedBridgeId: BridgeId | null;
+  selectedPane: PaneInfo | null;
+  selectedPaneNotes: ScopedNoteEntry[];
+  visibleNotes: ScopedNoteEntry[];
+  notesLoadState: LoadState;
+  notesError: string | null;
+  includeArchived: boolean;
+  includeDeleted: boolean;
+  currentBridgeSupportsNotes: boolean;
+  canAttachToCurrentPane: boolean;
+  onClose: () => void;
+  onShowNotesList: () => void;
+  onSelectNote: (bridgeId: BridgeId, noteId: string) => void;
+  onCreatePaneNote: () => void;
+  onCreateDetachedNote: () => void;
+  onIncludeArchived: (include: boolean) => void;
+  onIncludeDeleted: (include: boolean) => void;
+  onSaveNote: (
+    entry: ScopedNoteEntry,
+    title: string,
+    body: string,
+    expectedRevision: number,
+  ) => Promise<number>;
+  onAttachToCurrentPane: (entry: ScopedNoteEntry) => void;
+  onDetach: (entry: ScopedNoteEntry) => void;
+  onArchive: (entry: ScopedNoteEntry) => void;
+  onRestore: (entry: ScopedNoteEntry) => void;
+  onDelete: (entry: ScopedNoteEntry) => void;
+  onViewPane: (entry: ScopedNoteEntry) => void;
+  width: number;
+  listWidth: number;
+  listCollapsed: boolean;
+  onListCollapsed: (collapsed: boolean) => void;
+  onResizeStart: (clientX: number) => void;
+  onResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  onListResizeStart: (surfaceLeft: number, clientX: number) => void;
+  onListResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+}) {
+  const effectiveListCollapsed = !compact && listCollapsed;
+  const otherNotes = useMemo(
+    () =>
+      visibleNotes.filter(
+        (entry) => !scopedNoteLinkedToPane(entry, selectedBridgeId, selectedPane?.pane_id),
+      ),
+    [selectedBridgeId, selectedPane?.pane_id, visibleNotes],
+  );
+  const showPaneNoteTabs = Boolean(selectedPane && !(compact && mobileScreen === "editor"));
+
+  return (
+    <aside
+      className="notes-surface"
+      data-compact={compact ? "true" : "false"}
+      data-mobile-screen={mobileScreen}
+      data-list={effectiveListCollapsed ? "collapsed" : "open"}
+      role={compact ? "dialog" : "complementary"}
+      aria-label="Notes"
+    >
+      <div
+        className="notes-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize notes"
+        aria-valuemin={MIN_NOTES_PANEL_WIDTH}
+        aria-valuemax={MAX_NOTES_PANEL_WIDTH}
+        aria-valuenow={width}
+        tabIndex={compact ? -1 : 0}
+        onPointerDown={(event) => {
+          if (compact) {
+            return;
+          }
+          event.preventDefault();
+          onResizeStart(event.clientX);
+        }}
+        onKeyDown={onResizeKeyDown}
+      />
+      <header className="notes-head">
+        {!compact ? (
+          <button
+            className="icon-btn"
+            type="button"
+            aria-label={effectiveListCollapsed ? "Show notes list" : "Hide notes list"}
+            title={effectiveListCollapsed ? "Show notes list" : "Hide notes list"}
+            aria-pressed={!effectiveListCollapsed}
+            onClick={() => onListCollapsed(!effectiveListCollapsed)}
+          >
+            <PanelLeft size={18} />
+          </button>
+        ) : null}
+        {compact && mobileScreen === "editor" ? (
+          <button
+            className="icon-btn"
+            type="button"
+            aria-label="Show notes list"
+            title="Show notes list"
+            onClick={onShowNotesList}
+          >
+            <PanelLeft size={18} />
+          </button>
+        ) : null}
+        <div>
+          <span className="notes-title">Notes</span>
+          <span className="notes-sub mono">
+            {selectedPane ? paneTitle(selectedPane) : "All notes"}
+          </span>
+        </div>
+        <button className="icon-btn" type="button" aria-label="Close notes" title="Close" onClick={onClose}>
+          <X size={18} />
+        </button>
+      </header>
+      {showPaneNoteTabs ? (
+        <div className="pane-note-tabs" role="tablist" aria-label="Pane notes">
+          {selectedPaneNotes.map((entry) => (
+            <button
+              key={`${entry.bridgeId}:${entry.note.note_id}`}
+              className="pane-note-tab"
+              type="button"
+              role="tab"
+              aria-selected={
+                selectedEntry?.bridgeId === entry.bridgeId &&
+                selectedEntry.note.note_id === entry.note.note_id
+              }
+              data-active={
+                selectedEntry?.bridgeId === entry.bridgeId &&
+                selectedEntry.note.note_id === entry.note.note_id
+                  ? "true"
+                  : "false"
+              }
+              onClick={() => onSelectNote(entry.bridgeId, entry.note.note_id)}
+            >
+              {entry.note.title || "Untitled note"}
+            </button>
+          ))}
+          <button
+            className="pane-note-tab pane-note-tab-new"
+            type="button"
+            aria-label="New pane note"
+            title="New pane note"
+            disabled={!currentBridgeSupportsNotes}
+            onClick={onCreatePaneNote}
+          >
+            <Plus size={15} />
+          </button>
+        </div>
+      ) : null}
+      <div className="notes-shell">
+        <div className="notes-list-pane">
+          <section className="notes-section">
+            <div className="notes-section-head">
+              <span>Other</span>
+              <label className="notes-filter">
+                <input
+                  type="checkbox"
+                  checked={includeArchived}
+                  onChange={(event) => onIncludeArchived(event.currentTarget.checked)}
+                />
+                Archived
+              </label>
+              <label className="notes-filter">
+                <input
+                  type="checkbox"
+                  checked={includeDeleted}
+                  onChange={(event) => onIncludeDeleted(event.currentTarget.checked)}
+                />
+                Deleted
+              </label>
+              <button
+                className="icon-btn"
+                type="button"
+                aria-label="New detached note"
+                title="New detached note"
+                disabled={!currentBridgeSupportsNotes}
+                onClick={onCreateDetachedNote}
+              >
+                <Plus size={15} />
+              </button>
+            </div>
+            {notesLoadState === "loading" && otherNotes.length === 0 ? (
+              <div className="notes-empty">Loading notes</div>
+            ) : notesError && otherNotes.length === 0 ? (
+              <div className="notes-empty">{notesError}</div>
+            ) : otherNotes.length === 0 ? (
+              <div className="notes-empty">No other notes</div>
+            ) : (
+              otherNotes.map((entry) => (
+                <NotesListItem
+                  key={`${entry.bridgeId}:${entry.note.note_id}`}
+                  entry={entry}
+                  active={
+                    selectedEntry?.bridgeId === entry.bridgeId &&
+                    selectedEntry.note.note_id === entry.note.note_id
+                  }
+                  onSelect={() => onSelectNote(entry.bridgeId, entry.note.note_id)}
+                />
+              ))
+            )}
+          </section>
+          <div
+            className="notes-list-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize notes list"
+            aria-valuemin={MIN_NOTES_LIST_PANE_WIDTH}
+            aria-valuemax={MAX_NOTES_LIST_PANE_WIDTH}
+            aria-valuenow={listWidth}
+            tabIndex={effectiveListCollapsed ? -1 : 0}
+            onPointerDown={(event) => {
+              if (effectiveListCollapsed) {
+                return;
+              }
+              const surface = event.currentTarget.closest(".notes-surface");
+              if (!(surface instanceof HTMLElement)) {
+                return;
+              }
+              event.preventDefault();
+              onListResizeStart(surface.getBoundingClientRect().left, event.clientX);
+            }}
+            onKeyDown={onListResizeKeyDown}
+          />
+        </div>
+        <NoteEditor
+          entry={selectedEntry}
+          currentBridgeId={selectedBridgeId}
+          currentPaneId={selectedPane?.pane_id ?? null}
+          canAttachToCurrentPane={canAttachToCurrentPane}
+          showCurrentPaneViewAction={compact}
+          onSave={onSaveNote}
+          onAttachToCurrentPane={onAttachToCurrentPane}
+          onDetach={onDetach}
+          onArchive={onArchive}
+          onRestore={onRestore}
+          onDelete={onDelete}
+          onViewPane={onViewPane}
+        />
+      </div>
+    </aside>
+  );
+}
+
+function NotesListItem({
+  entry,
+  active,
+  onSelect,
+}: {
+  entry: ScopedNoteEntry;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  const state = noteStateLabel(entry.note);
+  return (
+    <button className="notes-list-item" type="button" data-active={active} onClick={onSelect}>
+      <span
+        className="bridge-chip-dot"
+        style={{ "--bridge-color": entry.bridgeColor } as CSSProperties}
+        aria-hidden="true"
+      />
+      <span className="notes-list-item-body">
+        <span className="notes-list-item-title">{entry.note.title || "Untitled note"}</span>
+        <span className="notes-list-item-sub mono">{noteSubtitle(entry, true)}</span>
+      </span>
+      <NoteStateIcon note={entry.note} label={state.label} status={state.status} />
+    </button>
+  );
+}
+
+export function NoteEditor({
+  entry,
+  currentBridgeId,
+  currentPaneId,
+  canAttachToCurrentPane,
+  showCurrentPaneViewAction = false,
+  onSave,
+  onAttachToCurrentPane,
+  onDetach,
+  onArchive,
+  onRestore,
+  onDelete,
+  onViewPane,
+}: {
+  entry: ScopedNoteEntry | null;
+  currentBridgeId: BridgeId | null;
+  currentPaneId: string | null;
+  canAttachToCurrentPane: boolean;
+  showCurrentPaneViewAction?: boolean;
+  onSave: (
+    entry: ScopedNoteEntry,
+    title: string,
+    body: string,
+    expectedRevision: number,
+  ) => Promise<number>;
+  onAttachToCurrentPane: (entry: ScopedNoteEntry) => void;
+  onDetach: (entry: ScopedNoteEntry) => void;
+  onArchive: (entry: ScopedNoteEntry) => void;
+  onRestore: (entry: ScopedNoteEntry) => void;
+  onDelete: (entry: ScopedNoteEntry) => void;
+  onViewPane: (entry: ScopedNoteEntry) => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [dirty, setDirty] = useState(false);
+  const [baseRevision, setBaseRevision] = useState<number | null>(null);
+  const [editorNoteIdentity, setEditorNoteIdentity] = useState("");
+  const [saveRetryCycle, setSaveRetryCycle] = useState(0);
+  const [saveState, setSaveState] = useState<
+    "idle" | "pending" | "saving" | "saved" | "error" | "conflict"
+  >("idle");
+  const [editorMode, setEditorModeState] = useState<NoteEditorMode>(() => readNoteEditorMode());
+  const loadedNoteIdentityRef = useRef("");
+  const saveBlockedRef = useRef(false);
+  const noteSaveInFlightRef = useRef<NoteSaveInFlight | null>(null);
+  const entryRef = useRef(entry);
+  const onSaveRef = useRef(onSave);
+  const noteIdentity = entry ? noteDraftStorageKey(entry) : "";
+  const noteKey = entry ? `${entry.bridgeId}:${entry.note.note_id}:${entry.note.revision}` : "";
+  const serverTitle = entry?.note.title ?? "";
+  const serverBody = entry?.note.body ?? "";
+  const serverRevision = entry?.note.revision ?? 0;
+
+  useEffect(() => {
+    entryRef.current = entry;
+  }, [entry]);
+
+  useEffect(() => {
+    onSaveRef.current = onSave;
+  }, [onSave]);
+
+  const setEditorMode = (mode: NoteEditorMode) => {
+    setEditorModeState(mode);
+    writeNoteEditorMode(mode);
+  };
+
+  useEffect(() => {
+    if (!entry) {
+      loadedNoteIdentityRef.current = "";
+      setEditorNoteIdentity("");
+      setTitle("");
+      setBody("");
+      setDirty(false);
+      setBaseRevision(null);
+      setSaveState("idle");
+      saveBlockedRef.current = false;
+      noteSaveInFlightRef.current = null;
+      return;
+    }
+    const noteChanged = loadedNoteIdentityRef.current !== noteIdentity;
+    if (!noteChanged && dirty && title === entry.note.title && body === entry.note.body) {
+      setDirty(false);
+      setBaseRevision(entry.note.revision);
+      setSaveState("saved");
+      saveBlockedRef.current = false;
+      clearNoteDraft(entry);
+      return;
+    }
+    const expectedRevision = baseRevision ?? entry.note.revision;
+    if (
+      !noteChanged &&
+      isInFlightNoteSaveVisible({
+        inFlight: noteSaveInFlightRef.current,
+        noteIdentity,
+        serverRevision: entry.note.revision,
+        serverTitle: entry.note.title,
+        serverBody: entry.note.body,
+      })
+    ) {
+      setBaseRevision((current) =>
+        current === null || current < entry.note.revision ? entry.note.revision : current,
+      );
+      saveBlockedRef.current = false;
+      setSaveState("pending");
+      return;
+    }
+    if (
+      !noteChanged &&
+      shouldBlockDirtyNoteAutosave({
+        dirty,
+        title,
+        body,
+        baseRevision: expectedRevision,
+        serverTitle: entry.note.title,
+        serverBody: entry.note.body,
+        serverRevision: entry.note.revision,
+      })
+    ) {
+      saveBlockedRef.current = true;
+      setSaveState("conflict");
+      writeNoteDraft(entry, title, body, expectedRevision);
+      return;
+    }
+    if (noteChanged) {
+      const draft = readNoteDraft(entry);
+      loadedNoteIdentityRef.current = noteIdentity;
+      setEditorNoteIdentity(noteIdentity);
+      if (draft && (draft.title !== entry.note.title || draft.body !== entry.note.body)) {
+        const hasConflict = draft.baseRevision !== entry.note.revision;
+        setTitle(draft.title);
+        setBody(draft.body);
+        setDirty(true);
+        setBaseRevision(draft.baseRevision);
+        setSaveState(hasConflict ? "conflict" : "pending");
+        saveBlockedRef.current = hasConflict;
+      } else {
+        setTitle(entry.note.title);
+        setBody(entry.note.body);
+        setDirty(false);
+        setBaseRevision(entry.note.revision);
+        setSaveState("idle");
+        saveBlockedRef.current = false;
+        clearNoteDraft(entry);
+      }
+      return;
+    }
+    if (!dirty) {
+      setTitle(entry.note.title);
+      setBody(entry.note.body);
+      setBaseRevision(entry.note.revision);
+      setSaveState("idle");
+      saveBlockedRef.current = false;
+      clearNoteDraft(entry);
+    }
+  }, [baseRevision, body, dirty, entry, noteIdentity, noteKey, title]);
+
+  useEffect(() => {
+    if (!entry) {
+      return;
+    }
+    if (dirty && (title !== entry.note.title || body !== entry.note.body)) {
+      writeNoteDraft(entry, title, body, baseRevision ?? entry.note.revision);
+    } else {
+      clearNoteDraft(entry);
+    }
+  }, [baseRevision, body, dirty, entry, title]);
+
+  useEffect(() => {
+    if (!noteIdentity || !dirty) {
+      return;
+    }
+    if (editorNoteIdentity !== noteIdentity) {
+      return;
+    }
+    if (title === serverTitle && body === serverBody) {
+      return;
+    }
+    const currentEntry = entryRef.current;
+    if (!currentEntry || noteDraftStorageKey(currentEntry) !== noteIdentity) {
+      return;
+    }
+    const expectedRevision = baseRevision ?? serverRevision;
+    if (
+      isInFlightNoteSaveVisible({
+        inFlight: noteSaveInFlightRef.current,
+        noteIdentity,
+        serverRevision,
+        serverTitle,
+        serverBody,
+      })
+    ) {
+      setBaseRevision((current) =>
+        current === null || current < serverRevision ? serverRevision : current,
+      );
+      saveBlockedRef.current = false;
+      setSaveState("pending");
+      return;
+    }
+    if (
+      shouldBlockDirtyNoteAutosave({
+        dirty,
+        title,
+        body,
+        baseRevision: expectedRevision,
+        serverTitle,
+        serverBody,
+        serverRevision,
+      })
+    ) {
+      saveBlockedRef.current = true;
+      setSaveState("conflict");
+      writeNoteDraft(currentEntry, title, body, expectedRevision);
+      return;
+    }
+    if (saveBlockedRef.current) {
+      return;
+    }
+    if (noteSaveInFlightRef.current?.noteIdentity === noteIdentity) {
+      setSaveState("pending");
+      return;
+    }
+    setSaveState("pending");
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setSaveState("saving");
+      const inFlight: NoteSaveInFlight = {
+        noteIdentity,
+        expectedRevision,
+        title,
+        body,
+      };
+      noteSaveInFlightRef.current = inFlight;
+      const saveEntry = entryRef.current;
+      if (!saveEntry || noteDraftStorageKey(saveEntry) !== inFlight.noteIdentity) {
+        noteSaveInFlightRef.current = null;
+        return;
+      }
+      void onSaveRef.current(saveEntry, title, body, expectedRevision)
+        .then((savedRevision) => {
+          if (loadedNoteIdentityRef.current === inFlight.noteIdentity) {
+            setBaseRevision((current) =>
+              current === null || current < savedRevision ? savedRevision : current,
+            );
+          }
+          if (!cancelled) {
+            setSaveState("saved");
+          }
+        })
+        .catch((caught) => {
+          if (!cancelled) {
+            saveBlockedRef.current = true;
+            setSaveState(isNotesConflictError(caught) ? "conflict" : "error");
+          }
+        })
+        .finally(() => {
+          if (noteSaveInFlightRef.current === inFlight) {
+            noteSaveInFlightRef.current = null;
+            if (cancelled && loadedNoteIdentityRef.current === inFlight.noteIdentity) {
+              setSaveRetryCycle((cycle) => cycle + 1);
+            }
+          }
+        });
+    }, 700);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    baseRevision,
+    body,
+    dirty,
+    editorNoteIdentity,
+    noteIdentity,
+    saveRetryCycle,
+    serverBody,
+    serverRevision,
+    serverTitle,
+    title,
+  ]);
+
+  if (!entry) {
+    return (
+      <div className="note-editor note-editor-empty">
+        <StickyNote size={24} />
+        <span>Select or create a note</span>
+      </div>
+    );
+  }
+
+  const note = entry.note;
+  const deleted = Boolean(note.deleted_at);
+  const archived = Boolean(note.archived_at);
+  const attachedToCurrentPane = scopedNoteLinkedToPane(entry, currentBridgeId, currentPaneId);
+  const canViewLinkedPane = Boolean(
+    entry.pane && (!attachedToCurrentPane || showCurrentPaneViewAction),
+  );
+  const canAttachCurrentPane = canAttachToCurrentPane && !attachedToCurrentPane;
+  const saveStatusLabel =
+    saveState === "error" ? "save failed" : saveState === "conflict" ? "conflict" : null;
+  const markEdited = () => {
+    const expectedRevision = baseRevision ?? entry.note.revision;
+    if (baseRevision === null) {
+      setBaseRevision(expectedRevision);
+    }
+    setDirty(true);
+    if (saveState === "conflict") {
+      writeNoteDraft(entry, title, body, expectedRevision);
+      return;
+    }
+    saveBlockedRef.current = false;
+    setSaveState("pending");
+  };
+  const overwriteConflict = () => {
+    saveBlockedRef.current = false;
+    setSaveState("saving");
+    void onSave(entry, title, body, entry.note.revision)
+      .then((savedRevision) => {
+        clearNoteDraft(entry);
+        setBaseRevision(savedRevision);
+        setSaveState("saved");
+      })
+      .catch((caught) => {
+        saveBlockedRef.current = true;
+        setSaveState(isNotesConflictError(caught) ? "conflict" : "error");
+      });
+  };
+  const useServerVersion = () => {
+    setTitle(entry.note.title);
+    setBody(entry.note.body);
+    setDirty(false);
+    setBaseRevision(entry.note.revision);
+    saveBlockedRef.current = false;
+    setSaveState("idle");
+    clearNoteDraft(entry);
+  };
+  return (
+    <div className="note-editor">
+      <div className="note-editor-toolbar">
+        <div className="note-editor-toolbar-left">
+          <div className="note-editor-mode segmented-control" role="group" aria-label="Note editor mode">
+            <button
+              type="button"
+              data-on={editorMode === "edit"}
+              aria-pressed={editorMode === "edit"}
+              onClick={() => setEditorMode("edit")}
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              data-on={editorMode === "preview"}
+              aria-pressed={editorMode === "preview"}
+              onClick={() => setEditorMode("preview")}
+            >
+              Preview
+            </button>
+          </div>
+        </div>
+        <div className="note-editor-actions">
+          {canViewLinkedPane ? (
+            <button className="icon-btn" type="button" aria-label="View pane" title="View pane" onClick={() => onViewPane(entry)}>
+              <SquareTerminal size={16} />
+            </button>
+          ) : null}
+          {note.attachment ? (
+            <button className="icon-btn" type="button" aria-label="Detach note" title="Detach" onClick={() => onDetach(entry)}>
+              <Unlink size={16} />
+            </button>
+          ) : null}
+          {canAttachCurrentPane ? (
+            <button
+              className="icon-btn"
+              type="button"
+              aria-label="Attach to current pane"
+              title="Attach to current pane"
+              onClick={() => onAttachToCurrentPane(entry)}
+            >
+              <Link2 size={16} />
+            </button>
+          ) : null}
+          {archived || deleted ? (
+            <button className="icon-btn" type="button" aria-label="Restore note" title="Restore" onClick={() => onRestore(entry)}>
+              <RotateCcw size={16} />
+            </button>
+          ) : (
+            <button className="icon-btn" type="button" aria-label="Archive note" title="Archive" onClick={() => onArchive(entry)}>
+              <Archive size={16} />
+            </button>
+          )}
+          {!deleted ? (
+            <button
+              className="icon-btn danger"
+              type="button"
+              aria-label="Delete note"
+              title="Delete"
+              onClick={() => onDelete(entry)}
+            >
+              <Trash2 size={16} />
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {saveState === "conflict" ? (
+        <div className="note-conflict" role="alert">
+          <span>This note changed elsewhere.</span>
+          <button type="button" onClick={overwriteConflict}>
+            Overwrite
+          </button>
+          <button type="button" onClick={useServerVersion}>
+            Use server
+          </button>
+        </div>
+      ) : null}
+      <input
+        className="note-title-input"
+        value={title}
+        onChange={(event) => {
+          setTitle(event.currentTarget.value);
+          markEdited();
+        }}
+        placeholder="Untitled note"
+        disabled={deleted}
+      />
+      {editorMode === "preview" ? (
+        <div className="note-body-preview">
+          <Suspense fallback={<span className="note-body-preview-empty">Loading preview</span>}>
+            <NoteMarkdownPreview body={body} />
+          </Suspense>
+        </div>
+      ) : (
+        <textarea
+          className="note-body-input"
+          value={body}
+          onChange={(event) => {
+            setBody(event.currentTarget.value);
+            markEdited();
+          }}
+          placeholder="Write a note"
+          disabled={deleted}
+        />
+      )}
+      {saveStatusLabel ? (
+        <span className="note-editor-save-status mono" data-state={saveState}>
+          {saveStatusLabel}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 function GroupHeader({
   label,
   bridgeColor,
@@ -3900,6 +6015,43 @@ function AgentRow({
           {statusLabel(pane.agent_status)}
         </span>
       ) : null}
+    </button>
+  );
+}
+
+function NoteRow({
+  entry,
+  active,
+  showBridge,
+  index,
+  onSelect,
+}: {
+  entry: ScopedNoteEntry;
+  active: boolean;
+  showBridge: boolean;
+  index: number;
+  onSelect: () => void;
+}) {
+  const state = noteStateLabel(entry.note);
+  return (
+    <button
+      className="pane-row note-row"
+      type="button"
+      data-active={active}
+      data-link={entry.note.link_state}
+      style={{ animationDelay: `${Math.min(index, 14) * 22}ms` }}
+      onClick={onSelect}
+    >
+      <span
+        className="bridge-chip-dot"
+        style={{ "--bridge-color": entry.bridgeColor } as CSSProperties}
+        aria-hidden="true"
+      />
+      <span className="pane-body">
+        <span className="pane-name">{entry.note.title || "Untitled note"}</span>
+        <span className="pane-meta mono">{noteSubtitle(entry, showBridge)}</span>
+      </span>
+      <NoteStateIcon note={entry.note} label={state.label} status={state.status} />
     </button>
   );
 }
@@ -4293,6 +6445,18 @@ function selectionPaneId(event: MessageEvent) {
       : null;
   } catch {
     return null;
+  }
+}
+
+function isNotesChangedEvent(event: MessageEvent) {
+  if (typeof event.data !== "string") {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(event.data) as { type?: unknown };
+    return parsed.type === "herdr_web.notes_changed";
+  } catch {
+    return false;
   }
 }
 
