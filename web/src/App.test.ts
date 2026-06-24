@@ -6,6 +6,7 @@ import {
   buildVisibleScopedWorkspaces,
   buildVisibleTabEntries,
   isInFlightNoteSaveVisible,
+  menuItems,
   nextVisibleAgentPaneEntry,
   nextVisibleTabEntry,
   resolveInitialSelectedBridgeId,
@@ -202,6 +203,82 @@ describe("App multi-bridge helpers", () => {
         (item) => `${item.bridgeId}:${item.pane.pane_id}`,
       ),
     ).toEqual(["bridge-b:pane-b", "bridge-a:pane-a"]);
+  });
+
+  it("promotes pinned agents within their current group", () => {
+    const snapshot = multiPaneSnapshot(
+      [workspace("workspace-a", 1)],
+      [
+        pane("pane-a", "workspace-a", "tab-a", "idle"),
+        pane("pane-b", "workspace-a", "tab-a", "idle"),
+      ],
+    );
+    const bridgeViews = [bridgeView("bridge-a", snapshot)];
+    const scopedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViews,
+      "bridge-a",
+      "selected",
+      "all",
+      null,
+      {},
+    );
+
+    expect(
+      buildVisibleAgentPaneEntries(
+        scopedWorkspaces,
+        bridgeViews,
+        "selected",
+        "workspace",
+        "workspace",
+        new Set(["bridge-a:pane-b"]),
+      ).map((item) => item.pane.pane_id),
+    ).toEqual(["pane-b", "pane-a"]);
+  });
+
+  it("filters agents to pinned rows without reordering groups", () => {
+    const snapshot = multiPaneSnapshot(
+      [workspace("workspace-a", 1), workspace("workspace-b", 2)],
+      [
+        pane("pane-a", "workspace-a", "tab-a", "idle"),
+        pane("pane-b", "workspace-b", "tab-b", "idle"),
+      ],
+    );
+    const bridgeViews = [bridgeView("bridge-a", snapshot)];
+    const scopedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViews,
+      "bridge-a",
+      "selected",
+      "all",
+      null,
+      {},
+    );
+
+    expect(
+      buildVisibleAgentPaneEntries(
+        scopedWorkspaces,
+        bridgeViews,
+        "selected",
+        "workspace",
+        "workspace",
+        new Set(["bridge-a:pane-a", "bridge-a:pane-b"]),
+        true,
+      ).map((item) => `${item.workspace?.workspace_id}:${item.pane.pane_id}`),
+    ).toEqual(["workspace-a:pane-a", "workspace-b:pane-b"]);
+  });
+
+  it("shows pin actions even when pane commands are not ready", () => {
+    expect(menuItems("pane", false, false, true, false)).toEqual([
+      { key: "pin", label: "Pin pane" },
+    ]);
+    expect(menuItems("pane", false, false, true, true)).toEqual([
+      { key: "unpin", label: "Unpin pane" },
+    ]);
+    expect(menuItems("pane", false, false, true, false, "agent")).toEqual([
+      { key: "pin", label: "Pin agent" },
+    ]);
+    expect(menuItems("pane", false, false, true, true, "agent")).toEqual([
+      { key: "unpin", label: "Unpin agent" },
+    ]);
   });
 
   it("builds visible tab entries across hosts for all-host shortcut navigation", () => {
@@ -628,6 +705,36 @@ function bridgeSnapshot(workspaceId: string, tabId: string, paneInfo: PaneInfo):
     workspaces: [workspaceInfo],
     tabs: [tabInfo],
     panes: [paneInfo],
+    layouts: [],
+  };
+}
+
+function multiPaneSnapshot(workspaces: WorkspaceInfo[], panes: PaneInfo[]): Snapshot {
+  const tabsById = new Map<string, TabInfo>();
+  for (const paneInfo of panes) {
+    if (tabsById.has(paneInfo.tab_id)) {
+      continue;
+    }
+    tabsById.set(paneInfo.tab_id, {
+      tab_id: paneInfo.tab_id,
+      workspace_id: paneInfo.workspace_id,
+      number: tabsById.size + 1,
+      label: paneInfo.tab_id,
+      focused: false,
+      pane_count: panes.filter((item) => item.tab_id === paneInfo.tab_id).length,
+      agent_status: paneInfo.agent_status,
+    });
+  }
+  return {
+    workspaces: workspaces.map((workspaceInfo) => ({
+      ...workspaceInfo,
+      pane_count: panes.filter((item) => item.workspace_id === workspaceInfo.workspace_id).length,
+      tab_count: [...tabsById.values()].filter(
+        (tabInfo) => tabInfo.workspace_id === workspaceInfo.workspace_id,
+      ).length,
+    })),
+    tabs: [...tabsById.values()],
+    panes,
     layouts: [],
   };
 }

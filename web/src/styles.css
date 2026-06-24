@@ -700,6 +700,13 @@ button {
   color: var(--subtext1);
 }
 
+.agent-pin-indicator {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  color: var(--overlay1);
+}
+
 .agent-icon-claude {
   color: #d97757;
 }
@@ -2044,6 +2051,12 @@ button {
   border-color: var(--surface1);
   color: var(--text);
   background: var(--surface0);
+}
+
+.sec-add[data-on="true"] {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .tab-head {
