@@ -5175,7 +5175,7 @@ function Switcher({
                 ) : null}
                 {sidebarView === "agents" && agentPinsSupported ? (
                   <button
-                    className="sec-add"
+                    className="sec-add sec-add-pin"
                     type="button"
                     aria-label="Show pinned agents only"
                     title="Pinned only"

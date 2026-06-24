@@ -2059,6 +2059,10 @@ button {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
+.sec-add-pin svg {
+  transform: translateX(-1px);
+}
+
 .tab-head {
   display: inline-flex;
   align-items: center;
