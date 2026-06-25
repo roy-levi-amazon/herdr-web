@@ -8,6 +8,7 @@ use herdr_compat::api::schema::PaneInfo;
 use serde::{Deserialize, Serialize};
 
 const AGENT_PINS_STORE_VERSION: u32 = 1;
+const MAX_AGENT_PIN_RECORDS: usize = 1_000;
 
 #[derive(Clone)]
 pub struct AgentPinsManager {
@@ -175,7 +176,13 @@ impl AgentPinsManager {
 
     fn load_or_create_store(&self) -> Result<AgentPinsStore, AgentPinsError> {
         match fs::read(&self.pins_path) {
-            Ok(bytes) => parse_store(&bytes),
+            Ok(bytes) => match parse_store(&bytes) {
+                Ok(store) => Ok(store),
+                Err(err) => {
+                    copy_corrupt_once(&self.pins_path);
+                    Err(err)
+                }
+            },
             Err(err) if err.kind() == ErrorKind::NotFound => {
                 let now = now_ms_string();
                 Ok(AgentPinsStore {
@@ -197,23 +204,24 @@ fn visible_pin_responses(
 ) -> Vec<AgentPinResponse> {
     pins.into_iter()
         .filter(|pin| pin.session_key == session_key)
-        .filter(|pin| panes.iter().any(|pane| pin_matches_pane(pin, pane)))
-        .map(|pin| AgentPinResponse {
-            pane_id: pin.pane_id,
-            terminal_id: pin.terminal_id,
-            workspace_id: pin.workspace_id,
-            tab_id: pin.tab_id,
-            created_at: pin.created_at,
-            context: pin.context,
+        .filter_map(|pin| {
+            panes
+                .iter()
+                .find(|pane| pin_matches_pane(&pin, pane))
+                .map(|pane| AgentPinResponse {
+                    pane_id: pane.pane_id.clone(),
+                    terminal_id: pane.terminal_id.clone(),
+                    workspace_id: pane.workspace_id.clone(),
+                    tab_id: pane.tab_id.clone(),
+                    created_at: pin.created_at,
+                    context: pin.context,
+                })
         })
         .collect()
 }
 
 fn pin_matches_pane(pin: &AgentPinRecord, pane: &PaneInfo) -> bool {
-    pin.pane_id == pane.pane_id
-        && pin.terminal_id == pane.terminal_id
-        && pin.workspace_id == pane.workspace_id
-        && pin.tab_id == pane.tab_id
+    pin.pane_id == pane.pane_id && pin.terminal_id == pane.terminal_id
 }
 
 fn prune_session_pins_for_missing_panes(
@@ -225,6 +233,15 @@ fn prune_session_pins_for_missing_panes(
     store.pins.retain(|pin| {
         pin.session_key != session_key || open_pane_ids.contains(pin.pane_id.as_str())
     });
+    prune_oldest_pin_records(store);
+}
+
+fn prune_oldest_pin_records(store: &mut AgentPinsStore) {
+    if store.pins.len() <= MAX_AGENT_PIN_RECORDS {
+        return;
+    }
+    store.pins.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    store.pins.truncate(MAX_AGENT_PIN_RECORDS);
 }
 
 fn find_pane<'a>(pane_id: &str, panes: &'a [PaneInfo]) -> Result<&'a PaneInfo, AgentPinsError> {
@@ -294,6 +311,39 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), AgentPi
         File::open(parent)?.sync_all()?;
     }
     Ok(())
+}
+
+fn copy_corrupt_once(path: &Path) {
+    if corrupt_copy_exists(path) {
+        return;
+    }
+    let Ok(bytes) = fs::read(path) else {
+        return;
+    };
+    let corrupt_path = path.with_extension(format!("{}.corrupt", now_ms_string()));
+    if fs::write(&corrupt_path, bytes).is_ok() {
+        let _ = set_private_file_permissions(&corrupt_path);
+    }
+}
+
+fn corrupt_copy_exists(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    let Ok(entries) = fs::read_dir(parent) else {
+        return false;
+    };
+    let prefix = format!("{stem}.");
+    entries.flatten().any(|entry| {
+        entry
+            .path()
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".corrupt"))
+    })
 }
 
 fn default_agent_pins_dir() -> PathBuf {
@@ -470,6 +520,22 @@ mod tests {
     }
 
     #[test]
+    fn pin_follows_pane_moves() {
+        let dir = test_dir("pane-move");
+        let manager = AgentPinsManager::for_test(dir, "session:a").unwrap();
+
+        manager
+            .pin("pane-1", &[pane("pane-1", "terminal-1")])
+            .unwrap();
+        let moved_pane = pane_in_location("pane-1", "terminal-1", "workspace-b", "tab-b");
+        let pins = manager.list(&[moved_pane]).unwrap();
+
+        assert_eq!(pins.pins.len(), 1);
+        assert_eq!(pins.pins[0].workspace_id, "workspace-b");
+        assert_eq!(pins.pins[0].tab_id, "tab-b");
+    }
+
+    #[test]
     fn unpin_removes_visible_pin() {
         let dir = test_dir("unpin");
         let manager = AgentPinsManager::for_test(dir, "session:a").unwrap();
@@ -481,12 +547,33 @@ mod tests {
         assert!(pins.pins.is_empty());
     }
 
+    #[test]
+    fn corrupt_store_is_copied_aside_before_error() {
+        let dir = test_dir("corrupt-store");
+        ensure_private_dir(&dir).unwrap();
+        let path = dir.join("agent-pins.json");
+        fs::write(&path, b"{not json").unwrap();
+        let manager = AgentPinsManager::for_test(dir.clone(), "session:a").unwrap();
+
+        assert!(manager.list(&[]).is_err());
+        assert!(corrupt_copy_exists(&path));
+    }
+
     fn pane(pane_id: &str, terminal_id: &str) -> PaneInfo {
+        pane_in_location(pane_id, terminal_id, "workspace-a", "tab-a")
+    }
+
+    fn pane_in_location(
+        pane_id: &str,
+        terminal_id: &str,
+        workspace_id: &str,
+        tab_id: &str,
+    ) -> PaneInfo {
         PaneInfo {
             pane_id: pane_id.to_string(),
             terminal_id: terminal_id.to_string(),
-            workspace_id: "workspace-a".to_string(),
-            tab_id: "tab-a".to_string(),
+            workspace_id: workspace_id.to_string(),
+            tab_id: tab_id.to_string(),
             focused: false,
             cwd: None,
             foreground_cwd: None,

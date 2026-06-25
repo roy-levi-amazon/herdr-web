@@ -960,6 +960,10 @@ export function App() {
     () => buildAgentPinKeySet(bridgeViews, agentPinsStates),
     [agentPinsStates, bridgeViews],
   );
+  const effectiveAgentPinnedOnly =
+    visibleHostBridgeViews(bridgeViews, selectedBridgeId, hostScope).some((view) =>
+      supportsAgentPins(view.runtime.capabilities),
+    ) && agentPinnedOnly;
   const selectedRuntime = useMemo(
     () =>
       selectedBridgeId
@@ -2196,7 +2200,7 @@ export function App() {
           agentGroup,
           agentSort,
           pinnedAgentKeys,
-          agentPinnedOnly,
+          effectiveAgentPinnedOnly,
         );
         if (agentEntries.length === 0) {
           return;
@@ -2263,7 +2267,7 @@ export function App() {
   }, [
     activeSpace,
     activeWorkspacesByBridgeId,
-    agentPinnedOnly,
+    effectiveAgentPinnedOnly,
     agentGroup,
     agentSort,
     bridgeViews,
@@ -4620,6 +4624,7 @@ function Switcher({
   const agentPinsSupported = hostBridgeViews.some((view) =>
     supportsAgentPins(view.runtime.capabilities),
   );
+  const effectiveAgentPinnedOnly = agentPinsSupported && agentPinnedOnly;
   const notesLoading = notesEnabled && hostBridgeViews.some(
     (view) => notesStates[view.runtime.id]?.loadState === "loading",
   );
@@ -4646,9 +4651,16 @@ function Switcher({
       "none",
       agentSort,
       pinnedAgentKeys,
-      agentPinnedOnly,
+      effectiveAgentPinnedOnly,
     );
-  }, [agentPinnedOnly, agentSort, bridgeViews, hostScope, pinnedAgentKeys, scopedWorkspaces]);
+  }, [
+    effectiveAgentPinnedOnly,
+    agentSort,
+    bridgeViews,
+    hostScope,
+    pinnedAgentKeys,
+    scopedWorkspaces,
+  ]);
 
   const agentGroups = useMemo(() => {
     if (agentGroup === "none") {
@@ -5209,8 +5221,10 @@ function Switcher({
               ) : sidebarView === "agents" ? (
                 agentPanes.length === 0 && disconnectedBridgeViews.length === 0 ? (
                   <div className="empty">
-                    <strong>{agentPinnedOnly ? "No pinned agents" : "No detected agents"}</strong>
-                    <span>{agentPinnedOnly ? "" : "Open the Tabs view for plain panes."}</span>
+                    <strong>
+                      {effectiveAgentPinnedOnly ? "No pinned agents" : "No detected agents"}
+                    </strong>
+                    <span>{effectiveAgentPinnedOnly ? "" : "Open the Tabs view for plain panes."}</span>
                   </div>
                 ) : (
                   <>
