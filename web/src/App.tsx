@@ -1526,6 +1526,20 @@ export function App() {
     () => snapshot?.panes.find((pane) => pane.pane_id === resolvedPaneId) ?? null,
     [snapshot, resolvedPaneId],
   );
+  const selectedPanePinsSupported = Boolean(
+    selectedRuntime?.canConnect &&
+      selectedRuntime.capabilityState === "ready" &&
+      selectedPane &&
+      supportsAgentPins(selectedRuntime.capabilities),
+  );
+  const selectedPanePinned =
+    selectedRuntime && selectedPane
+      ? isAgentPinned(pinnedAgentKeys, selectedRuntime.id, selectedPane.pane_id)
+      : false;
+  const selectedPanePinTarget = selectedPane && isAgentPane(selectedPane) ? "agent" : "pane";
+  const selectedPanePinTitle = selectedPanePinned
+    ? `Unpin ${selectedPanePinTarget}`
+    : `Pin ${selectedPanePinTarget}`;
   const selectedNotesState =
     selectedRuntime && notesStates[selectedRuntime.id]?.connectionKey === selectedRuntime.connectionKey
       ? notesStates[selectedRuntime.id]
@@ -3042,6 +3056,21 @@ export function App() {
               onClick={openNotesPanel}
             >
               <StickyNote size={18} />
+            </button>
+          ) : null}
+          {selectedPane && selectedRuntime && selectedPanePinsSupported ? (
+            <button
+              className="icon-btn stage-pin-button"
+              type="button"
+              aria-label={selectedPanePinTitle}
+              title={selectedPanePinTitle}
+              aria-pressed={selectedPanePinned}
+              data-on={selectedPanePinned}
+              onClick={() =>
+                void toggleAgentPin(selectedRuntime.id, selectedPane.pane_id, selectedPanePinned)
+              }
+            >
+              <Pin size={16} />
             </button>
           ) : null}
           {selectedPane ? (

@@ -940,6 +940,12 @@ button {
   white-space: nowrap;
 }
 
+.stage-pin-button[data-on="true"] {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 11%, transparent);
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
