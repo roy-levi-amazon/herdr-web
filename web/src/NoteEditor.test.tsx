@@ -514,6 +514,7 @@ function createConnectionHarness({
           connectionRefs={connectionRefs}
           setConnectionStates={setConnectionStates}
           onPaneSelection={onPaneSelection}
+          onAgentActivityChanged={() => undefined}
           onAgentPinsChanged={() => undefined}
           onNotesChanged={onNotesChanged}
         />,

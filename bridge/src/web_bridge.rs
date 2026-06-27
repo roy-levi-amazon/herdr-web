@@ -43,6 +43,7 @@ use herdr_compat::protocol::{
     PROTOCOL_VERSION,
 };
 
+use crate::agent_activity::{AgentActivityListResponse, AgentActivityManager};
 use crate::agent_pins::{AgentPinsError, AgentPinsListResponse, AgentPinsManager};
 use crate::notes::{
     AttachNoteRequest, CreateNoteRequest, NoteResponse, NotesError, NotesListQuery,
@@ -87,6 +88,7 @@ struct BridgeState {
     request_policy: RequestPolicy,
     terminal_sessions: Arc<Mutex<HashMap<String, SharedTerminalSession>>>,
     selected_pane_id: Arc<Mutex<Option<String>>>,
+    agent_activity: Arc<AgentActivityManager>,
     agent_pins: Arc<AgentPinsManager>,
     notes: Arc<NotesManager>,
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
@@ -129,8 +131,14 @@ struct SnapshotTabInfo {
 #[derive(Debug, Serialize)]
 struct Capabilities {
     commands: &'static [&'static str],
+    agent_activity: AgentActivityCapability,
     agent_pins: AgentPinsCapability,
     notes: NotesCapability,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentActivityCapability {
+    version: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -795,6 +803,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         );
     }
     ensure_upload_dir(&options.upload_dir)?;
+    let agent_activity = Arc::new(AgentActivityManager::new());
     let agent_pins = Arc::new(AgentPinsManager::new()?);
     let notes = Arc::new(NotesManager::new()?);
     let request_policy = RequestPolicy {
@@ -816,6 +825,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         request_policy: request_policy.clone(),
         terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
         selected_pane_id: Arc::new(Mutex::new(None)),
+        agent_activity,
         agent_pins,
         notes,
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
@@ -823,6 +833,10 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         upload_dir: options.upload_dir.clone(),
     };
     spawn_agent_activity_watcher(state.clone());
+    let agent_activity_routes = Router::new().route(
+        "/api/agent-activity",
+        get(agent_activity_list_handler).options(preflight_handler),
+    );
     let agent_pins_routes = Router::new()
         .route(
             "/api/agent-pins",
@@ -869,6 +883,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         )
         .layer(DefaultBodyLimit::max(MAX_NOTES_REQUEST_BYTES));
     let app = Router::new()
+        .merge(agent_activity_routes)
         .merge(agent_pins_routes)
         .merge(notes_routes)
         .route(
@@ -1833,6 +1848,7 @@ async fn snapshot_handler(
         }
     };
     let panes = current_panes(&state.api)?;
+    observe_agent_activity_snapshot(&state, &panes);
     let notes = state.notes.clone();
     let note_panes = panes.clone();
     match tokio::task::spawn_blocking(move || notes.observe_panes(&note_panes))
@@ -1888,9 +1904,20 @@ async fn capabilities_handler(
     ensure_allowed_request(&headers, &state.request_policy)?;
     Ok(Json(Capabilities {
         commands: ALLOWED_COMMANDS,
+        agent_activity: AgentActivityCapability { version: 1 },
         agent_pins: AgentPinsCapability { version: 1 },
         notes: NotesCapability { version: 1 },
     }))
+}
+
+async fn agent_activity_list_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Result<Json<AgentActivityListResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let panes = current_panes(&state.api)?;
+    observe_agent_activity_snapshot(&state, &panes);
+    Ok(Json(state.agent_activity.list(&panes)))
 }
 
 async fn agent_pins_list_handler(
@@ -2095,6 +2122,13 @@ fn broadcast_agent_pins_changed(state: &BridgeState, pane_id: Option<&str>) {
     let _ = state.ui_event_tx.send(payload.to_string());
 }
 
+fn broadcast_agent_activity_changed(state: &BridgeState) {
+    let payload = serde_json::json!({
+        "type": "herdr_web.agent_activity_changed",
+    });
+    let _ = state.ui_event_tx.send(payload.to_string());
+}
+
 fn broadcast_notes_changed(state: &BridgeState, note_id: Option<&str>, revision: Option<u64>) {
     let mut payload = serde_json::json!({
         "type": "herdr_web.notes_changed",
@@ -2106,6 +2140,12 @@ fn broadcast_notes_changed(state: &BridgeState, note_id: Option<&str>, revision:
         payload["revision"] = serde_json::json!(revision);
     }
     let _ = state.ui_event_tx.send(payload.to_string());
+}
+
+fn observe_agent_activity_snapshot(state: &BridgeState, panes: &[PaneInfo]) {
+    if state.agent_activity.observe_snapshot(panes) {
+        broadcast_agent_activity_changed(state);
+    }
 }
 
 fn current_panes(api: &ApiClient) -> Result<Vec<PaneInfo>, BridgeError> {
@@ -2718,6 +2758,7 @@ fn run_agent_activity_subscription(
 ) -> Result<(), BridgeError> {
     drain_resubscribe_signals(resubscribe_rx);
     let panes = current_panes(&state.api)?;
+    observe_agent_activity_snapshot(state, &panes);
     let pane_ids = sorted_pane_ids(&panes);
     if pane_ids.is_empty() {
         wait_for_resubscribe_signal(resubscribe_rx)?;
@@ -2741,7 +2782,9 @@ fn run_agent_activity_subscription(
 
     loop {
         if drain_resubscribe_signals(resubscribe_rx) {
-            if !activity_resubscribe_needed(&pane_ids, &current_panes(&state.api)?) {
+            let next_panes = current_panes(&state.api)?;
+            observe_agent_activity_snapshot(state, &next_panes);
+            if !activity_resubscribe_needed(&pane_ids, &next_panes) {
                 continue;
             }
             return Ok(());
@@ -2749,6 +2792,19 @@ fn run_agent_activity_subscription(
         match stream.next_value() {
             Ok(Some(value)) => {
                 if let Some(message) = activity_message_from_subscription_value(value) {
+                    if let ActivityMessage::PaneAgentStatusChanged {
+                        pane_id,
+                        agent_status,
+                        ..
+                    } = &message
+                    {
+                        if state
+                            .agent_activity
+                            .observe_status_event(pane_id, *agent_status)
+                        {
+                            broadcast_agent_activity_changed(state);
+                        }
+                    }
                     let _ = state.activity_tx.send(message);
                 }
             }
