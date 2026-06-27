@@ -21,6 +21,9 @@
 
 ### Changed
 
+- Extended the pinned-only sidebar toggle to the Tabs view so pinned panes can be found outside the
+  Agents view.
+
 ### Fixed
 
 - Added Mobile settings for an expanding terminal command input and Enter-as-newline

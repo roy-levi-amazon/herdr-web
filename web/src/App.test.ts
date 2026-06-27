@@ -309,6 +309,40 @@ describe("App multi-bridge helpers", () => {
     ).toEqual(["bridge-a:tab-a", "bridge-b:tab-b"]);
   });
 
+  it("filters tab entries to pinned panes", () => {
+    const snapshot = multiPaneSnapshot(
+      [workspace("workspace-a", 1)],
+      [
+        pane("pane-a", "workspace-a", "tab-a"),
+        pane("pane-b", "workspace-a", "tab-a"),
+        pane("pane-c", "workspace-a", "tab-b"),
+      ],
+    );
+    const bridgeViews = [bridgeView("bridge-a", snapshot)];
+    const scopedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViews,
+      "bridge-a",
+      "selected",
+      "all",
+      null,
+      {},
+    );
+
+    expect(
+      buildVisibleTabEntries(
+        scopedWorkspaces,
+        bridgeViews,
+        "selected",
+        "none",
+        new Set(["bridge-a:pane-b"]),
+        true,
+      ).map((entry) => ({
+        tab: entry.tab.tab_id,
+        panes: entry.panes.map((item) => item.pane_id),
+      })),
+    ).toEqual([{ tab: "tab-a", panes: ["pane-b"] }]);
+  });
+
   it("navigates visible agent entries with fallback and wrap-around", () => {
     const bridgeViews = [
       bridgeView(

@@ -2257,6 +2257,8 @@ export function App() {
         bridgeViews,
         hostScope,
         agentGroup,
+        pinnedAgentKeys,
+        sidebarView === "tabs" && effectiveAgentPinnedOnly,
       );
       const tabs = tabEntries;
       if (tabs.length === 0) {
@@ -2300,6 +2302,7 @@ export function App() {
     paneFocusSupported,
     pinnedAgentKeys,
     scope,
+    sidebarView,
     selectedPane,
     selectedRuntime,
     selectedCommands,
@@ -3864,11 +3867,21 @@ export function buildScopedAgentGroups(
 
 export function buildVisibleTabWorkspaceGroups(
   scopedWorkspaces: ScopedWorkspace[],
+  pinnedAgentKeys: ReadonlySet<string> = EMPTY_AGENT_PIN_KEYS,
+  pinnedOnly = false,
 ): ScopedTabWorkspace[] {
   return scopedWorkspaces.map((entry) => ({
     ...entry,
     tabs: sortTabsForWorkspace(entry.snapshot.tabs, entry.workspace.workspace_id)
-      .map((tab) => ({ tab, panes: sortPanesForTab(entry.snapshot.panes, tab.tab_id) }))
+      .map((tab) => {
+        const panes = sortPanesForTab(entry.snapshot.panes, tab.tab_id);
+        return {
+          tab,
+          panes: pinnedOnly
+            ? panes.filter((pane) => isAgentPinned(pinnedAgentKeys, entry.bridgeId, pane.pane_id))
+            : panes,
+        };
+      })
       .filter((group) => group.panes.length > 0),
   }));
 }
@@ -3878,8 +3891,10 @@ export function buildVisibleTabEntries(
   bridgeViews: BridgeConnectionView[],
   hostScope: HostScope,
   agentGroup: AgentGroup,
+  pinnedAgentKeys: ReadonlySet<string> = EMPTY_AGENT_PIN_KEYS,
+  pinnedOnly = false,
 ): ScopedTabEntry[] {
-  const spaceGroups = buildVisibleTabWorkspaceGroups(scopedWorkspaces);
+  const spaceGroups = buildVisibleTabWorkspaceGroups(scopedWorkspaces, pinnedAgentKeys, pinnedOnly);
   const flattenGroup = (group: ScopedTabWorkspace): ScopedTabEntry[] =>
     group.tabs.map(({ tab, panes }) => ({ ...group, tab, panes }));
   if (agentGroup === "host" || (agentGroup === "hostWorkspace" && hostScope === "all")) {
@@ -4705,8 +4720,13 @@ function Switcher({
   }, [agentGroup, agentPanes, hostScope]);
 
   const spaceGroups = useMemo<ScopedTabWorkspace[]>(
-    () => buildVisibleTabWorkspaceGroups(scopedWorkspaces),
-    [scopedWorkspaces],
+    () =>
+      buildVisibleTabWorkspaceGroups(
+        scopedWorkspaces,
+        pinnedAgentKeys,
+        sidebarView === "tabs" && effectiveAgentPinnedOnly,
+      ),
+    [effectiveAgentPinnedOnly, pinnedAgentKeys, scopedWorkspaces, sidebarView],
   );
   const spaceCount = hostBridgeViews.reduce(
     (count, view) => count + (view.snapshot?.workspaces.length ?? 0),
@@ -4724,6 +4744,9 @@ function Switcher({
       selectedBridgeId,
   );
   const canCreateNoteFromHeader = notesViewActive && notesSupported;
+  const showPinnedOnlyControl =
+    (sidebarView === "agents" || sidebarView === "tabs") && agentPinsSupported;
+  const pinnedOnlyLabel = sidebarView === "tabs" ? "pinned panes" : "pinned agents";
 
   useEffect(() => {
     if (optionsMenu && !showOptionsControl) {
@@ -4781,6 +4804,7 @@ function Switcher({
                 key={`${group.bridgeId}:${pane.pane_id}`}
                 index={paneIndex++}
                 pane={pane}
+                pinned={isAgentPinned(pinnedAgentKeys, group.bridgeId, pane.pane_id)}
                 active={group.bridgeId === selectedBridgeId && pane.pane_id === selectedPane?.pane_id}
                 onSelect={() => onSelectPane(group.bridgeId, pane)}
                 onMenu={(x, y) =>
@@ -5220,11 +5244,11 @@ function Switcher({
                     <Plus size={14} />
                   </button>
                 ) : null}
-                {sidebarView === "agents" && agentPinsSupported ? (
+                {showPinnedOnlyControl ? (
                   <button
                     className="sec-add sec-add-pin"
                     type="button"
-                    aria-label="Show pinned agents only"
+                    aria-label={`Show ${pinnedOnlyLabel} only`}
                     title="Pinned only"
                     aria-pressed={agentPinnedOnly}
                     data-on={agentPinnedOnly}
@@ -5301,8 +5325,14 @@ function Switcher({
                   <>{renderDisconnectedBridgeRows()}</>
                 ) : (
                 <div className="empty">
-                  <strong>No panes</strong>
-                  <span>{scope === "space" ? "This space has no panes yet." : "No workspace has panes yet."}</span>
+                  <strong>{effectiveAgentPinnedOnly ? "No pinned panes" : "No panes"}</strong>
+                  <span>
+                    {effectiveAgentPinnedOnly
+                      ? ""
+                      : scope === "space"
+                        ? "This space has no panes yet."
+                        : "No workspace has panes yet."}
+                  </span>
                 </div>
                 )
               ) : (
@@ -6287,12 +6317,14 @@ function TabDivider({
 
 function PaneRow({
   pane,
+  pinned,
   active,
   index,
   onSelect,
   onMenu,
 }: {
   pane: PaneInfo;
+  pinned?: boolean;
   active: boolean;
   index: number;
   onSelect: () => void;
@@ -6318,6 +6350,9 @@ function PaneRow({
         <span className="pane-word" data-status={pane.agent_status}>
           {statusLabel(pane.agent_status)}
         </span>
+      ) : null}
+      {pinned ? (
+        <Pin className="agent-pin-indicator" size={10} aria-label="Pinned" />
       ) : null}
     </button>
   );
