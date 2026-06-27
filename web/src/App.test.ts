@@ -12,11 +12,13 @@ import {
   resolveInitialSelectedBridgeId,
   shouldBlockDirtyNoteAutosave,
   shouldCollapseHostScope,
+  shouldShowLastStatusChangeSort,
   sortScopedAgentPanes,
   stableBridgeRefreshOffsetMs,
 } from "./App";
 import type { BridgeConnectionView } from "./App";
 import type { BridgeRuntime } from "./bridge";
+import { agentActivityKey } from "./agentActivity";
 import {
   currentConnectionSnapshot,
   isConnectionResultCurrent,
@@ -235,6 +237,150 @@ describe("App multi-bridge helpers", () => {
     ).toEqual(["pane-b", "pane-a"]);
   });
 
+  it("sorts agents by last status change", () => {
+    const snapshot = multiPaneSnapshot(
+      [workspace("workspace-a", 1)],
+      [
+        pane("pane-a", "workspace-a", "tab-a", "idle"),
+        pane("pane-b", "workspace-a", "tab-a", "idle"),
+        pane("pane-c", "workspace-a", "tab-a", "idle"),
+      ],
+    );
+    const bridgeViews = [bridgeView("bridge-a", snapshot)];
+    const scopedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViews,
+      "bridge-a",
+      "selected",
+      "all",
+      null,
+      {},
+    );
+    const activity = new Map([
+      [agentActivityKey("bridge-a", "pane-a", "pane-a-terminal"), 100],
+      [agentActivityKey("bridge-a", "pane-b", "pane-b-terminal"), 300],
+    ]);
+
+    expect(
+      buildVisibleAgentPaneEntries(
+        scopedWorkspaces,
+        bridgeViews,
+        "selected",
+        "none",
+        "lastStatusChange",
+        new Set(),
+        false,
+        activity,
+      ).map((item) => item.pane.pane_id),
+    ).toEqual(["pane-b", "pane-a", "pane-c"]);
+  });
+
+  it("keeps pinned agents before last-status-change sorting", () => {
+    const snapshot = multiPaneSnapshot(
+      [workspace("workspace-a", 1)],
+      [
+        pane("pane-a", "workspace-a", "tab-a", "idle"),
+        pane("pane-b", "workspace-a", "tab-a", "idle"),
+      ],
+    );
+    const bridgeViews = [bridgeView("bridge-a", snapshot)];
+    const scopedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViews,
+      "bridge-a",
+      "selected",
+      "all",
+      null,
+      {},
+    );
+    const activity = new Map([
+      [agentActivityKey("bridge-a", "pane-a", "pane-a-terminal"), 100],
+      [agentActivityKey("bridge-a", "pane-b", "pane-b-terminal"), 300],
+    ]);
+
+    expect(
+      buildVisibleAgentPaneEntries(
+        scopedWorkspaces,
+        bridgeViews,
+        "selected",
+        "none",
+        "lastStatusChange",
+        new Set(["bridge-a:pane-a"]),
+        false,
+        activity,
+      ).map((item) => item.pane.pane_id),
+    ).toEqual(["pane-a", "pane-b"]);
+  });
+
+  it("does not reorder workspace groups for last status change", () => {
+    const snapshot = multiPaneSnapshot(
+      [workspace("workspace-a", 1), workspace("workspace-b", 2)],
+      [
+        pane("pane-a", "workspace-a", "tab-a", "idle"),
+        pane("pane-b", "workspace-b", "tab-b", "idle"),
+      ],
+    );
+    const bridgeViews = [bridgeView("bridge-a", snapshot)];
+    const scopedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViews,
+      "bridge-a",
+      "selected",
+      "all",
+      null,
+      {},
+    );
+    const activity = new Map([
+      [agentActivityKey("bridge-a", "pane-a", "pane-a-terminal"), 100],
+      [agentActivityKey("bridge-a", "pane-b", "pane-b-terminal"), 500],
+    ]);
+
+    expect(
+      buildVisibleAgentPaneEntries(
+        scopedWorkspaces,
+        bridgeViews,
+        "selected",
+        "workspace",
+        "lastStatusChange",
+        new Set(),
+        false,
+        activity,
+      ).map((item) => `${item.workspace?.workspace_id}:${item.pane.pane_id}`),
+    ).toEqual(["workspace-a:pane-a", "workspace-b:pane-b"]);
+  });
+
+  it("gates the last-status sort option on capability or persisted selection", () => {
+    expect(shouldShowLastStatusChangeSort(true, "attention")).toBe(true);
+    expect(shouldShowLastStatusChangeSort(false, "attention")).toBe(false);
+    expect(shouldShowLastStatusChangeSort(false, "lastStatusChange")).toBe(true);
+  });
+
+  it("keeps existing sort row order stable across agent grouping modes and host scopes", () => {
+    const bridgeViews = agentParityBridgeViews();
+
+    for (const hostScope of ["selected", "all"] as const) {
+      const scopedWorkspaces = buildVisibleScopedWorkspaces(
+        bridgeViews,
+        "bridge-a",
+        hostScope,
+        "all",
+        null,
+        {},
+      );
+      for (const sort of ["attention", "status", "workspace"] as const) {
+        const expected = visibleAgentPaneOrder(
+          scopedWorkspaces,
+          bridgeViews,
+          hostScope,
+          "none",
+          sort,
+        );
+        for (const group of ["none", "host", "workspace", "hostWorkspace"] as const) {
+          expect(
+            visibleAgentPaneOrder(scopedWorkspaces, bridgeViews, hostScope, group, sort),
+          ).toEqual(expected);
+        }
+      }
+    }
+  });
+
   it("filters agents to pinned rows without reordering groups", () => {
     const snapshot = multiPaneSnapshot(
       [workspace("workspace-a", 1), workspace("workspace-b", 2)],
@@ -307,6 +453,40 @@ describe("App multi-bridge helpers", () => {
         (item) => `${item.bridgeId}:${item.tab.tab_id}`,
       ),
     ).toEqual(["bridge-a:tab-a", "bridge-b:tab-b"]);
+  });
+
+  it("filters tab entries to pinned panes", () => {
+    const snapshot = multiPaneSnapshot(
+      [workspace("workspace-a", 1)],
+      [
+        pane("pane-a", "workspace-a", "tab-a"),
+        pane("pane-b", "workspace-a", "tab-a"),
+        pane("pane-c", "workspace-a", "tab-b"),
+      ],
+    );
+    const bridgeViews = [bridgeView("bridge-a", snapshot)];
+    const scopedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViews,
+      "bridge-a",
+      "selected",
+      "all",
+      null,
+      {},
+    );
+
+    expect(
+      buildVisibleTabEntries(
+        scopedWorkspaces,
+        bridgeViews,
+        "selected",
+        "none",
+        new Set(["bridge-a:pane-b"]),
+        true,
+      ).map((entry) => ({
+        tab: entry.tab.tab_id,
+        panes: entry.panes.map((item) => item.pane_id),
+      })),
+    ).toEqual([{ tab: "tab-a", panes: ["pane-b"] }]);
   });
 
   it("navigates visible agent entries with fallback and wrap-around", () => {
@@ -666,6 +846,40 @@ function bridgeView(bridgeId: string, snapshot: Snapshot): BridgeConnectionView 
     snapshot,
     loadState: "ready",
   };
+}
+
+function agentParityBridgeViews(): BridgeConnectionView[] {
+  return [
+    bridgeView(
+      "bridge-a",
+      multiPaneSnapshot(
+        [workspace("workspace-a", 1), workspace("workspace-b", 2)],
+        [
+          pane("pane-a", "workspace-a", "tab-a", "blocked"),
+          pane("pane-b", "workspace-b", "tab-b", "working"),
+        ],
+      ),
+    ),
+    bridgeView(
+      "bridge-b",
+      multiPaneSnapshot(
+        [workspace("workspace-a", 1)],
+        [pane("pane-c", "workspace-a", "tab-c", "idle")],
+      ),
+    ),
+  ];
+}
+
+function visibleAgentPaneOrder(
+  scopedWorkspaces: ReturnType<typeof buildVisibleScopedWorkspaces>,
+  bridgeViews: BridgeConnectionView[],
+  hostScope: "selected" | "all",
+  group: "none" | "host" | "workspace" | "hostWorkspace",
+  sort: "attention" | "status" | "workspace",
+) {
+  return buildVisibleAgentPaneEntries(scopedWorkspaces, bridgeViews, hostScope, group, sort).map(
+    (item) => `${item.bridgeId}:${item.pane.pane_id}`,
+  );
 }
 
 function bridgeRuntime(bridgeId: string): BridgeRuntime {

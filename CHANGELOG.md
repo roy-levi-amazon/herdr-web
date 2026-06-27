@@ -6,6 +6,9 @@
 
 ### Added
 
+- Added bridge-tracked agent status transition activity with an Agents view sort option for
+  `Last status change`, using semantic status changes rather than terminal output activity.
+  [PR #23](https://github.com/kcosr/herdr-web/pull/23)
 - Added server-side agent pins with pinned-first agent ordering, a pinned-only sidebar toggle, and
   a selected-pane header toggle plus a small pinned indicator on pinned agent rows.
   [PR #22](https://github.com/kcosr/herdr-web/pull/22)
@@ -20,6 +23,9 @@
   the Markdown renderer lazy-loaded until preview is used. [PR #20](https://github.com/kcosr/herdr-web/pull/20)
 
 ### Changed
+
+- Extended the pinned-only sidebar toggle to the Tabs view so pinned panes can be found outside the
+  Agents view.
 
 ### Fixed
 
