@@ -7,7 +7,7 @@
 ### Added
 
 - Added server-side agent pins with pinned-first agent ordering, a pinned-only sidebar toggle, and
-  a small pinned indicator on pinned agent rows.
+  a selected-pane header toggle plus a small pinned indicator on pinned agent rows.
   [PR #22](https://github.com/kcosr/herdr-web/pull/22)
 - Added bridge-owned pane notes with a sidebar Notes view, desktop/mobile notes editor, pane
   attachment recovery states, and per-bridge note synchronization. Notes are exposed through the
