@@ -1526,11 +1526,17 @@ export function App() {
     () => snapshot?.panes.find((pane) => pane.pane_id === resolvedPaneId) ?? null,
     [snapshot, resolvedPaneId],
   );
+  const selectedAgentPinsState =
+    selectedRuntime &&
+    agentPinsStates[selectedRuntime.id]?.connectionKey === selectedRuntime.connectionKey
+      ? agentPinsStates[selectedRuntime.id]
+      : null;
   const selectedPanePinsSupported = Boolean(
     selectedRuntime?.canConnect &&
       selectedRuntime.capabilityState === "ready" &&
       selectedPane &&
-      supportsAgentPins(selectedRuntime.capabilities),
+      supportsAgentPins(selectedRuntime.capabilities) &&
+      selectedAgentPinsState?.response,
   );
   const selectedPanePinned =
     selectedRuntime && selectedPane
