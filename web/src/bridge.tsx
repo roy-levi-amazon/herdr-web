@@ -36,6 +36,9 @@ export type BridgeMode = "same-origin" | "configured";
 
 export type BridgeCapabilities = {
   commands: string[];
+  agent_pins?: {
+    version: 1;
+  };
   notes?: {
     version: 1;
   };
@@ -1061,6 +1064,10 @@ export function parseCapabilities(value: unknown): BridgeCapabilities {
     web_compat: typeof value.web_compat === "number" ? value.web_compat : undefined,
     min_android_app_compat:
       typeof value.min_android_app_compat === "number" ? value.min_android_app_compat : undefined,
+    agent_pins:
+      isRecord(value.agent_pins) && value.agent_pins.version === 1
+        ? { version: 1 }
+        : undefined,
     notes:
       isRecord(value.notes) && value.notes.version === 1
         ? { version: 1 }

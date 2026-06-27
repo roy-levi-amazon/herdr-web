@@ -43,6 +43,7 @@ use herdr_compat::protocol::{
     PROTOCOL_VERSION,
 };
 
+use crate::agent_pins::{AgentPinsError, AgentPinsListResponse, AgentPinsManager};
 use crate::notes::{
     AttachNoteRequest, CreateNoteRequest, NoteResponse, NotesError, NotesListQuery,
     NotesListResponse, NotesManager, RevisionRequest, UpdateNoteRequest,
@@ -86,6 +87,7 @@ struct BridgeState {
     request_policy: RequestPolicy,
     terminal_sessions: Arc<Mutex<HashMap<String, SharedTerminalSession>>>,
     selected_pane_id: Arc<Mutex<Option<String>>>,
+    agent_pins: Arc<AgentPinsManager>,
     notes: Arc<NotesManager>,
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
     activity_tx: tokio::sync::broadcast::Sender<ActivityMessage>,
@@ -127,7 +129,13 @@ struct SnapshotTabInfo {
 #[derive(Debug, Serialize)]
 struct Capabilities {
     commands: &'static [&'static str],
+    agent_pins: AgentPinsCapability,
     notes: NotesCapability,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentPinsCapability {
+    version: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -585,6 +593,16 @@ impl From<NotesError> for BridgeError {
     }
 }
 
+impl From<AgentPinsError> for BridgeError {
+    fn from(err: AgentPinsError) -> Self {
+        match err {
+            AgentPinsError::BadRequest(message) => Self::BadRequest(message),
+            AgentPinsError::Io(err) => Self::Io(err),
+            AgentPinsError::Store(message) => Self::Protocol(message),
+        }
+    }
+}
+
 impl IntoResponse for UploadError {
     fn into_response(self) -> Response {
         let (status, body) = match self {
@@ -777,6 +795,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         );
     }
     ensure_upload_dir(&options.upload_dir)?;
+    let agent_pins = Arc::new(AgentPinsManager::new()?);
     let notes = Arc::new(NotesManager::new()?);
     let request_policy = RequestPolicy {
         bind_host: options.host.clone(),
@@ -797,12 +816,26 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         request_policy: request_policy.clone(),
         terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
         selected_pane_id: Arc::new(Mutex::new(None)),
+        agent_pins,
         notes,
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
         activity_tx: tokio::sync::broadcast::channel(512).0,
         upload_dir: options.upload_dir.clone(),
     };
     spawn_agent_activity_watcher(state.clone());
+    let agent_pins_routes = Router::new()
+        .route(
+            "/api/agent-pins",
+            get(agent_pins_list_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/agent-pins/{pane_id}/pin",
+            post(agent_pins_pin_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/agent-pins/{pane_id}/unpin",
+            post(agent_pins_unpin_handler).options(preflight_handler),
+        );
     let notes_routes = Router::new()
         .route(
             "/api/notes",
@@ -836,6 +869,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         )
         .layer(DefaultBodyLimit::max(MAX_NOTES_REQUEST_BYTES));
     let app = Router::new()
+        .merge(agent_pins_routes)
         .merge(notes_routes)
         .route(
             "/api/snapshot",
@@ -1854,8 +1888,55 @@ async fn capabilities_handler(
     ensure_allowed_request(&headers, &state.request_policy)?;
     Ok(Json(Capabilities {
         commands: ALLOWED_COMMANDS,
+        agent_pins: AgentPinsCapability { version: 1 },
         notes: NotesCapability { version: 1 },
     }))
+}
+
+async fn agent_pins_list_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Result<Json<AgentPinsListResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    Ok(Json(
+        run_agent_pins_task(state, move |state| {
+            let panes = current_panes(&state.api)?;
+            Ok(state.agent_pins.list(&panes)?)
+        })
+        .await?,
+    ))
+}
+
+async fn agent_pins_pin_handler(
+    State(state): State<BridgeState>,
+    AxumPath(pane_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Json<AgentPinsListResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let event_pane_id = pane_id.clone();
+    let response = run_agent_pins_task(state.clone(), move |state| {
+        let panes = current_panes(&state.api)?;
+        Ok(state.agent_pins.pin(&pane_id, &panes)?)
+    })
+    .await?;
+    broadcast_agent_pins_changed(&state, Some(&event_pane_id));
+    Ok(Json(response))
+}
+
+async fn agent_pins_unpin_handler(
+    State(state): State<BridgeState>,
+    AxumPath(pane_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Json<AgentPinsListResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let event_pane_id = pane_id.clone();
+    let response = run_agent_pins_task(state.clone(), move |state| {
+        let panes = current_panes(&state.api)?;
+        Ok(state.agent_pins.unpin(&pane_id, &panes)?)
+    })
+    .await?;
+    broadcast_agent_pins_changed(&state, Some(&event_pane_id));
+    Ok(Json(response))
 }
 
 async fn notes_list_handler(
@@ -1984,6 +2065,16 @@ async fn notes_delete_handler(
     Ok(Json(note))
 }
 
+async fn run_agent_pins_task<T, F>(state: BridgeState, task: F) -> Result<T, BridgeError>
+where
+    T: Send + 'static,
+    F: FnOnce(BridgeState) -> Result<T, BridgeError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || task(state))
+        .await
+        .map_err(|err| BridgeError::Protocol(err.to_string()))?
+}
+
 async fn run_notes_task<T, F>(state: BridgeState, task: F) -> Result<T, BridgeError>
 where
     T: Send + 'static,
@@ -1992,6 +2083,16 @@ where
     tokio::task::spawn_blocking(move || task(state))
         .await
         .map_err(|err| BridgeError::Protocol(err.to_string()))?
+}
+
+fn broadcast_agent_pins_changed(state: &BridgeState, pane_id: Option<&str>) {
+    let mut payload = serde_json::json!({
+        "type": "herdr_web.agent_pins_changed",
+    });
+    if let Some(pane_id) = pane_id {
+        payload["pane_id"] = serde_json::json!(pane_id);
+    }
+    let _ = state.ui_event_tx.send(payload.to_string());
 }
 
 fn broadcast_notes_changed(state: &BridgeState, note_id: Option<&str>, revision: Option<u64>) {

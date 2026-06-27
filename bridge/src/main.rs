@@ -1,3 +1,4 @@
+mod agent_pins;
 mod notes;
 mod session;
 mod web_bridge;

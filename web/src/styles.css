@@ -700,6 +700,13 @@ button {
   color: var(--subtext1);
 }
 
+.agent-pin-indicator {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  color: var(--overlay1);
+}
+
 .agent-icon-claude {
   color: #d97757;
 }
@@ -931,6 +938,12 @@ button {
   color: var(--overlay1);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.stage-pin-button[data-on="true"] {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 11%, transparent);
 }
 
 .badge {
@@ -2044,6 +2057,16 @@ button {
   border-color: var(--surface1);
   color: var(--text);
   background: var(--surface0);
+}
+
+.sec-add[data-on="true"] {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.sec-add-pin svg {
+  transform: translateX(-1px);
 }
 
 .tab-head {

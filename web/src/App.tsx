@@ -4,6 +4,7 @@ import {
   Link2,
   MoreVertical,
   PanelLeft,
+  Pin,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -37,6 +38,15 @@ import type {
 import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 import { AgentIcon, agentIconKind } from "./AgentIcon";
+import {
+  agentPinKey,
+  agentPinKeys,
+  fetchAgentPins,
+  pinAgent,
+  supportsAgentPins,
+  unpinAgent,
+} from "./agentPins";
+import type { AgentPinsListResponse } from "./agentPins";
 import { applyActivityMessage, parseActivityEventData, replayActivityMessages } from "./activity";
 import type { ActivityLogEntry } from "./activity";
 import { BackendSettingsDialog } from "./BackendSettingsDialog";
@@ -178,6 +188,12 @@ type BridgeNotesState = {
   loadState: LoadState;
   error: string | null;
 };
+type BridgeAgentPinsState = {
+  connectionKey: string;
+  response: AgentPinsListResponse | null;
+  loadState: LoadState;
+  error: string | null;
+};
 export type BridgeConnectionRef = {
   connectionKey: string;
   snapshot: Snapshot | null;
@@ -195,6 +211,7 @@ export type ScopedAgentPane = {
   workspace?: WorkspaceInfo;
   tabNumber?: number;
   tabLabel?: string;
+  pinned?: boolean;
 };
 type ScopedWorkspace = {
   bridgeId: BridgeId;
@@ -254,6 +271,7 @@ type MenuState = {
   x: number;
   y: number;
   clearable?: boolean;
+  pinLabel?: "agent" | "pane";
 };
 type DialogState = {
   mode: "rename" | "close";
@@ -269,6 +287,7 @@ type DisplayPrefs = {
   sidebarView: SidebarView;
   agentSort: AgentSort;
   agentGroup: AgentGroup;
+  agentPinnedOnly: boolean;
   sidebarWidth: number;
   notesPanelWidth: number;
   notesListPaneWidth: number;
@@ -322,6 +341,7 @@ function readDisplayPrefs(): DisplayPrefs {
     sidebarView: "agents",
     agentSort: "attention",
     agentGroup: "none",
+    agentPinnedOnly: false,
     sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
     notesPanelWidth: DEFAULT_NOTES_PANEL_WIDTH,
     notesListPaneWidth: DEFAULT_NOTES_LIST_PANE_WIDTH,
@@ -417,6 +437,10 @@ function parseDisplayPrefsValue(
       parsed.agentGroup === "hostWorkspace"
         ? parsed.agentGroup
         : fallback.agentGroup,
+    agentPinnedOnly:
+      typeof parsed.agentPinnedOnly === "boolean"
+        ? parsed.agentPinnedOnly
+        : fallback.agentPinnedOnly,
     sidebarWidth,
     notesPanelWidth,
     notesListPaneWidth:
@@ -527,6 +551,10 @@ function readLegacyDisplayPrefs(fallback: DisplayPrefs): DisplayPrefs {
         parsed.agentGroup === "hostWorkspace"
           ? parsed.agentGroup
           : fallback.agentGroup,
+      agentPinnedOnly:
+        typeof parsed.agentPinnedOnly === "boolean"
+          ? parsed.agentPinnedOnly
+          : fallback.agentPinnedOnly,
       sidebarWidth,
       notesPanelWidth,
       notesListPaneWidth:
@@ -714,6 +742,7 @@ export function App() {
   const legacySelectionPrefs = useMemo(readLegacyDisplaySelectionPrefs, []);
   const [displayPrefsLoaded, setDisplayPrefsLoaded] = useState(() => !isNativeApp());
   const [connectionStates, setConnectionStates] = useState<Record<string, BridgeConnectionState>>({});
+  const [agentPinsStates, setAgentPinsStates] = useState<Record<string, BridgeAgentPinsState>>({});
   const [notesStates, setNotesStates] = useState<Record<string, BridgeNotesState>>({});
   const [selectedBridgeId, setSelectedBridgeId] = useState<BridgeId | null>(
     initialPrefs.selectedBridgeId,
@@ -741,6 +770,7 @@ export function App() {
   const [sidebarView, setSidebarView] = useState<SidebarView>(initialPrefs.sidebarView);
   const [agentSort, setAgentSort] = useState<AgentSort>(initialPrefs.agentSort);
   const [agentGroup, setAgentGroup] = useState<AgentGroup>(initialPrefs.agentGroup);
+  const [agentPinnedOnly, setAgentPinnedOnly] = useState(initialPrefs.agentPinnedOnly);
   const [sidebarWidth, setSidebarWidth] = useState(initialPrefs.sidebarWidth);
   const [notesPanelWidth, setNotesPanelWidth] = useState(initialPrefs.notesPanelWidth);
   const [notesListPaneWidth, setNotesListPaneWidth] = useState(initialPrefs.notesListPaneWidth);
@@ -840,6 +870,7 @@ export function App() {
       setSidebarView(prefs.sidebarView);
       setAgentSort(prefs.agentSort);
       setAgentGroup(prefs.agentGroup);
+      setAgentPinnedOnly(prefs.agentPinnedOnly);
       setSidebarWidth(prefs.sidebarWidth);
       setNotesPanelWidth(prefs.notesPanelWidth);
       setNotesListPaneWidth(prefs.notesListPaneWidth);
@@ -925,6 +956,14 @@ export function App() {
       }),
     [bridge.enabledRuntimes, connectionStates],
   );
+  const pinnedAgentKeys = useMemo(
+    () => buildAgentPinKeySet(bridgeViews, agentPinsStates),
+    [agentPinsStates, bridgeViews],
+  );
+  const effectiveAgentPinnedOnly =
+    visibleHostBridgeViews(bridgeViews, selectedBridgeId, hostScope).some((view) =>
+      supportsAgentPins(view.runtime.capabilities),
+    ) && agentPinnedOnly;
   const selectedRuntime = useMemo(
     () =>
       selectedBridgeId
@@ -980,7 +1019,28 @@ export function App() {
   );
   const menuSupportedCommands = menuCommandsReady ? (menuRuntime?.capabilities?.commands ?? []) : [];
   const menuPaneMoveSupported = menuSupportedCommands.includes("pane.move");
-  const activeMenuItems = menu ? menuItems(menu.kind, menuPaneMoveSupported, menuCommandsReady) : [];
+  const menuAgentPinsSupported = Boolean(
+    menu &&
+      menu.kind === "pane" &&
+      menu.pinLabel &&
+      menuRuntime?.canConnect &&
+      menuRuntime.capabilityState === "ready" &&
+      supportsAgentPins(menuRuntime.capabilities),
+  );
+  const menuPinLabel = menu?.pinLabel ?? "pane";
+  const menuPanePinned = menu
+    ? isAgentPinned(pinnedAgentKeys, menu.bridgeId, menu.id)
+    : false;
+  const activeMenuItems = menu
+    ? menuItems(
+        menu.kind,
+        menuPaneMoveSupported,
+        menuCommandsReady,
+        menuAgentPinsSupported,
+        menuPanePinned,
+        menuPinLabel,
+      )
+    : [];
 
   useEffect(() => {
     if (menu && activeMenuItems.length === 0) {
@@ -1149,6 +1209,7 @@ export function App() {
       sidebarView,
       agentSort,
       agentGroup,
+      agentPinnedOnly,
       sidebarWidth,
       notesPanelWidth,
       notesListPaneWidth,
@@ -1182,6 +1243,7 @@ export function App() {
     sidebarView,
     agentSort,
     agentGroup,
+    agentPinnedOnly,
     sidebarWidth,
     notesPanelWidth,
     notesListPaneWidth,
@@ -1406,6 +1468,18 @@ export function App() {
       }
       return changed ? next : current;
     });
+    setAgentPinsStates((current) => {
+      let changed = false;
+      const next: Record<string, BridgeAgentPinsState> = {};
+      for (const [bridgeId, state] of Object.entries(current)) {
+        if (activeBridgeIds.has(bridgeId)) {
+          next[bridgeId] = state;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
   }, [bridge.enabledRuntimes]);
 
   useEffect(() => {
@@ -1452,6 +1526,26 @@ export function App() {
     () => snapshot?.panes.find((pane) => pane.pane_id === resolvedPaneId) ?? null,
     [snapshot, resolvedPaneId],
   );
+  const selectedAgentPinsState =
+    selectedRuntime &&
+    agentPinsStates[selectedRuntime.id]?.connectionKey === selectedRuntime.connectionKey
+      ? agentPinsStates[selectedRuntime.id]
+      : null;
+  const selectedPanePinsSupported = Boolean(
+    selectedRuntime?.canConnect &&
+      selectedRuntime.capabilityState === "ready" &&
+      selectedPane &&
+      supportsAgentPins(selectedRuntime.capabilities) &&
+      selectedAgentPinsState?.response,
+  );
+  const selectedPanePinned =
+    selectedRuntime && selectedPane
+      ? isAgentPinned(pinnedAgentKeys, selectedRuntime.id, selectedPane.pane_id)
+      : false;
+  const selectedPanePinTarget = selectedPane && isAgentPane(selectedPane) ? "agent" : "pane";
+  const selectedPanePinTitle = selectedPanePinned
+    ? `Unpin ${selectedPanePinTarget}`
+    : `Pin ${selectedPanePinTarget}`;
   const selectedNotesState =
     selectedRuntime && notesStates[selectedRuntime.id]?.connectionKey === selectedRuntime.connectionKey
       ? notesStates[selectedRuntime.id]
@@ -1496,6 +1590,7 @@ export function App() {
         label: paneTitle(selectedPane),
         x,
         y,
+        pinLabel: isAgentPane(selectedPane) ? "agent" : "pane",
       });
     }
   });
@@ -2124,6 +2219,8 @@ export function App() {
           hostScope,
           agentGroup,
           agentSort,
+          pinnedAgentKeys,
+          effectiveAgentPinnedOnly,
         );
         if (agentEntries.length === 0) {
           return;
@@ -2190,6 +2287,7 @@ export function App() {
   }, [
     activeSpace,
     activeWorkspacesByBridgeId,
+    effectiveAgentPinnedOnly,
     agentGroup,
     agentSort,
     bridgeViews,
@@ -2200,6 +2298,7 @@ export function App() {
     launchTarget,
     menu,
     paneFocusSupported,
+    pinnedAgentKeys,
     scope,
     selectedPane,
     selectedRuntime,
@@ -2271,6 +2370,97 @@ export function App() {
       return null;
     }
   }
+
+  async function refreshBridgeAgentPins(runtime: BridgeRuntime, setLoading: boolean) {
+    ensureBridgeConnectionRef(connectionRefs, runtime);
+    const requestConnectionKey = runtime.connectionKey;
+    const isCurrentConnection = () =>
+      isConnectionResultCurrent(
+        connectionRefs.current[runtime.id]?.connectionKey ?? "",
+        requestConnectionKey,
+      );
+    if (
+      !runtime.canConnect ||
+      runtime.capabilityState !== "ready" ||
+      !supportsAgentPins(runtime.capabilities)
+    ) {
+      setAgentPinsStates((current) => ({
+        ...current,
+        [runtime.id]: {
+          connectionKey: requestConnectionKey,
+          response: null,
+          loadState: "ready",
+          error: null,
+        },
+      }));
+      return null;
+    }
+    if (setLoading) {
+      setAgentPinsStates((current) => ({
+        ...current,
+        [runtime.id]: {
+          connectionKey: requestConnectionKey,
+          response:
+            current[runtime.id]?.connectionKey === requestConnectionKey
+              ? current[runtime.id]?.response ?? null
+              : null,
+          loadState: "loading",
+          error: null,
+        },
+      }));
+    }
+    try {
+      const response = await fetchAgentPins(runtime.httpUrl);
+      setAgentPinsStates((current) => {
+        if (!isCurrentConnection()) {
+          return current;
+        }
+        return {
+          ...current,
+          [runtime.id]: {
+            connectionKey: requestConnectionKey,
+            response,
+            loadState: "ready",
+            error: null,
+          },
+        };
+      });
+      return response;
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Agent pins unavailable";
+      if (!isCurrentConnection()) {
+        return null;
+      }
+      setAgentPinsStates((current) => ({
+        ...current,
+        [runtime.id]: {
+          connectionKey: requestConnectionKey,
+          response:
+            current[runtime.id]?.connectionKey === requestConnectionKey
+              ? current[runtime.id]?.response ?? null
+              : null,
+          loadState: "error",
+          error: message,
+        },
+      }));
+      return null;
+    }
+  }
+
+  const refreshAgentPinsForBridge = (bridgeId: BridgeId) => {
+    const runtime = bridge.getRuntime(bridgeId);
+    if (runtime) {
+      void refreshBridgeAgentPins(runtime, false);
+    }
+  };
+
+  useEffect(() => {
+    for (const runtime of bridge.enabledRuntimes) {
+      if (runtime.capabilityState === "ready" && supportsAgentPins(runtime.capabilities)) {
+        void refreshBridgeAgentPins(runtime, true);
+      }
+    }
+  }, [bridge.enabledRuntimes]);
 
   async function refreshBridgeNotes(runtime: BridgeRuntime, setLoading: boolean) {
     ensureBridgeConnectionRef(connectionRefs, runtime);
@@ -2459,6 +2649,37 @@ export function App() {
     }
   }
 
+  async function toggleAgentPin(bridgeId: BridgeId, paneId: string, pinned: boolean) {
+    const runtime = bridge.getRuntime(bridgeId);
+    if (
+      !runtime ||
+      !runtime.canConnect ||
+      runtime.capabilityState !== "ready" ||
+      !supportsAgentPins(runtime.capabilities)
+    ) {
+      setError("Agent pins are unavailable");
+      return;
+    }
+    const requestConnectionKey = runtime.connectionKey;
+    try {
+      const response = pinned
+        ? await unpinAgent(runtime.httpUrl, paneId)
+        : await pinAgent(runtime.httpUrl, paneId);
+      setAgentPinsStates((current) => ({
+        ...current,
+        [runtime.id]: {
+          connectionKey: requestConnectionKey,
+          response,
+          loadState: "ready",
+          error: null,
+        },
+      }));
+      setError(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not update agent pin");
+    }
+  }
+
   const onMenuPick = (key: string) => {
     if (!menu) {
       return;
@@ -2478,6 +2699,10 @@ export function App() {
         current[bridgeId] === id ? current : { ...current, [bridgeId]: id },
       );
       setLaunchTarget({ mode: "tab", workspaceId: id, bridgeId });
+    } else if (key === "pin" && kind === "pane") {
+      void toggleAgentPin(bridgeId, id, false);
+    } else if (key === "unpin" && kind === "pane") {
+      void toggleAgentPin(bridgeId, id, true);
     } else if (key === "move_new_tab" && kind === "pane") {
       const pane = connectionRefs.current[bridgeId]?.snapshot?.panes.find(
         (item) => item.pane_id === id,
@@ -2620,6 +2845,7 @@ export function App() {
           connectionRefs={connectionRefs}
           setConnectionStates={setConnectionStates}
           onPaneSelection={rememberPaneSelection}
+          onAgentPinsChanged={refreshAgentPinsForBridge}
           onNotesChanged={refreshNotesForBridge}
         />
       ))}
@@ -2641,6 +2867,8 @@ export function App() {
           notesStates={notesStates}
           visibleNotes={visibleNotes}
           selectedNote={selectedScopedNote}
+          pinnedAgentKeys={pinnedAgentKeys}
+          agentPinnedOnly={agentPinnedOnly}
           agentSort={agentSort}
           agentGroup={agentGroup}
           activeSpace={activeSpace}
@@ -2651,6 +2879,7 @@ export function App() {
           onSidebarView={setSidebarView}
           onSelectNote={selectNote}
           onCreateNote={() => void createDetachedBridgeNote()}
+          onAgentPinnedOnly={setAgentPinnedOnly}
           onAgentSort={setAgentSort}
           onAgentGroup={setAgentGroup}
           onSelectBridge={setSelectedBridgeId}
@@ -2679,8 +2908,8 @@ export function App() {
               ? setMenu({ kind, bridgeId: selectedRuntime.id, id, label, x, y, clearable })
               : undefined
           }
-          onScopedMenu={(kind, bridgeId, id, label, x, y, clearable) =>
-            setMenu({ kind, bridgeId, id, label, x, y, clearable })
+          onScopedMenu={(kind, bridgeId, id, label, x, y, clearable, pinLabel) =>
+            setMenu({ kind, bridgeId, id, label, x, y, clearable, pinLabel })
           }
         />
         <div
@@ -2833,6 +3062,21 @@ export function App() {
               onClick={openNotesPanel}
             >
               <StickyNote size={18} />
+            </button>
+          ) : null}
+          {selectedPane && selectedRuntime && selectedPanePinsSupported ? (
+            <button
+              className="icon-btn stage-pin-button"
+              type="button"
+              aria-label={selectedPanePinTitle}
+              title={selectedPanePinTitle}
+              aria-pressed={selectedPanePinned}
+              data-on={selectedPanePinned}
+              onClick={() =>
+                void toggleAgentPin(selectedRuntime.id, selectedPane.pane_id, selectedPanePinned)
+              }
+            >
+              <Pin size={16} />
             </button>
           ) : null}
           {selectedPane ? (
@@ -3168,16 +3412,19 @@ export function BridgeConnectionController({
   connectionRefs,
   setConnectionStates,
   onPaneSelection,
+  onAgentPinsChanged,
   onNotesChanged,
 }: {
   runtime: BridgeRuntime;
   connectionRefs: MutableRefObject<Record<string, BridgeConnectionRef>>;
   setConnectionStates: Dispatch<SetStateAction<Record<string, BridgeConnectionState>>>;
   onPaneSelection: (bridgeId: BridgeId, paneId: string, workspaceId?: string) => void;
+  onAgentPinsChanged: (bridgeId: BridgeId) => void;
   onNotesChanged: (bridgeId: BridgeId) => void;
 }) {
   const httpUrlRef = useRef(runtime.httpUrl);
   const wsUrlRef = useRef(runtime.wsUrl);
+  const onAgentPinsChangedRef = useRef(onAgentPinsChanged);
   const onNotesChangedRef = useRef(onNotesChanged);
   const refreshOffsetRef = useRef(stableBridgeRefreshOffsetMs(runtime.id));
 
@@ -3187,8 +3434,9 @@ export function BridgeConnectionController({
   }, [runtime.httpUrl, runtime.wsUrl]);
 
   useEffect(() => {
+    onAgentPinsChangedRef.current = onAgentPinsChanged;
     onNotesChangedRef.current = onNotesChanged;
-  }, [onNotesChanged]);
+  }, [onAgentPinsChanged, onNotesChanged]);
 
   useEffect(() => {
     let disposed = false;
@@ -3345,6 +3593,10 @@ export function BridgeConnectionController({
         onNotesChangedRef.current(runtime.id);
         return;
       }
+      if (isAgentPinsChangedEvent(event)) {
+        onAgentPinsChangedRef.current(runtime.id);
+        return;
+      }
       refresh();
     });
 
@@ -3437,6 +3689,46 @@ export function activeWorkspaceForBridgeView(
   );
 }
 
+const EMPTY_AGENT_PIN_KEYS = new Set<string>();
+
+export function isAgentPinned(
+  pinnedAgentKeys: ReadonlySet<string>,
+  bridgeId: BridgeId,
+  paneId: string,
+) {
+  return pinnedAgentKeys.has(agentPinKey(bridgeId, paneId));
+}
+
+export function buildAgentPinKeySet(
+  bridgeViews: BridgeConnectionView[],
+  agentPinsStates: Record<string, BridgeAgentPinsState>,
+) {
+  const keys = new Set<string>();
+  for (const view of bridgeViews) {
+    const state = agentPinsStates[view.runtime.id];
+    if (!state || state.connectionKey !== view.runtime.connectionKey) {
+      continue;
+    }
+    for (const key of agentPinKeys(view.runtime.id, state.response)) {
+      keys.add(key);
+    }
+  }
+  return keys;
+}
+
+function sortedAgentEntriesWithinGroup(entries: ScopedAgentPane[]) {
+  return entries
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => {
+      const pinned = Number(b.entry.pinned === true) - Number(a.entry.pinned === true);
+      if (pinned !== 0) {
+        return pinned;
+      }
+      return a.index - b.index;
+    })
+    .map(({ entry }) => entry);
+}
+
 export function buildVisibleScopedWorkspaces(
   bridgeViews: BridgeConnectionView[],
   selectedBridgeId: BridgeId | null,
@@ -3483,8 +3775,10 @@ export function buildVisibleAgentPaneEntries(
   hostScope: HostScope,
   agentGroup: AgentGroup,
   agentSort: AgentSort,
+  pinnedAgentKeys: ReadonlySet<string> = EMPTY_AGENT_PIN_KEYS,
+  pinnedOnly = false,
 ) {
-  const agentPanes = sortScopedAgentPanes(
+  const sortedAgentPanes = sortScopedAgentPanes(
     scopedWorkspaces.flatMap((entry) => {
       const sorted = sortAgentPanes(
         entry.snapshot.panes.filter(
@@ -3505,16 +3799,23 @@ export function buildVisibleAgentPaneEntries(
           workspace: entry.workspace,
           tabNumber: tab?.number,
           tabLabel: tab ? displayTabLabel(tab, entry.snapshot.panes) : undefined,
+          pinned: isAgentPinned(pinnedAgentKeys, entry.bridgeId, pane.pane_id),
         };
       });
     }),
     agentSort,
   );
+  const agentPanes = pinnedOnly
+    ? sortedAgentPanes.filter((entry) => entry.pinned)
+    : sortedAgentEntriesWithinGroup(sortedAgentPanes);
   if (agentGroup === "none") {
     return agentPanes;
   }
 
-  const groups = buildScopedAgentGroups(agentPanes, agentGroup, hostScope);
+  const groups = buildScopedAgentGroups(agentPanes, agentGroup, hostScope).map((group) => ({
+    ...group,
+    panes: sortedAgentEntriesWithinGroup(group.panes),
+  }));
   if (agentGroup === "hostWorkspace" && hostScope === "all") {
     return bridgeViews.flatMap((view) =>
       groups.filter((group) => group.bridgeId === view.runtime.id).flatMap((group) => group.panes),
@@ -4231,6 +4532,8 @@ function Switcher({
   notesStates,
   visibleNotes,
   selectedNote,
+  pinnedAgentKeys,
+  agentPinnedOnly,
   agentSort,
   agentGroup,
   activeSpace,
@@ -4241,6 +4544,7 @@ function Switcher({
   onSidebarView,
   onSelectNote,
   onCreateNote,
+  onAgentPinnedOnly,
   onAgentSort,
   onAgentGroup,
   onSelectBridge,
@@ -4271,6 +4575,8 @@ function Switcher({
   notesStates: Record<string, BridgeNotesState>;
   visibleNotes: ScopedNoteEntry[];
   selectedNote: ScopedNoteEntry | null;
+  pinnedAgentKeys: ReadonlySet<string>;
+  agentPinnedOnly: boolean;
   agentSort: AgentSort;
   agentGroup: AgentGroup;
   activeSpace: WorkspaceInfo | null;
@@ -4281,6 +4587,7 @@ function Switcher({
   onSidebarView: (view: SidebarView) => void;
   onSelectNote: (bridgeId: BridgeId, noteId: string) => void;
   onCreateNote: () => void;
+  onAgentPinnedOnly: (pinnedOnly: boolean) => void;
   onAgentSort: (sort: AgentSort) => void;
   onAgentGroup: (group: AgentGroup) => void;
   onSelectBridge: (bridgeId: BridgeId) => void;
@@ -4308,6 +4615,7 @@ function Switcher({
     x: number,
     y: number,
     clearable?: boolean,
+    pinLabel?: "agent" | "pane",
   ) => void;
 }) {
   const [optionsMenu, setOptionsMenu] = useState<{ x: number; y: number } | null>(null);
@@ -4348,6 +4656,10 @@ function Switcher({
       : [];
   const notesSupported =
     notesEnabled && hostBridgeViews.some((view) => supportsNotes(view.runtime.capabilities));
+  const agentPinsSupported = hostBridgeViews.some((view) =>
+    supportsAgentPins(view.runtime.capabilities),
+  );
+  const effectiveAgentPinnedOnly = agentPinsSupported && agentPinnedOnly;
   const notesLoading = notesEnabled && hostBridgeViews.some(
     (view) => notesStates[view.runtime.id]?.loadState === "loading",
   );
@@ -4373,8 +4685,17 @@ function Switcher({
       hostScope,
       "none",
       agentSort,
+      pinnedAgentKeys,
+      effectiveAgentPinnedOnly,
     );
-  }, [agentSort, bridgeViews, hostScope, scopedWorkspaces]);
+  }, [
+    effectiveAgentPinnedOnly,
+    agentSort,
+    bridgeViews,
+    hostScope,
+    pinnedAgentKeys,
+    scopedWorkspaces,
+  ]);
 
   const agentGroups = useMemo(() => {
     if (agentGroup === "none") {
@@ -4463,7 +4784,16 @@ function Switcher({
                 active={group.bridgeId === selectedBridgeId && pane.pane_id === selectedPane?.pane_id}
                 onSelect={() => onSelectPane(group.bridgeId, pane)}
                 onMenu={(x, y) =>
-                  onScopedMenu("pane", group.bridgeId, pane.pane_id, paneTitle(pane), x, y)
+                  onScopedMenu(
+                    "pane",
+                    group.bridgeId,
+                    pane.pane_id,
+                    paneTitle(pane),
+                    x,
+                    y,
+                    undefined,
+                    "pane",
+                  )
                 }
               />
             ))}
@@ -4532,6 +4862,7 @@ function Switcher({
             workspace={entry.workspace}
             tabLabel={entry.tabLabel}
             bridgeLabel={showAgentRowBridgeLabel ? entry.bridgeLabel : undefined}
+            pinned={entry.pinned === true}
             active={
               entry.bridgeId === selectedBridgeId &&
               entry.pane.pane_id === selectedPane?.pane_id
@@ -4545,6 +4876,8 @@ function Switcher({
                 paneTitle(entry.pane),
                 x,
                 y,
+                undefined,
+                "agent",
               )
             }
           />
@@ -4887,6 +5220,19 @@ function Switcher({
                     <Plus size={14} />
                   </button>
                 ) : null}
+                {sidebarView === "agents" && agentPinsSupported ? (
+                  <button
+                    className="sec-add sec-add-pin"
+                    type="button"
+                    aria-label="Show pinned agents only"
+                    title="Pinned only"
+                    aria-pressed={agentPinnedOnly}
+                    data-on={agentPinnedOnly}
+                    onClick={() => onAgentPinnedOnly(!agentPinnedOnly)}
+                  >
+                    <Pin size={13} />
+                  </button>
+                ) : null}
                 {showOptionsControl ? (
                   <button
                     className="sec-add"
@@ -4910,8 +5256,10 @@ function Switcher({
               ) : sidebarView === "agents" ? (
                 agentPanes.length === 0 && disconnectedBridgeViews.length === 0 ? (
                   <div className="empty">
-                    <strong>No detected agents</strong>
-                    <span>Open the Tabs view for plain panes.</span>
+                    <strong>
+                      {effectiveAgentPinnedOnly ? "No pinned agents" : "No detected agents"}
+                    </strong>
+                    <span>{effectiveAgentPinnedOnly ? "" : "Open the Tabs view for plain panes."}</span>
                   </div>
                 ) : (
                   <>
@@ -4926,6 +5274,7 @@ function Switcher({
                             workspace={entry.workspace}
                             tabLabel={entry.tabLabel}
                             bridgeLabel={showAgentRowBridgeLabel ? entry.bridgeLabel : undefined}
+                            pinned={entry.pinned === true}
                             active={
                               entry.bridgeId === selectedBridgeId &&
                               entry.pane.pane_id === selectedPane?.pane_id
@@ -4939,6 +5288,8 @@ function Switcher({
                                 paneTitle(entry.pane),
                                 x,
                                 y,
+                                undefined,
+                                "agent",
                               )
                             }
                           />
@@ -5977,6 +6328,7 @@ function AgentRow({
   workspace,
   tabLabel,
   bridgeLabel,
+  pinned,
   active,
   index,
   onSelect,
@@ -5986,6 +6338,7 @@ function AgentRow({
   workspace?: WorkspaceInfo;
   tabLabel?: string;
   bridgeLabel?: string;
+  pinned: boolean;
   active: boolean;
   index: number;
   onSelect: () => void;
@@ -6006,6 +6359,9 @@ function AgentRow({
       <span className="pane-body">
         <span className="pane-name agent-title">
           {iconKind ? <AgentIcon kind={iconKind} /> : null}
+          {pinned ? (
+            <Pin className="agent-pin-indicator" size={10} aria-label="Pinned" />
+          ) : null}
           <span className="agent-title-text">{agentTitle(pane)}</span>
         </span>
         <span className="pane-meta mono">{agentSubtitle(pane, workspace, tabLabel, bridgeLabel)}</span>
@@ -6265,11 +6621,18 @@ function SplitGlyph() {
   );
 }
 
-function menuItems(kind: MenuKind, paneMoveSupported: boolean, commandsReady: boolean): MenuItem[] {
-  if (!commandsReady) {
-    return [];
-  }
+export function menuItems(
+  kind: MenuKind,
+  paneMoveSupported: boolean,
+  commandsReady: boolean,
+  agentPinsSupported = false,
+  panePinned = false,
+  pinLabel: "agent" | "pane" = "pane",
+): MenuItem[] {
   if (kind === "space") {
+    if (!commandsReady) {
+      return [];
+    }
     return [
       { key: "rename", label: "Rename" },
       { key: "newtab", label: "New tab" },
@@ -6277,14 +6640,26 @@ function menuItems(kind: MenuKind, paneMoveSupported: boolean, commandsReady: bo
     ];
   }
   if (kind === "tab") {
+    if (!commandsReady) {
+      return [];
+    }
     return [
       { key: "rename", label: "Rename" },
       { key: "close", label: "Close tab", danger: true },
     ];
   }
-  const paneItems: MenuItem[] = [
-    { key: "rename", label: "Rename" },
-  ];
+  const paneItems: MenuItem[] = [];
+  if (agentPinsSupported) {
+    const target = pinLabel === "agent" ? "agent" : "pane";
+    paneItems.push({
+      key: panePinned ? "unpin" : "pin",
+      label: panePinned ? `Unpin ${target}` : `Pin ${target}`,
+    });
+  }
+  if (!commandsReady) {
+    return paneItems;
+  }
+  paneItems.push({ key: "rename", label: "Rename" });
   if (paneMoveSupported) {
     paneItems.push(
       { key: "move_new_tab", label: "Move to new tab" },
@@ -6455,6 +6830,18 @@ function isNotesChangedEvent(event: MessageEvent) {
   try {
     const parsed = JSON.parse(event.data) as { type?: unknown };
     return parsed.type === "herdr_web.notes_changed";
+  } catch {
+    return false;
+  }
+}
+
+function isAgentPinsChangedEvent(event: MessageEvent) {
+  if (typeof event.data !== "string") {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(event.data) as { type?: unknown };
+    return parsed.type === "herdr_web.agent_pins_changed";
   } catch {
     return false;
   }
