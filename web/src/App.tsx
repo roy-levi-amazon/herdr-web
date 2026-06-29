@@ -3763,6 +3763,7 @@ export function BridgeConnectionController({
 
     return () => {
       disposed = true;
+      refreshController.dispose();
       events?.close();
       activity?.close();
       uiEvents?.close();

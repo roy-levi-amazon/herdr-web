@@ -155,6 +155,7 @@ export function TerminalView({
   const rendererGenerationRef = useRef(0);
   const rendererReadyRef = useRef<TerminalRendererReady | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const pendingTerminalDataRef = useRef<Uint8Array[]>([]);
   const requestReconnectRef = useRef<(reason: ReconnectReason) => void>(() => {});
   const terminalInputBlockedRef = useRef(false);
   const uploadInputId = useId();
@@ -596,19 +597,8 @@ export function TerminalView({
 
   useEffect(() => {
     const terminalId = pane?.terminal_id ?? null;
-    const ready = rendererReady;
     if (!terminalId) {
       setConnectionState("idle");
-      requestReconnectRef.current = () => {};
-      return;
-    }
-    if (
-      !ready ||
-      ready.terminalId !== terminalId ||
-      rendererReadyRef.current !== ready ||
-      rendererRef.current !== ready.renderer
-    ) {
-      setConnectionState("connecting");
       requestReconnectRef.current = () => {};
       return;
     }
@@ -627,6 +617,8 @@ export function TerminalView({
     let reconnectStopped = false;
     const reconnectScheduledForSocket = new Set<number>();
     const pendingForegroundReasons = new Set<ReconnectReason>();
+    // Reset the pending data buffer for this effect instance.
+    pendingTerminalDataRef.current = [];
 
     const debugReconnect = (event: string, details: Record<string, unknown> = {}) => {
       if (DEBUG_TERMINAL_RECONNECT) {
@@ -671,15 +663,40 @@ export function TerminalView({
       current?.close();
     };
 
-    const writeTerminalData = (socketId: number, data: Uint8Array) => {
-      if (
-        disposed ||
-        socketId !== socketGeneration ||
-        rendererReadyRef.current?.generation !== ready.generation
-      ) {
+    const flushPendingData = () => {
+      const buffered = pendingTerminalDataRef.current;
+      if (buffered.length === 0) {
         return;
       }
-      ready.renderer.write(data);
+      const currentReady = rendererReadyRef.current;
+      if (!currentReady || currentReady.terminalId !== terminalId) {
+        return;
+      }
+      pendingTerminalDataRef.current = [];
+      for (const chunk of buffered) {
+        currentReady.renderer.write(chunk);
+      }
+    };
+
+    const writeTerminalData = (socketId: number, data: Uint8Array) => {
+      if (disposed || socketId !== socketGeneration) {
+        return;
+      }
+      const currentReady = rendererReadyRef.current;
+      if (
+        currentReady &&
+        currentReady.terminalId === terminalId &&
+        rendererRef.current === currentReady.renderer
+      ) {
+        // Renderer is ready -- flush any buffered data first, then write.
+        if (pendingTerminalDataRef.current.length > 0) {
+          flushPendingData();
+        }
+        currentReady.renderer.write(data);
+        return;
+      }
+      // Renderer not ready yet -- buffer the data.
+      pendingTerminalDataRef.current.push(data);
     };
 
     const connectSocket = (reason: ReconnectReason, connectTimeoutMs: number) => {
@@ -687,11 +704,15 @@ export function TerminalView({
         return;
       }
       clearConnectTimer();
-      const initialSize = ready.measure();
-      if (!initialSize) {
-        scheduleReconnect("resize");
-        return;
-      }
+      // Use the renderer's measured size if available, otherwise fall back to a
+      // sensible default so the WebSocket can connect immediately in parallel
+      // with the WASM renderer init.
+      const currentReady = rendererReadyRef.current;
+      const initialSize: TerminalSize =
+        (currentReady?.terminalId === terminalId ? currentReady.measure() : null) ?? {
+          cols: 80,
+          rows: 24,
+        };
       if (socket) {
         closeActiveSocket();
       }
@@ -727,12 +748,16 @@ export function TerminalView({
         setHasAttachedForTerminal(true);
         setConnectionState("attached");
         debugReconnect("open", { socketGeneration: currentSocketGeneration });
-        const size = ready.measure();
-        if (size) {
-          sendResize(size);
-        }
-        if (autoFocusRef.current) {
-          window.setTimeout(() => ready.renderer.focus(), 0);
+        const currentReady = rendererReadyRef.current;
+        if (currentReady && currentReady.terminalId === terminalId) {
+          const size = currentReady.measure();
+          if (size) {
+            sendResize(size);
+          }
+          if (autoFocusRef.current) {
+            window.setTimeout(() => currentReady.renderer.focus(), 0);
+          }
+          flushPendingData();
         }
         flushBatchedTerminalInput();
         flushQueuedTerminalInput();
@@ -872,7 +897,9 @@ export function TerminalView({
       debugReconnect("signal", { reason, reasons });
       const currentSocket = socket;
       if (currentSocket?.readyState === WebSocket.OPEN) {
-        const size = ready.measure("refresh");
+        const currentReady = rendererReadyRef.current;
+        const size =
+          currentReady?.terminalId === terminalId ? currentReady.measure("refresh") : null;
         if (size) {
           sendResize(size);
         }
@@ -932,7 +959,9 @@ export function TerminalView({
       }
       if (reason === "resize") {
         if (socket?.readyState === WebSocket.OPEN) {
-          const size = ready.measure("refresh");
+          const currentReady = rendererReadyRef.current;
+          const size =
+            currentReady?.terminalId === terminalId ? currentReady.measure("refresh") : null;
           if (size) {
             sendResize(size);
           }
@@ -980,10 +1009,39 @@ export function TerminalView({
     flushBatchedTerminalInput,
     flushQueuedTerminalInput,
     pane?.terminal_id,
-    rendererReady,
     terminalOutputCoalesceMs,
     wsUrl,
   ]);
+
+  // When the renderer becomes ready, send a proper resize and flush any
+  // buffered terminal output that arrived while WASM was still loading.
+  useEffect(() => {
+    if (!rendererReady || !pane?.terminal_id) {
+      return;
+    }
+    if (rendererReady.terminalId !== pane.terminal_id) {
+      return;
+    }
+    // The renderer just became ready. Flush buffered data immediately.
+    const buffered = pendingTerminalDataRef.current;
+    if (buffered.length > 0) {
+      pendingTerminalDataRef.current = [];
+      for (const chunk of buffered) {
+        rendererReady.renderer.write(chunk);
+      }
+    }
+    // If the socket is already open, send the accurate terminal size and focus.
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) {
+      const size = rendererReady.measure();
+      if (size) {
+        socket.send(JSON.stringify({ type: "resize", cols: size.cols, rows: size.rows }));
+      }
+      if (autoFocusRef.current) {
+        window.setTimeout(() => rendererReady.renderer.focus(), 0);
+      }
+    }
+  }, [rendererReady, pane?.terminal_id]);
 
   useEffect(() => {
     if (resumeToken > 0) {

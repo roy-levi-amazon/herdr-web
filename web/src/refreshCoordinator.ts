@@ -1,3 +1,6 @@
+const ERROR_RETRY_DELAY_MS = 1000;
+const MAX_ERROR_RETRIES = 5;
+
 export type SnapshotRefreshControllerOptions<TSnapshot> = {
   fetchSnapshot: () => Promise<TSnapshot>;
   applySnapshot: (snapshot: TSnapshot, refreshGeneration: number) => void;
@@ -17,6 +20,15 @@ export function createSnapshotRefreshController<TSnapshot>({
 }: SnapshotRefreshControllerOptions<TSnapshot>) {
   let refreshInFlight = false;
   let refreshPending = false;
+  let consecutiveErrors = 0;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearRetryTimer = () => {
+    if (retryTimer !== null) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  };
 
   const runRefresh = () => {
     const refreshGeneration = getGeneration();
@@ -30,11 +42,22 @@ export function createSnapshotRefreshController<TSnapshot>({
           refreshPending = true;
           return;
         }
+        consecutiveErrors = 0;
         applySnapshot(next, refreshGeneration);
       })
       .catch(() => {
         if (isCurrent()) {
+          consecutiveErrors += 1;
           onError();
+          if (consecutiveErrors <= MAX_ERROR_RETRIES) {
+            clearRetryTimer();
+            retryTimer = setTimeout(() => {
+              retryTimer = null;
+              if (isCurrent() && !refreshInFlight) {
+                runRefresh();
+              }
+            }, ERROR_RETRY_DELAY_MS);
+          }
         }
       })
       .finally(() => {
@@ -55,7 +78,12 @@ export function createSnapshotRefreshController<TSnapshot>({
         refreshPending = true;
         return;
       }
+      consecutiveErrors = 0;
+      clearRetryTimer();
       runRefresh();
+    },
+    dispose() {
+      clearRetryTimer();
     },
   };
 }
