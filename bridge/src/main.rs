@@ -2,6 +2,7 @@ mod agent_activity;
 mod agent_pins;
 mod notes;
 mod session;
+mod snapshot_cache;
 mod web_bridge;
 mod workspace;
 

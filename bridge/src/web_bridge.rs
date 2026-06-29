@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fmt;
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -23,7 +23,6 @@ use axum::routing::{get, post};
 use axum::serve::ListenerExt;
 use axum::{extract::Request as AxumRequest, Json, Router};
 use futures_util::{SinkExt, StreamExt};
-use herdr_compat::TryClone as _;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use tower::ServiceBuilder;
@@ -33,14 +32,13 @@ use tracing::{debug, info, warn};
 
 use herdr_compat::api::client::{ApiClient, ApiClientError};
 use herdr_compat::api::schema::{
-    AgentStatus, EmptyParams, EventsSubscribeParams, Method, PaneInfo, PaneLayoutParams,
-    PaneLayoutSnapshot, PaneListParams, PaneMoveDestination, Request, ResponseResult,
-    SplitDirection, Subscription, TabInfo, TabListParams, WorkspaceInfo,
+    AgentStatus, EventsSubscribeParams, Method, PaneInfo, PaneLayoutParams, PaneLayoutSnapshot,
+    PaneListParams, PaneMoveDestination, Request, ResponseResult, SplitDirection, Subscription,
+    TabInfo, TabListParams, WorkspaceInfo,
 };
 use herdr_compat::protocol::{
-    self, AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode,
-    ClientMessage, RenderEncoding, ServerMessage, MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE,
-    PROTOCOL_VERSION,
+    AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode, ClientMessage,
+    RenderEncoding, ServerMessage, MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
 };
 
 use crate::agent_activity::{AgentActivityListResponse, AgentActivityManager};
@@ -49,6 +47,7 @@ use crate::notes::{
     AttachNoteRequest, CreateNoteRequest, NoteResponse, NotesError, NotesListQuery,
     NotesListResponse, NotesManager, RevisionRequest, UpdateNoteRequest,
 };
+use crate::snapshot_cache::SnapshotCache;
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8787;
@@ -101,6 +100,7 @@ struct BridgeState {
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
     activity_tx: tokio::sync::broadcast::Sender<ActivityMessage>,
     pane_cache: Arc<Mutex<Option<CachedPanes>>>,
+    snapshot_cache: Arc<SnapshotCache>,
     upload_dir: PathBuf,
 }
 
@@ -540,13 +540,13 @@ fn terminal_output_coalesce_window(coalesce_ms: Option<u64>) -> Duration {
 
 #[derive(Clone)]
 struct SharedTerminalSession {
-    write_tx: mpsc::Sender<ClientMessage>,
+    write_tx: tokio::sync::mpsc::UnboundedSender<ClientMessage>,
     output_tx: tokio::sync::broadcast::Sender<TerminalOutput>,
     client_count: Arc<AtomicUsize>,
 }
 
 #[derive(Debug)]
-enum BridgeError {
+pub(crate) enum BridgeError {
     Api(ApiClientError),
     Io(io::Error),
     BadRequest(String),
@@ -833,6 +833,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         protocol = daemon_protocol,
         "herdr-web bridge connected to compatible Herdr daemon"
     );
+    let snapshot_cache = Arc::new(SnapshotCache::new(api.clone()));
     let state = BridgeState {
         api,
         client_socket_path: crate::session::active_client_socket_path(),
@@ -846,9 +847,19 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
         activity_tx: tokio::sync::broadcast::channel(512).0,
         pane_cache: Arc::new(Mutex::new(None)),
+        snapshot_cache,
         upload_dir: options.upload_dir.clone(),
     };
     spawn_agent_activity_watcher(state.clone());
+    // Seed snapshot cache in background — non-blocking so server starts quickly.
+    {
+        let cache = state.snapshot_cache.clone();
+        tokio::spawn(async move {
+            if let Err(err) = cache.refresh().await {
+                tracing::warn!(error = %err, "initial snapshot cache seed failed");
+            }
+        });
+    }
     let agent_activity_routes = Router::new().route(
         "/api/agent-activity",
         get(agent_activity_list_handler).options(preflight_handler),
@@ -1856,43 +1867,12 @@ async fn snapshot_handler(
     headers: HeaderMap,
 ) -> Result<Json<Snapshot>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
-    let api_w = state.api.clone();
-    let api_t = state.api.clone();
-    let api_p = state.api.clone();
-    let (workspaces_result, tabs_result, panes_result) = tokio::join!(
-        tokio::task::spawn_blocking(move || {
-            match api_request(
-                &api_w,
-                "herdr-web:workspace-list",
-                Method::WorkspaceList(EmptyParams::default()),
-            )? {
-                ResponseResult::WorkspaceList { workspaces } => Ok(workspaces),
-                other => Err(BridgeError::Protocol(format!(
-                    "unexpected response: {other:?}"
-                ))),
-            }
-        }),
-        tokio::task::spawn_blocking(move || {
-            match api_request(
-                &api_t,
-                "herdr-web:tab-list",
-                Method::TabList(TabListParams::default()),
-            )? {
-                ResponseResult::TabList { tabs } => Ok(tabs),
-                other => Err(BridgeError::Protocol(format!(
-                    "unexpected response: {other:?}"
-                ))),
-            }
-        }),
-        tokio::task::spawn_blocking(move || current_panes(&api_p)),
-    );
-    let workspaces: Vec<WorkspaceInfo> = workspaces_result
-        .map_err(|err| BridgeError::Protocol(err.to_string()))??;
-    let tabs: Vec<TabInfo> = tabs_result
-        .map_err(|err| BridgeError::Protocol(err.to_string()))??;
-    let panes: Vec<PaneInfo> = panes_result
-        .map_err(|err| BridgeError::Protocol(err.to_string()))??;
-    // Update pane cache
+    // Read from the materialized snapshot cache (no IPC calls).
+    let cached = state.snapshot_cache.snapshot();
+    let workspaces = cached.workspaces;
+    let tabs = cached.tabs;
+    let panes = cached.panes;
+    // Keep legacy pane_cache in sync for callers that still use it.
     {
         let mut cache = state.pane_cache.lock().unwrap_or_else(|e| e.into_inner());
         *cache = Some(CachedPanes {
@@ -2231,6 +2211,12 @@ fn current_panes(api: &ApiClient) -> Result<Vec<PaneInfo>, BridgeError> {
 }
 
 fn cached_panes(state: &BridgeState) -> Result<Vec<PaneInfo>, BridgeError> {
+    // Read from the snapshot cache — no IPC calls needed.
+    let panes = state.snapshot_cache.panes();
+    if !panes.is_empty() {
+        return Ok(panes);
+    }
+    // Fallback: snapshot cache not yet seeded, use legacy pane_cache or IPC.
     {
         let cache = state.pane_cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref cached) = *cache {
@@ -2636,7 +2622,7 @@ async fn handle_terminal_output_message(
 }
 
 fn handle_terminal_client_message(
-    write_tx: &mpsc::Sender<ClientMessage>,
+    write_tx: &tokio::sync::mpsc::UnboundedSender<ClientMessage>,
     message: Result<Message, axum::Error>,
 ) -> bool {
     match message {
@@ -2655,36 +2641,51 @@ async fn acquire_terminal_session(
     rows: u16,
     takeover: bool,
 ) -> Result<SharedTerminalSession, BridgeError> {
-    tokio::task::spawn_blocking(move || {
-        let mut sessions = state
+    // Check existing sessions under the lock (brief, non-blocking).
+    {
+        let sessions = state
             .terminal_sessions
             .lock()
             .map_err(|_| BridgeError::Protocol("terminal session lock poisoned".to_string()))?;
         if let Some(session) = sessions.get(&terminal_id) {
             return Ok(session.clone());
         }
+    }
 
-        let protocol_version = terminal_attach_protocol(&state.api)?;
-        let (output_tx, _) = tokio::sync::broadcast::channel(256);
-        let attach = open_terminal_attach(
-            state.client_socket_path.clone(),
-            terminal_id.clone(),
-            cols,
-            rows,
-            takeover,
-            protocol_version,
-            output_tx.clone(),
-        )?;
-        let session = SharedTerminalSession {
-            write_tx: attach.write_tx,
-            output_tx,
-            client_count: Arc::new(AtomicUsize::new(0)),
-        };
-        sessions.insert(terminal_id, session.clone());
-        Ok(session)
+    // Resolve protocol version synchronously (fast local call).
+    let protocol_version = tokio::task::spawn_blocking({
+        let api = state.api.clone();
+        move || terminal_attach_protocol(&api)
     })
     .await
-    .map_err(|err| BridgeError::Protocol(err.to_string()))?
+    .map_err(|err| BridgeError::Protocol(err.to_string()))??;
+
+    let (output_tx, _) = tokio::sync::broadcast::channel(256);
+    let attach = open_terminal_attach(
+        state.client_socket_path.clone(),
+        terminal_id.clone(),
+        cols,
+        rows,
+        takeover,
+        protocol_version,
+        output_tx.clone(),
+    )
+    .await?;
+    let session = SharedTerminalSession {
+        write_tx: attach.write_tx,
+        output_tx,
+        client_count: Arc::new(AtomicUsize::new(0)),
+    };
+    let mut sessions = state
+        .terminal_sessions
+        .lock()
+        .map_err(|_| BridgeError::Protocol("terminal session lock poisoned".to_string()))?;
+    // Double-check: another task may have raced and inserted one while we connected.
+    if let Some(existing) = sessions.get(&terminal_id) {
+        return Ok(existing.clone());
+    }
+    sessions.insert(terminal_id, session.clone());
+    Ok(session)
 }
 
 fn release_terminal_session(
@@ -2845,8 +2846,15 @@ fn run_agent_activity_structural_subscription(
     }
 
     while let Some(value) = stream.next_value()? {
-        if is_structural_event_value(&value) && resubscribe_tx.send(()).is_err() {
-            return Ok(());
+        if is_structural_event_value(&value) {
+            // Refresh the snapshot cache in the background.
+            let cache = state.snapshot_cache.clone();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move { cache.on_structural_event().await });
+            }
+            if resubscribe_tx.send(()).is_err() {
+                return Ok(());
+            }
         }
     }
     Err(BridgeError::Protocol(
@@ -3099,7 +3107,7 @@ struct TerminalInputChunkStats {
 }
 
 fn send_terminal_input_chunks(
-    write_tx: &mpsc::Sender<ClientMessage>,
+    write_tx: &tokio::sync::mpsc::UnboundedSender<ClientMessage>,
     data: &[u8],
 ) -> Result<TerminalInputChunkStats, String> {
     if data.is_empty() {
@@ -3129,7 +3137,7 @@ fn send_terminal_input_chunks(
 }
 
 fn handle_terminal_text_frame(
-    write_tx: &mpsc::Sender<ClientMessage>,
+    write_tx: &tokio::sync::mpsc::UnboundedSender<ClientMessage>,
     text: &str,
 ) -> Result<(), String> {
     let frame = parse_terminal_client_frame(text)?;
@@ -3174,10 +3182,10 @@ fn parse_terminal_client_frame(text: &str) -> Result<TerminalClientFrame, String
 }
 
 struct TerminalAttach {
-    write_tx: mpsc::Sender<ClientMessage>,
+    write_tx: tokio::sync::mpsc::UnboundedSender<ClientMessage>,
 }
 
-fn open_terminal_attach(
+async fn open_terminal_attach(
     client_socket_path: PathBuf,
     terminal_id: String,
     cols: u16,
@@ -3186,8 +3194,13 @@ fn open_terminal_attach(
     protocol_version: u32,
     output_tx: tokio::sync::broadcast::Sender<TerminalOutput>,
 ) -> Result<TerminalAttach, BridgeError> {
-    let mut stream = herdr_compat::ipc::connect_local_stream(&client_socket_path)?;
-    protocol::write_message(
+    use herdr_compat::protocol::async_wire::{async_read_message, async_write_message};
+
+    let mut stream = tokio::net::UnixStream::connect(&client_socket_path)
+        .await
+        .map_err(BridgeError::Io)?;
+
+    async_write_message(
         &mut stream,
         &ClientMessage::Hello {
             version: protocol_version,
@@ -3200,9 +3213,11 @@ fn open_terminal_attach(
             launch_mode: ClientLaunchMode::TerminalAttach,
         },
     )
+    .await
     .map_err(|err| BridgeError::Protocol(err.to_string()))?;
 
-    let welcome: ServerMessage = protocol::read_message(&mut stream, MAX_FRAME_SIZE)
+    let welcome: ServerMessage = async_read_message(&mut stream, MAX_FRAME_SIZE)
+        .await
         .map_err(|err| BridgeError::Protocol(err.to_string()))?;
     match welcome {
         ServerMessage::Welcome { error: None, .. } => {}
@@ -3216,55 +3231,56 @@ fn open_terminal_attach(
         }
     }
 
-    protocol::write_message(
+    async_write_message(
         &mut stream,
         &ClientMessage::AttachTerminal {
             terminal_id,
             takeover,
         },
     )
+    .await
     .map_err(|err| BridgeError::Protocol(err.to_string()))?;
 
-    let mut read_stream = stream.try_clone()?;
-    let (write_tx, write_rx) = mpsc::channel::<ClientMessage>();
+    let (mut read_half, mut write_half) = stream.into_split();
+    let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<ClientMessage>();
 
-    thread::spawn(move || {
-        let mut write_stream = stream;
-        for message in write_rx {
-            if protocol::write_message(&mut write_stream, &message).is_err() {
+    tokio::spawn(async move {
+        while let Some(message) = write_rx.recv().await {
+            if async_write_message(&mut write_half, &message).await.is_err() {
                 break;
             }
-            let _ = write_stream.flush();
         }
     });
 
-    thread::spawn(move || loop {
-        let message: ServerMessage =
-            match protocol::read_message(&mut read_stream, MAX_GRAPHICS_FRAME_SIZE) {
-                Ok(message) => message,
-                Err(err) => {
-                    let _ = output_tx.send(TerminalOutput::Close(err.to_string()));
+    tokio::spawn(async move {
+        loop {
+            let message: ServerMessage =
+                match async_read_message(&mut read_half, MAX_GRAPHICS_FRAME_SIZE).await {
+                    Ok(message) => message,
+                    Err(err) => {
+                        let _ = output_tx.send(TerminalOutput::Close(err.to_string()));
+                        break;
+                    }
+                };
+            match message {
+                ServerMessage::Terminal(frame) => {
+                    let _ = output_tx.send(TerminalOutput::Bytes(Bytes::from(frame.bytes)));
+                }
+                ServerMessage::ServerShutdown { reason } => {
+                    let _ = output_tx.send(TerminalOutput::Close(
+                        reason.unwrap_or_else(|| "server shutdown".to_string()),
+                    ));
                     break;
                 }
-            };
-        match message {
-            ServerMessage::Terminal(frame) => {
-                let _ = output_tx.send(TerminalOutput::Bytes(Bytes::from(frame.bytes)));
+                ServerMessage::Welcome { .. } => {}
+                ServerMessage::Notify { .. }
+                | ServerMessage::Clipboard { .. }
+                | ServerMessage::WindowTitle { .. }
+                | ServerMessage::ReloadSoundConfig
+                | ServerMessage::MouseCapture { .. }
+                | ServerMessage::Frame(_)
+                | ServerMessage::Graphics { .. } => {}
             }
-            ServerMessage::ServerShutdown { reason } => {
-                let _ = output_tx.send(TerminalOutput::Close(
-                    reason.unwrap_or_else(|| "server shutdown".to_string()),
-                ));
-                break;
-            }
-            ServerMessage::Welcome { .. } => {}
-            ServerMessage::Notify { .. }
-            | ServerMessage::Clipboard { .. }
-            | ServerMessage::WindowTitle { .. }
-            | ServerMessage::ReloadSoundConfig
-            | ServerMessage::MouseCapture { .. }
-            | ServerMessage::Frame(_)
-            | ServerMessage::Graphics { .. } => {}
         }
     });
 
@@ -3600,7 +3616,7 @@ mod tests {
 
     #[test]
     fn chunks_terminal_input_below_daemon_limit() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let data = vec![b'x'; MAX_TERMINAL_INPUT_CHUNK_BYTES * 2 + 17];
 
         let stats = send_terminal_input_chunks(&tx, &data).unwrap();
@@ -3612,13 +3628,13 @@ mod tests {
                 max_chunk_bytes: MAX_TERMINAL_INPUT_CHUNK_BYTES
             }
         );
-        let chunks: Vec<Vec<u8>> = rx
-            .try_iter()
-            .map(|message| match message {
-                ClientMessage::Input { data } => data,
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            match message {
+                ClientMessage::Input { data } => chunks.push(data),
                 other => panic!("unexpected terminal message: {other:?}"),
-            })
-            .collect();
+            }
+        }
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0].len(), MAX_TERMINAL_INPUT_CHUNK_BYTES);
         assert_eq!(chunks[1].len(), MAX_TERMINAL_INPUT_CHUNK_BYTES);
@@ -3628,7 +3644,7 @@ mod tests {
 
     #[test]
     fn forwards_empty_terminal_input_as_one_message() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         let stats = send_terminal_input_chunks(&tx, &[]).unwrap();
 
@@ -3640,7 +3656,7 @@ mod tests {
             }
         );
         assert_eq!(
-            rx.recv().unwrap(),
+            rx.try_recv().unwrap(),
             ClientMessage::Input { data: Vec::new() }
         );
     }

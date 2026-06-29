@@ -33,6 +33,8 @@ import {
 } from "./terminalInputTransport";
 import type { TerminalInputTransport } from "./terminalInputTransport";
 import { DEFAULT_TERMINAL_OUTPUT_COALESCE_MS } from "./terminalOutputCoalescing";
+import { createLocalEchoController } from "./localEcho";
+import type { LocalEchoController } from "./localEcho";
 import { DEFAULT_TERMINAL_FONT_SIZE_PX } from "./terminalPrefs";
 import {
   TERMINAL_FOREGROUND_FAST_ATTEMPTS,
@@ -165,6 +167,7 @@ function TerminalViewInner({
   const batchedInputRef = useRef(emptyTerminalInputBatch());
   const batchedInputFlushTimerRef = useRef<number | null>(null);
   const terminalInputEncoderRef = useRef(new TextEncoder());
+  const localEchoRef = useRef<LocalEchoController | null>(null);
   const uploadStatusTimerRef = useRef<number | null>(null);
   const uploadInFlightRef = useRef(false);
   const uploadConflictRef = useRef<UploadConflictState | null>(null);
@@ -405,6 +408,7 @@ function TerminalViewInner({
       if (socket?.readyState !== WebSocket.OPEN) {
         return;
       }
+      localEchoRef.current?.onInput(data);
       const delayMs = terminalInputBatchDelayMsRef.current;
       const bytes = terminalInputEncoderRef.current.encode(data).byteLength;
       if (shouldSendTerminalInputImmediately(bytes, delayMs)) {
@@ -682,6 +686,13 @@ function TerminalViewInner({
       if (disposed || socketId !== socketGeneration) {
         return;
       }
+      // Filter through local echo to reconcile predicted characters.
+      const filtered = localEchoRef.current
+        ? localEchoRef.current.onServerOutput(data)
+        : data;
+      if (filtered.length === 0) {
+        return;
+      }
       const currentReady = rendererReadyRef.current;
       if (
         currentReady &&
@@ -692,11 +703,11 @@ function TerminalViewInner({
         if (pendingTerminalDataRef.current.length > 0) {
           flushPendingData();
         }
-        currentReady.renderer.write(data);
+        currentReady.renderer.write(filtered);
         return;
       }
       // Renderer not ready yet -- buffer the data.
-      pendingTerminalDataRef.current.push(data);
+      pendingTerminalDataRef.current.push(filtered);
     };
 
     const connectSocket = (reason: ReconnectReason, connectTimeoutMs: number) => {
@@ -750,6 +761,14 @@ function TerminalViewInner({
         debugReconnect("open", { socketGeneration: currentSocketGeneration });
         const currentReady = rendererReadyRef.current;
         if (currentReady && currentReady.terminalId === terminalId) {
+          // Initialize or reset local echo with the renderer's write function.
+          if (!localEchoRef.current) {
+            localEchoRef.current = createLocalEchoController((bytes) =>
+              currentReady.renderer.write(bytes),
+            );
+          } else {
+            localEchoRef.current.reset();
+          }
           const size = currentReady.measure();
           if (size) {
             sendResize(size);

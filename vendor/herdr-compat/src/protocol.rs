@@ -1,4 +1,5 @@
 mod wire;
+pub mod async_wire;
 
 pub use wire::*;
 
