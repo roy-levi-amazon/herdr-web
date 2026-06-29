@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use herdr_compat::api::schema::{AgentStatus, PaneInfo};
@@ -33,8 +33,8 @@ pub struct AgentActivityRecordResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct PaneKey {
-    pane_id: String,
-    terminal_id: String,
+    pane_id: Arc<str>,
+    terminal_id: Arc<str>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,21 +43,35 @@ struct PaneIdentity {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct AgentActivityRecord {
-    pane_id: String,
-    terminal_id: String,
+    pane_id: Arc<str>,
+    terminal_id: Arc<str>,
     workspace_id: String,
     tab_id: String,
     agent_status: AgentStatus,
     last_status_transition_at: Option<u128>,
     last_seen_at: u128,
+    last_seen_generation: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct AgentActivityTracker {
     records: HashMap<PaneKey, AgentActivityRecord>,
     pane_index: HashMap<String, PaneIdentity>,
     startup_baseline_until_ms: Option<u128>,
+    snapshot_generation: u64,
+}
+
+impl Default for AgentActivityTracker {
+    fn default() -> Self {
+        Self {
+            records: HashMap::new(),
+            pane_index: HashMap::new(),
+            startup_baseline_until_ms: None,
+            snapshot_generation: 0,
+        }
+    }
 }
 
 impl AgentActivityManager {
@@ -106,13 +120,22 @@ impl AgentActivityTracker {
         let in_startup_baseline = self
             .startup_baseline_until_ms
             .is_some_and(|baseline_until| now <= baseline_until);
-        self.pane_index = pane_index(panes);
+
+        self.snapshot_generation += 1;
+
+        self.pane_index.clear();
+        for pane in panes {
+            self.pane_index.insert(
+                pane.pane_id.clone(),
+                PaneIdentity {
+                    key: pane_key(pane),
+                },
+            );
+        }
 
         let mut changed = false;
-        let mut open_keys = HashSet::new();
         for pane in panes {
             let key = pane_key(pane);
-            open_keys.insert(key.clone());
             let already_tracked = self.records.contains_key(&key);
             if !already_tracked && !is_agent_like(pane) {
                 continue;
@@ -122,6 +145,7 @@ impl AgentActivityTracker {
                     record.workspace_id = pane.workspace_id.clone();
                     record.tab_id = pane.tab_id.clone();
                     record.last_seen_at = now;
+                    record.last_seen_generation = self.snapshot_generation;
                     if record.agent_status != pane.agent_status {
                         record.agent_status = pane.agent_status;
                         record.last_status_transition_at = Some(now);
@@ -138,13 +162,14 @@ impl AgentActivityTracker {
                     self.records.insert(
                         key,
                         AgentActivityRecord {
-                            pane_id: pane.pane_id.clone(),
-                            terminal_id: pane.terminal_id.clone(),
+                            pane_id: Arc::from(pane.pane_id.as_str()),
+                            terminal_id: Arc::from(pane.terminal_id.as_str()),
                             workspace_id: pane.workspace_id.clone(),
                             tab_id: pane.tab_id.clone(),
                             agent_status: pane.agent_status,
                             last_status_transition_at,
                             last_seen_at: now,
+                            last_seen_generation: self.snapshot_generation,
                         },
                     );
                 }
@@ -152,10 +177,7 @@ impl AgentActivityTracker {
         }
 
         self.records.retain(|_, record| {
-            let keep = open_keys.contains(&PaneKey {
-                pane_id: record.pane_id.clone(),
-                terminal_id: record.terminal_id.clone(),
-            });
+            let keep = record.last_seen_generation == self.snapshot_generation;
             if !keep && record.last_status_transition_at.is_some() {
                 changed = true;
             }
@@ -192,13 +214,14 @@ impl AgentActivityTracker {
                 self.records.insert(
                     key,
                     AgentActivityRecord {
-                        pane_id: pane_id.to_string(),
+                        pane_id: Arc::from(pane_id),
                         terminal_id,
                         workspace_id: String::new(),
                         tab_id: String::new(),
                         agent_status,
                         last_status_transition_at: Some(now),
                         last_seen_at: now,
+                        last_seen_generation: self.snapshot_generation,
                     },
                 );
                 true
@@ -230,24 +253,10 @@ impl AgentActivityTracker {
     }
 }
 
-fn pane_index(panes: &[PaneInfo]) -> HashMap<String, PaneIdentity> {
-    panes
-        .iter()
-        .map(|pane| {
-            (
-                pane.pane_id.clone(),
-                PaneIdentity {
-                    key: pane_key(pane),
-                },
-            )
-        })
-        .collect()
-}
-
 fn pane_key(pane: &PaneInfo) -> PaneKey {
     PaneKey {
-        pane_id: pane.pane_id.clone(),
-        terminal_id: pane.terminal_id.clone(),
+        pane_id: Arc::from(pane.pane_id.as_str()),
+        terminal_id: Arc::from(pane.terminal_id.as_str()),
     }
 }
 

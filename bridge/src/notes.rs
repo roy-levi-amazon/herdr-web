@@ -308,10 +308,7 @@ impl NotesManager {
             store.notes.push(note.clone());
             Ok(note)
         })
-        .map(|note| {
-            let observations = self.load_observation_store_best_effort().observations;
-            note_response(note, panes, &observations, &self.session_key)
-        })
+        .map(|note| self.with_note_response(note, panes))
     }
 
     pub fn update(
@@ -338,10 +335,7 @@ impl NotesManager {
             note.updated_at = now;
             note.revision += 1;
         })
-        .map(|note| {
-            let observations = self.load_observation_store_best_effort().observations;
-            note_response(note, panes, &observations, &self.session_key)
-        })
+        .map(|note| self.with_note_response(note, panes))
     }
 
     pub fn attach(
@@ -357,10 +351,7 @@ impl NotesManager {
             note.updated_at = now;
             note.revision += 1;
         })
-        .map(|note| {
-            let observations = self.load_observation_store_best_effort().observations;
-            note_response(note, panes, &observations, &self.session_key)
-        })
+        .map(|note| self.with_note_response(note, panes))
     }
 
     pub fn detach(
@@ -375,10 +366,7 @@ impl NotesManager {
             note.updated_at = now;
             note.revision += 1;
         })
-        .map(|note| {
-            let observations = self.load_observation_store_best_effort().observations;
-            note_response(note, panes, &observations, &self.session_key)
-        })
+        .map(|note| self.with_note_response(note, panes))
     }
 
     pub fn archive(
@@ -392,10 +380,7 @@ impl NotesManager {
             note.updated_at = now;
             note.revision += 1;
         })
-        .map(|note| {
-            let observations = self.load_observation_store_best_effort().observations;
-            note_response(note, panes, &observations, &self.session_key)
-        })
+        .map(|note| self.with_note_response(note, panes))
     }
 
     pub fn restore(
@@ -410,10 +395,7 @@ impl NotesManager {
             note.updated_at = now;
             note.revision += 1;
         })
-        .map(|note| {
-            let observations = self.load_observation_store_best_effort().observations;
-            note_response(note, panes, &observations, &self.session_key)
-        })
+        .map(|note| self.with_note_response(note, panes))
     }
 
     pub fn delete(
@@ -427,10 +409,7 @@ impl NotesManager {
             note.updated_at = now;
             note.revision += 1;
         })
-        .map(|note| {
-            let observations = self.load_observation_store_best_effort().observations;
-            note_response(note, panes, &observations, &self.session_key)
-        })
+        .map(|note| self.with_note_response(note, panes))
     }
 
     pub fn observe_panes(&self, panes: &[PaneInfo]) -> Result<bool, NotesError> {
@@ -464,7 +443,7 @@ impl NotesManager {
                 }
             }
             changed |= prune_observations(store, &now);
-            Ok(changed)
+            Ok((changed, changed))
         })
     }
 
@@ -516,7 +495,7 @@ impl NotesManager {
     fn capture_attachment_for_pane(&self, pane: &PaneInfo) -> NoteAttachment {
         let observed_generation = self
             .with_observation_store(|store, now, recovered| {
-                ensure_observation_for_pane(
+                let changed = ensure_observation_for_pane(
                     store,
                     &self.session_key,
                     pane,
@@ -527,11 +506,12 @@ impl NotesManager {
                         GenerationConfidence::Known
                     },
                 );
-                Ok(observation_generation_for_pane(
+                let gen = observation_generation_for_pane(
                     store,
                     &self.session_key,
                     &pane.pane_id,
-                ))
+                );
+                Ok((gen, changed))
             })
             .ok()
             .flatten();
@@ -553,6 +533,15 @@ impl NotesManager {
                 foreground_cwd: pane.foreground_cwd.clone(),
             },
         }
+    }
+
+    fn with_note_response(
+        &self,
+        note: NoteRecord,
+        panes: &[PaneInfo],
+    ) -> NoteResponse {
+        let observations = self.load_observation_store_best_effort().observations;
+        note_response(note, panes, &observations, &self.session_key)
     }
 
     fn with_note_mutation<F>(
@@ -607,14 +596,12 @@ impl NotesManager {
 
     fn with_observation_store<F, T>(&self, mutate: F) -> Result<T, NotesError>
     where
-        F: FnOnce(&mut ObservationStore, String, bool) -> Result<T, NotesError>,
+        F: FnOnce(&mut ObservationStore, String, bool) -> Result<(T, bool), NotesError>,
     {
         let _lock = LockFile::exclusive(&self.observations_lock_path)?;
         let loaded = self.load_observation_store_for_update();
         let mut store = loaded.store;
-        let before = serde_json::to_vec(&store).unwrap_or_default();
-        let result = mutate(&mut store, now_ms_string(), loaded.recovered)?;
-        let changed = result_changed(&before, &store);
+        let (result, changed) = mutate(&mut store, now_ms_string(), loaded.recovered)?;
         if changed || loaded.recovered {
             write_json_atomic(&self.observations_path, &store)?;
         }
@@ -679,10 +666,6 @@ impl NotesManager {
             },
         }
     }
-}
-
-fn result_changed<T: Serialize>(before: &[u8], value: &T) -> bool {
-    serde_json::to_vec(value).map_or(true, |after| before != after)
 }
 
 fn parse_notes_store(bytes: &[u8]) -> Result<NotesStore, NotesError> {
@@ -971,7 +954,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), NotesEr
         ensure_private_dir(parent)?;
     }
     let temp_path = path.with_extension(format!("{}.tmp", std::process::id()));
-    let bytes = serde_json::to_vec_pretty(value)
+    let bytes = serde_json::to_vec(value)
         .map_err(|err| NotesError::Store(format!("failed to serialize notes: {err}")))?;
     let mut file = File::create(&temp_path)?;
     set_private_file_permissions(&temp_path)?;

@@ -67,7 +67,13 @@ const ACTIVITY_WATCHER_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const ACTIVITY_WATCHER_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const ACTIVITY_RESUBSCRIBE_DEBOUNCE: Duration = Duration::from_millis(100);
 const ACTIVITY_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const PANE_CACHE_TTL: Duration = Duration::from_millis(500);
 static UPLOAD_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+struct CachedPanes {
+    panes: Vec<PaneInfo>,
+    fetched_at: std::time::Instant,
+}
 
 #[derive(Debug, Clone)]
 struct BridgeOptions {
@@ -93,6 +99,7 @@ struct BridgeState {
     notes: Arc<NotesManager>,
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
     activity_tx: tokio::sync::broadcast::Sender<ActivityMessage>,
+    pane_cache: Arc<Mutex<Option<CachedPanes>>>,
     upload_dir: PathBuf,
 }
 
@@ -831,6 +838,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         notes,
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
         activity_tx: tokio::sync::broadcast::channel(512).0,
+        pane_cache: Arc::new(Mutex::new(None)),
         upload_dir: options.upload_dir.clone(),
     };
     spawn_agent_activity_watcher(state.clone());
@@ -1835,49 +1843,68 @@ async fn snapshot_handler(
     headers: HeaderMap,
 ) -> Result<Json<Snapshot>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
-    let state_clone = state.clone();
-    let (workspaces, tabs, panes, layouts, selected_pane_id) =
+    let api_w = state.api.clone();
+    let api_t = state.api.clone();
+    let api_p = state.api.clone();
+    let (workspaces_result, tabs_result, panes_result) = tokio::join!(
         tokio::task::spawn_blocking(move || {
-            let workspaces = match api_request(
-                &state_clone.api,
+            match api_request(
+                &api_w,
                 "herdr-web:workspace-list",
                 Method::WorkspaceList(EmptyParams::default()),
             )? {
-                ResponseResult::WorkspaceList { workspaces } => workspaces,
-                other => {
-                    return Err(BridgeError::Protocol(format!(
-                        "unexpected response: {other:?}"
-                    )))
-                }
-            };
-            let tabs = match api_request(
-                &state_clone.api,
+                ResponseResult::WorkspaceList { workspaces } => Ok(workspaces),
+                other => Err(BridgeError::Protocol(format!(
+                    "unexpected response: {other:?}"
+                ))),
+            }
+        }),
+        tokio::task::spawn_blocking(move || {
+            match api_request(
+                &api_t,
                 "herdr-web:tab-list",
                 Method::TabList(TabListParams::default()),
             )? {
-                ResponseResult::TabList { tabs } => tabs,
-                other => {
-                    return Err(BridgeError::Protocol(format!(
-                        "unexpected response: {other:?}"
-                    )))
-                }
-            };
-            let panes = current_panes(&state_clone.api)?;
-            let selected_pane_id = shared_selected_pane(&state_clone, &panes)?;
-            // Only fetch layout for the selected tab to avoid N sequential IPC calls
-            let layouts = if let Some(ref sel_id) = selected_pane_id {
-                if let Some(sel_pane) = panes.iter().find(|p| p.pane_id == *sel_id) {
-                    collect_tab_layouts(&state_clone.api, &tabs.iter().filter(|t| t.tab_id == sel_pane.tab_id).cloned().collect::<Vec<_>>(), &panes)
-                } else {
-                    Vec::new()
-                }
+                ResponseResult::TabList { tabs } => Ok(tabs),
+                other => Err(BridgeError::Protocol(format!(
+                    "unexpected response: {other:?}"
+                ))),
+            }
+        }),
+        tokio::task::spawn_blocking(move || current_panes(&api_p)),
+    );
+    let workspaces: Vec<WorkspaceInfo> = workspaces_result
+        .map_err(|err| BridgeError::Protocol(err.to_string()))??;
+    let tabs: Vec<TabInfo> = tabs_result
+        .map_err(|err| BridgeError::Protocol(err.to_string()))??;
+    let panes: Vec<PaneInfo> = panes_result
+        .map_err(|err| BridgeError::Protocol(err.to_string()))??;
+    // Update pane cache
+    {
+        let mut cache = state.pane_cache.lock().unwrap_or_else(|e| e.into_inner());
+        *cache = Some(CachedPanes {
+            panes: panes.clone(),
+            fetched_at: std::time::Instant::now(),
+        });
+    }
+    let state_clone = state.clone();
+    let layout_panes = panes.clone();
+    let layout_tabs = tabs.clone();
+    let (selected_pane_id, layouts) = tokio::task::spawn_blocking(move || {
+        let selected_pane_id = shared_selected_pane(&state_clone, &layout_panes)?;
+        let layouts = if let Some(ref sel_id) = selected_pane_id {
+            if let Some(sel_pane) = layout_panes.iter().find(|p| p.pane_id == *sel_id) {
+                collect_tab_layouts(&state_clone.api, &layout_tabs.iter().filter(|t| t.tab_id == sel_pane.tab_id).cloned().collect::<Vec<_>>(), &layout_panes)
             } else {
                 Vec::new()
-            };
-            Ok((workspaces, tabs, panes, layouts, selected_pane_id))
-        })
-        .await
-        .map_err(|err| BridgeError::Protocol(err.to_string()))??;
+            }
+        } else {
+            Vec::new()
+        };
+        Ok::<_, BridgeError>((selected_pane_id, layouts))
+    })
+    .await
+    .map_err(|err| BridgeError::Protocol(err.to_string()))??;
     observe_agent_activity_snapshot(&state, &panes);
     let notes = state.notes.clone();
     let note_panes = panes.clone();
@@ -1944,7 +1971,7 @@ async fn agent_activity_list_handler(
     headers: HeaderMap,
 ) -> Result<Json<AgentActivityListResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
-    let panes = current_panes(&state.api)?;
+    let panes = cached_panes(&state)?;
     observe_agent_activity_snapshot(&state, &panes);
     Ok(Json(state.agent_activity.list(&panes)))
 }
@@ -1956,7 +1983,7 @@ async fn agent_pins_list_handler(
     ensure_allowed_request(&headers, &state.request_policy)?;
     Ok(Json(
         run_agent_pins_task(state, move |state| {
-            let panes = current_panes(&state.api)?;
+            let panes = cached_panes(&state)?;
             Ok(state.agent_pins.list(&panes)?)
         })
         .await?,
@@ -1971,7 +1998,7 @@ async fn agent_pins_pin_handler(
     ensure_allowed_request(&headers, &state.request_policy)?;
     let event_pane_id = pane_id.clone();
     let response = run_agent_pins_task(state.clone(), move |state| {
-        let panes = current_panes(&state.api)?;
+        let panes = cached_panes(&state)?;
         Ok(state.agent_pins.pin(&pane_id, &panes)?)
     })
     .await?;
@@ -1987,7 +2014,7 @@ async fn agent_pins_unpin_handler(
     ensure_allowed_request(&headers, &state.request_policy)?;
     let event_pane_id = pane_id.clone();
     let response = run_agent_pins_task(state.clone(), move |state| {
-        let panes = current_panes(&state.api)?;
+        let panes = cached_panes(&state)?;
         Ok(state.agent_pins.unpin(&pane_id, &panes)?)
     })
     .await?;
@@ -2003,7 +2030,7 @@ async fn notes_list_handler(
     ensure_allowed_request(&headers, &state.request_policy)?;
     Ok(Json(
         run_notes_task(state, move |state| {
-            let panes = current_panes(&state.api)?;
+            let panes = cached_panes(&state)?;
             Ok(state.notes.list(query, &panes)?)
         })
         .await?,
@@ -2017,7 +2044,7 @@ async fn notes_create_handler(
 ) -> Result<Json<NoteResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
     let note = run_notes_task(state.clone(), move |state| {
-        let panes = current_panes(&state.api)?;
+        let panes = cached_panes(&state)?;
         Ok(state.notes.create(body, &panes)?)
     })
     .await?;
@@ -2033,7 +2060,7 @@ async fn notes_update_handler(
 ) -> Result<Json<NoteResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
     let note = run_notes_task(state.clone(), move |state| {
-        let panes = current_panes(&state.api)?;
+        let panes = cached_panes(&state)?;
         Ok(state.notes.update(&note_id, body, &panes)?)
     })
     .await?;
@@ -2049,7 +2076,7 @@ async fn notes_attach_handler(
 ) -> Result<Json<NoteResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
     let note = run_notes_task(state.clone(), move |state| {
-        let panes = current_panes(&state.api)?;
+        let panes = cached_panes(&state)?;
         Ok(state.notes.attach(&note_id, body, &panes)?)
     })
     .await?;
@@ -2065,7 +2092,7 @@ async fn notes_detach_handler(
 ) -> Result<Json<NoteResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
     let note = run_notes_task(state.clone(), move |state| {
-        let panes = current_panes(&state.api)?;
+        let panes = cached_panes(&state)?;
         Ok(state.notes.detach(&note_id, body, &panes)?)
     })
     .await?;
@@ -2081,7 +2108,7 @@ async fn notes_archive_handler(
 ) -> Result<Json<NoteResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
     let note = run_notes_task(state.clone(), move |state| {
-        let panes = current_panes(&state.api)?;
+        let panes = cached_panes(&state)?;
         Ok(state.notes.archive(&note_id, body, &panes)?)
     })
     .await?;
@@ -2097,7 +2124,7 @@ async fn notes_restore_handler(
 ) -> Result<Json<NoteResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
     let note = run_notes_task(state.clone(), move |state| {
-        let panes = current_panes(&state.api)?;
+        let panes = cached_panes(&state)?;
         Ok(state.notes.restore(&note_id, body, &panes)?)
     })
     .await?;
@@ -2113,7 +2140,7 @@ async fn notes_delete_handler(
 ) -> Result<Json<NoteResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
     let note = run_notes_task(state.clone(), move |state| {
-        let panes = current_panes(&state.api)?;
+        let panes = cached_panes(&state)?;
         Ok(state.notes.delete(&note_id, body, &panes)?)
     })
     .await?;
@@ -2188,6 +2215,26 @@ fn current_panes(api: &ApiClient) -> Result<Vec<PaneInfo>, BridgeError> {
             "unexpected response: {other:?}"
         ))),
     }
+}
+
+fn cached_panes(state: &BridgeState) -> Result<Vec<PaneInfo>, BridgeError> {
+    {
+        let cache = state.pane_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref cached) = *cache {
+            if cached.fetched_at.elapsed() < PANE_CACHE_TTL {
+                return Ok(cached.panes.clone());
+            }
+        }
+    }
+    let panes = current_panes(&state.api)?;
+    {
+        let mut cache = state.pane_cache.lock().unwrap_or_else(|e| e.into_inner());
+        *cache = Some(CachedPanes {
+            panes: panes.clone(),
+            fetched_at: std::time::Instant::now(),
+        });
+    }
+    Ok(panes)
 }
 
 fn shared_selected_pane(

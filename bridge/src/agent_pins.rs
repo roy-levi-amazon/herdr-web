@@ -10,11 +10,27 @@ use serde::{Deserialize, Serialize};
 const AGENT_PINS_STORE_VERSION: u32 = 1;
 const MAX_AGENT_PIN_RECORDS: usize = 1_000;
 
-#[derive(Clone)]
 pub struct AgentPinsManager {
     pins_path: PathBuf,
     pins_lock_path: PathBuf,
     session_key: String,
+    cache: std::sync::Mutex<Option<PinsCache>>,
+}
+
+struct PinsCache {
+    store: AgentPinsStore,
+    mtime: SystemTime,
+}
+
+impl Clone for AgentPinsManager {
+    fn clone(&self) -> Self {
+        Self {
+            pins_path: self.pins_path.clone(),
+            pins_lock_path: self.pins_lock_path.clone(),
+            session_key: self.session_key.clone(),
+            cache: std::sync::Mutex::new(None),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -99,6 +115,7 @@ impl AgentPinsManager {
             pins_path: pins_dir.join("agent-pins.json"),
             pins_lock_path: pins_dir.join("agent-pins.lock"),
             session_key: session_key(),
+            cache: std::sync::Mutex::new(None),
         })
     }
 
@@ -109,12 +126,13 @@ impl AgentPinsManager {
             pins_path: dir.join("agent-pins.json"),
             pins_lock_path: dir.join("agent-pins.lock"),
             session_key: session_key.to_string(),
+            cache: std::sync::Mutex::new(None),
         })
     }
 
     pub fn list(&self, panes: &[PaneInfo]) -> Result<AgentPinsListResponse, AgentPinsError> {
-        let _lock = LockFile::exclusive(&self.pins_lock_path)?;
-        let store = self.load_or_create_store()?;
+        let _lock = LockFile::shared(&self.pins_lock_path)?;
+        let store = self.load_or_create_store_cached()?;
         Ok(AgentPinsListResponse {
             session_key: self.session_key.clone(),
             pins: visible_pin_responses(store.pins, &self.session_key, panes),
@@ -171,7 +189,42 @@ impl AgentPinsManager {
         let mut store = self.load_or_create_store()?;
         let result = mutate(&mut store, now_ms_string())?;
         write_json_atomic(&self.pins_path, &store)?;
+        // Update cache with new state
+        if let Ok(mtime) = fs::metadata(&self.pins_path).and_then(|m| m.modified()) {
+            let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            *cache = Some(PinsCache {
+                store,
+                mtime,
+            });
+        }
         Ok(result)
+    }
+
+    fn load_or_create_store_cached(&self) -> Result<AgentPinsStore, AgentPinsError> {
+        let current_mtime = fs::metadata(&self.pins_path)
+            .and_then(|m| m.modified())
+            .ok();
+
+        if let Some(ref mtime) = current_mtime {
+            let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref cached) = *cache {
+                if &cached.mtime == mtime {
+                    return Ok(cached.store.clone());
+                }
+            }
+        }
+
+        let store = self.load_or_create_store()?;
+
+        if let Some(mtime) = current_mtime {
+            let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            *cache = Some(PinsCache {
+                store: store.clone(),
+                mtime,
+            });
+        }
+
+        Ok(store)
     }
 
     fn load_or_create_store(&self) -> Result<AgentPinsStore, AgentPinsError> {
@@ -298,7 +351,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), AgentPi
         ensure_private_dir(parent)?;
     }
     let temp_path = path.with_extension(format!("{}.tmp", std::process::id()));
-    let bytes = serde_json::to_vec_pretty(value)
+    let bytes = serde_json::to_vec(value)
         .map_err(|err| AgentPinsError::Store(format!("failed to serialize agent pins: {err}")))?;
     let mut file = File::create(&temp_path)?;
     set_private_file_permissions(&temp_path)?;
@@ -306,10 +359,6 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), AgentPi
     file.sync_all()?;
     drop(file);
     fs::rename(&temp_path, path)?;
-    set_private_file_permissions(path)?;
-    if let Some(parent) = path.parent() {
-        File::open(parent)?.sync_all()?;
-    }
     Ok(())
 }
 
@@ -442,7 +491,20 @@ impl LockFile {
             .create(true)
             .open(path)?;
         set_private_file_permissions(path)?;
-        lock_file(&file)?;
+        lock_file_exclusive(&file)?;
+        Ok(Self { file })
+    }
+
+    fn shared(path: &Path) -> io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            ensure_private_dir(parent)?;
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)?;
+        lock_file_shared(&file)?;
         Ok(Self { file })
     }
 }
@@ -454,7 +516,7 @@ impl Drop for LockFile {
 }
 
 #[cfg(unix)]
-fn lock_file(file: &File) -> io::Result<()> {
+fn lock_file_exclusive(file: &File) -> io::Result<()> {
     use std::os::fd::AsRawFd;
     let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
     if result == 0 {
@@ -464,8 +526,24 @@ fn lock_file(file: &File) -> io::Result<()> {
     }
 }
 
+#[cfg(unix)]
+fn lock_file_shared(file: &File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 #[cfg(not(unix))]
-fn lock_file(_file: &File) -> io::Result<()> {
+fn lock_file_exclusive(_file: &File) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn lock_file_shared(_file: &File) -> io::Result<()> {
     Ok(())
 }
 
