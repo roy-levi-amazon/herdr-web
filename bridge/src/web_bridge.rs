@@ -88,6 +88,7 @@ struct BridgeState {
     request_policy: RequestPolicy,
     terminal_sessions: Arc<Mutex<HashMap<String, SharedTerminalSession>>>,
     selected_pane_id: Arc<Mutex<Option<String>>>,
+    ws_client_count: Arc<AtomicUsize>,
     agent_activity: Arc<AgentActivityManager>,
     agent_pins: Arc<AgentPinsManager>,
     notes: Arc<NotesManager>,
@@ -825,6 +826,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         request_policy: request_policy.clone(),
         terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
         selected_pane_id: Arc::new(Mutex::new(None)),
+        ws_client_count: Arc::new(AtomicUsize::new(0)),
         agent_activity,
         agent_pins,
         notes,
@@ -2260,10 +2262,12 @@ async fn ui_events_ws_handler(
 }
 
 async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
+    state.ws_client_count.fetch_add(1, Ordering::Relaxed);
     let api = state.api.clone();
     let mut ui_event_rx = state.ui_event_tx.subscribe();
     let subscribed = tokio::task::spawn_blocking(move || open_event_subscription(api)).await;
     let Ok(Ok(mut event_rx)) = subscribed else {
+        state.ws_client_count.fetch_sub(1, Ordering::Relaxed);
         return;
     };
 
@@ -2302,6 +2306,7 @@ async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
             else => break,
         }
     }
+    state.ws_client_count.fetch_sub(1, Ordering::Relaxed);
 }
 
 async fn handle_activity_socket(socket: WebSocket, state: BridgeState) {
@@ -2693,6 +2698,9 @@ fn spawn_agent_activity_watcher(state: BridgeState) {
 fn agent_activity_structural_watcher_loop(state: BridgeState, resubscribe_tx: mpsc::Sender<()>) {
     let mut backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
     loop {
+        while state.ws_client_count.load(Ordering::Relaxed) == 0 {
+            thread::sleep(Duration::from_secs(1));
+        }
         match run_agent_activity_structural_subscription(&state, &resubscribe_tx) {
             Ok(()) => {
                 backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
@@ -2709,6 +2717,10 @@ fn agent_activity_structural_watcher_loop(state: BridgeState, resubscribe_tx: mp
 fn agent_activity_watcher_loop(state: BridgeState, resubscribe_rx: mpsc::Receiver<()>) {
     let mut backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
     loop {
+        while state.ws_client_count.load(Ordering::Relaxed) == 0 {
+            thread::sleep(Duration::from_secs(1));
+            drain_resubscribe_signals(&resubscribe_rx);
+        }
         match run_agent_activity_subscription(&state, &resubscribe_rx) {
             Ok(()) => {
                 backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
