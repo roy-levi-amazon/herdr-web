@@ -34,8 +34,7 @@ use herdr_compat::api::client::{ApiClient, ApiClientError};
 use herdr_compat::api::schema::{
     AgentStatus, EmptyParams, EventsSubscribeParams, Method, PaneInfo, PaneLayoutParams,
     PaneLayoutSnapshot, PaneListParams, PaneMoveDestination, Request, ResponseResult,
-    SplitDirection, Subscription, SubscriptionEventData, SubscriptionEventEnvelope,
-    SubscriptionEventKind, TabInfo, TabListParams, WorkspaceInfo,
+    SplitDirection, Subscription, TabInfo, TabListParams, WorkspaceInfo,
 };
 use herdr_compat::protocol::{
     self, AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode,
@@ -67,7 +66,7 @@ const DAEMON_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const ACTIVITY_WATCHER_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const ACTIVITY_WATCHER_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const ACTIVITY_RESUBSCRIBE_DEBOUNCE: Duration = Duration::from_millis(100);
-const ACTIVITY_READ_TIMEOUT: Duration = Duration::from_millis(250);
+const ACTIVITY_POLL_INTERVAL: Duration = Duration::from_secs(5);
 static UPLOAD_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone)]
@@ -974,10 +973,21 @@ async fn preflight_handler(
 fn cors_origin_header(headers: &HeaderMap, policy: &RequestPolicy) -> Option<HeaderValue> {
     let origin = headers.get(ORIGIN)?;
     if request_allowed(headers, policy) {
-        Some(origin.clone())
-    } else {
-        None
+        return Some(origin.clone());
     }
+    // Always echo the Origin for same-origin requests so that browser fetches of
+    // static assets (e.g. manifest.json fetched in CORS mode) receive the required
+    // Access-Control-Allow-Origin header even when the full host/origin policy
+    // check fails (e.g. the browser manifest parser may omit expected headers).
+    let origin_str = origin.to_str().ok()?;
+    let origin_auth = origin_authority(origin_str)?;
+    let host = headers.get(HOST)?.to_str().ok()?;
+    if same_authority(origin_auth, host)
+        || (is_loopback_authority(origin_auth) && is_loopback_authority(host))
+    {
+        return Some(origin.clone());
+    }
+    None
 }
 
 fn insert_cors_headers(headers: &mut HeaderMap, origin: HeaderValue) {
@@ -2428,6 +2438,11 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
         if let Some(deadline) = output_coalescer.deadline() {
             tokio::select! {
                 biased;
+                Some(message) = ws_receiver.next() => {
+                    if !handle_terminal_client_message(&write_tx, message) {
+                        break;
+                    }
+                }
                 _ = tokio::time::sleep_until(deadline) => {
                     if !handle_terminal_output_deadline(
                         &mut ws_sender,
@@ -2435,11 +2450,6 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
                     )
                     .await
                     {
-                        break;
-                    }
-                }
-                Some(message) = ws_receiver.next() => {
-                    if !handle_terminal_client_message(&write_tx, message) {
                         break;
                     }
                 }
@@ -2721,7 +2731,7 @@ fn agent_activity_watcher_loop(state: BridgeState, resubscribe_rx: mpsc::Receive
             thread::sleep(Duration::from_secs(1));
             drain_resubscribe_signals(&resubscribe_rx);
         }
-        match run_agent_activity_subscription(&state, &resubscribe_rx) {
+        match run_agent_activity_poll(&state, &resubscribe_rx) {
             Ok(()) => {
                 backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
                 thread::sleep(ACTIVITY_RESUBSCRIBE_DEBOUNCE);
@@ -2764,69 +2774,99 @@ fn run_agent_activity_structural_subscription(
     ))
 }
 
-fn run_agent_activity_subscription(
+/// Poll-based activity watcher: instead of subscribing to per-pane agent status
+/// events (which forces the daemon to synchronously write to subscription streams
+/// and causes IPC contention during pane switches), we periodically poll the pane
+/// list and diff agent_status fields. The structural watcher still signals us on
+/// pane set changes so we re-poll immediately when panes are created or closed.
+fn run_agent_activity_poll(
     state: &BridgeState,
     resubscribe_rx: &mpsc::Receiver<()>,
 ) -> Result<(), BridgeError> {
     drain_resubscribe_signals(resubscribe_rx);
-    let panes = current_panes(&state.api)?;
-    observe_agent_activity_snapshot(state, &panes);
-    let pane_ids = sorted_pane_ids(&panes);
-    if pane_ids.is_empty() {
+    let mut prev_panes = current_panes(&state.api)?;
+    observe_agent_activity_snapshot(state, &prev_panes);
+    let mut prev_pane_ids = sorted_pane_ids(&prev_panes);
+    if prev_pane_ids.is_empty() {
         wait_for_resubscribe_signal(resubscribe_rx)?;
         return Ok(());
     }
-    let request = Request {
-        id: "herdr-web:activity".to_string(),
-        method: Method::EventsSubscribe(EventsSubscribeParams {
-            subscriptions: activity_subscriptions(&pane_ids),
-        }),
-    };
-    let (ack, mut stream) = state.api.subscribe_value(&request, None)?;
-    let response = herdr_compat::api::client::parse_response_value(ack)?;
-    if !matches!(response.result, ResponseResult::SubscriptionStarted {}) {
-        return Err(BridgeError::Protocol(format!(
-            "unexpected subscription response: {:?}",
-            response.result
-        )));
-    }
-    stream.set_read_timeout(ACTIVITY_READ_TIMEOUT)?;
 
     loop {
-        if drain_resubscribe_signals(resubscribe_rx) {
-            let next_panes = current_panes(&state.api)?;
-            observe_agent_activity_snapshot(state, &next_panes);
-            if !activity_resubscribe_needed(&pane_ids, &next_panes) {
-                continue;
+        // Wait for either the poll interval to elapse or a structural change signal.
+        match resubscribe_rx.recv_timeout(ACTIVITY_POLL_INTERVAL) {
+            Ok(()) => {
+                // Structural change — drain any additional signals and re-poll.
+                drain_resubscribe_signals(resubscribe_rx);
             }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Normal poll interval elapsed.
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(BridgeError::Protocol(
+                    "activity resubscribe channel closed".to_string(),
+                ));
+            }
+        }
+
+        if state.ws_client_count.load(Ordering::Relaxed) == 0 {
             return Ok(());
         }
-        match stream.next_value() {
-            Ok(Some(value)) => {
-                if let Some(message) = activity_message_from_subscription_value(value) {
-                    if let ActivityMessage::PaneAgentStatusChanged {
-                        pane_id,
-                        agent_status,
-                        ..
-                    } = &message
-                    {
-                        if state
-                            .agent_activity
-                            .observe_status_event(pane_id, *agent_status)
-                        {
-                            broadcast_agent_activity_changed(state);
-                        }
-                    }
-                    let _ = state.activity_tx.send(message);
-                }
+
+        let next_panes = current_panes(&state.api)?;
+        let next_pane_ids = sorted_pane_ids(&next_panes);
+
+        // If the pane set changed, return Ok(()) so the outer loop re-enters and
+        // we start fresh with the new set.
+        if next_pane_ids != prev_pane_ids {
+            observe_agent_activity_snapshot(state, &next_panes);
+            return Ok(());
+        }
+
+        // Diff agent status for each pane and emit activity messages for changes.
+        diff_and_emit_activity(state, &prev_panes, &next_panes);
+        observe_agent_activity_snapshot(state, &next_panes);
+
+        prev_panes = next_panes;
+        prev_pane_ids = next_pane_ids;
+    }
+}
+
+/// Compare previous and current pane snapshots and emit ActivityMessages for any
+/// panes whose agent_status (or related fields) changed.
+fn diff_and_emit_activity(state: &BridgeState, prev: &[PaneInfo], next: &[PaneInfo]) {
+    let prev_map: HashMap<&str, &PaneInfo> =
+        prev.iter().map(|p| (p.pane_id.as_str(), p)).collect();
+    for pane in next {
+        let changed = match prev_map.get(pane.pane_id.as_str()) {
+            Some(prev_pane) => {
+                pane.agent_status != prev_pane.agent_status
+                    || pane.agent != prev_pane.agent
+                    || pane.title != prev_pane.title
+                    || pane.display_agent != prev_pane.display_agent
+                    || pane.custom_status != prev_pane.custom_status
+                    || pane.state_labels != prev_pane.state_labels
             }
-            Ok(None) => {
-                return Err(BridgeError::Protocol(
-                    "activity subscription ended".to_string(),
-                ))
+            None => true, // new pane, treat as changed
+        };
+        if changed {
+            if state
+                .agent_activity
+                .observe_status_event(&pane.pane_id, pane.agent_status)
+            {
+                broadcast_agent_activity_changed(state);
             }
-            Err(err) if is_timeout_error(&err) => continue,
-            Err(err) => return Err(err.into()),
+            let message = ActivityMessage::PaneAgentStatusChanged {
+                pane_id: pane.pane_id.clone(),
+                workspace_id: pane.workspace_id.clone(),
+                agent_status: pane.agent_status,
+                agent: pane.agent.clone(),
+                title: pane.title.clone(),
+                display_agent: pane.display_agent.clone(),
+                custom_status: pane.custom_status.clone(),
+                state_labels: pane.state_labels.clone(),
+            };
+            let _ = state.activity_tx.send(message);
         }
     }
 }
@@ -2841,6 +2881,7 @@ fn sorted_pane_ids(panes: &[PaneInfo]) -> Vec<String> {
     pane_ids
 }
 
+#[cfg(test)]
 fn activity_resubscribe_needed(current_pane_ids: &[String], next_panes: &[PaneInfo]) -> bool {
     sorted_pane_ids(next_panes) != current_pane_ids
 }
@@ -2852,6 +2893,7 @@ fn wait_for_resubscribe_signal(resubscribe_rx: &mpsc::Receiver<()>) -> Result<()
         .map_err(|_| BridgeError::Protocol("activity resubscribe channel closed".to_string()))
 }
 
+#[cfg(test)]
 fn activity_subscriptions(pane_ids: &[String]) -> Vec<Subscription> {
     let mut pane_ids = pane_ids.to_vec();
     pane_ids.sort();
@@ -2888,7 +2930,11 @@ fn structural_event_subscriptions() -> Vec<Subscription> {
     ]
 }
 
+#[cfg(test)]
 fn activity_message_from_subscription_value(value: serde_json::Value) -> Option<ActivityMessage> {
+    use herdr_compat::api::schema::{
+        SubscriptionEventData, SubscriptionEventEnvelope, SubscriptionEventKind,
+    };
     let envelope: SubscriptionEventEnvelope = serde_json::from_value(value).ok()?;
     if envelope.event != SubscriptionEventKind::PaneAgentStatusChanged {
         return None;
@@ -2921,14 +2967,6 @@ fn drain_resubscribe_signals(resubscribe_rx: &mpsc::Receiver<()>) -> bool {
         received = true;
     }
     received
-}
-
-fn is_timeout_error(err: &ApiClientError) -> bool {
-    matches!(
-        err,
-        ApiClientError::Io(err)
-            if matches!(err.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock)
-    )
 }
 
 fn open_event_subscription(
