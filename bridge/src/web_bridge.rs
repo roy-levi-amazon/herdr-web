@@ -1835,31 +1835,49 @@ async fn snapshot_handler(
     headers: HeaderMap,
 ) -> Result<Json<Snapshot>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
-    let workspaces = match api_request(
-        &state.api,
-        "herdr-web:workspace-list",
-        Method::WorkspaceList(EmptyParams::default()),
-    )? {
-        ResponseResult::WorkspaceList { workspaces } => workspaces,
-        other => {
-            return Err(BridgeError::Protocol(format!(
-                "unexpected response: {other:?}"
-            )))
-        }
-    };
-    let tabs = match api_request(
-        &state.api,
-        "herdr-web:tab-list",
-        Method::TabList(TabListParams::default()),
-    )? {
-        ResponseResult::TabList { tabs } => tabs,
-        other => {
-            return Err(BridgeError::Protocol(format!(
-                "unexpected response: {other:?}"
-            )))
-        }
-    };
-    let panes = current_panes(&state.api)?;
+    let state_clone = state.clone();
+    let (workspaces, tabs, panes, layouts, selected_pane_id) =
+        tokio::task::spawn_blocking(move || {
+            let workspaces = match api_request(
+                &state_clone.api,
+                "herdr-web:workspace-list",
+                Method::WorkspaceList(EmptyParams::default()),
+            )? {
+                ResponseResult::WorkspaceList { workspaces } => workspaces,
+                other => {
+                    return Err(BridgeError::Protocol(format!(
+                        "unexpected response: {other:?}"
+                    )))
+                }
+            };
+            let tabs = match api_request(
+                &state_clone.api,
+                "herdr-web:tab-list",
+                Method::TabList(TabListParams::default()),
+            )? {
+                ResponseResult::TabList { tabs } => tabs,
+                other => {
+                    return Err(BridgeError::Protocol(format!(
+                        "unexpected response: {other:?}"
+                    )))
+                }
+            };
+            let panes = current_panes(&state_clone.api)?;
+            let selected_pane_id = shared_selected_pane(&state_clone, &panes)?;
+            // Only fetch layout for the selected tab to avoid N sequential IPC calls
+            let layouts = if let Some(ref sel_id) = selected_pane_id {
+                if let Some(sel_pane) = panes.iter().find(|p| p.pane_id == *sel_id) {
+                    collect_tab_layouts(&state_clone.api, &tabs.iter().filter(|t| t.tab_id == sel_pane.tab_id).cloned().collect::<Vec<_>>(), &panes)
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+            Ok((workspaces, tabs, panes, layouts, selected_pane_id))
+        })
+        .await
+        .map_err(|err| BridgeError::Protocol(err.to_string()))??;
     observe_agent_activity_snapshot(&state, &panes);
     let notes = state.notes.clone();
     let note_panes = panes.clone();
@@ -1871,8 +1889,7 @@ async fn snapshot_handler(
         Ok(false) => {}
         Err(err) => warn!(error = %err, "failed to update pane note observations"),
     }
-    let layouts = collect_tab_layouts(&state.api, &tabs, &panes);
-    let selected_pane_id = shared_selected_pane(&state, &panes)?;
+    let selected_pane_id = selected_pane_id;
     let workspaces = workspaces
         .into_iter()
         .map(|workspace| {

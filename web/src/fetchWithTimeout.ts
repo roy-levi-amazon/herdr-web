@@ -1,4 +1,4 @@
-export const BRIDGE_FETCH_TIMEOUT_MS = 5000;
+export const BRIDGE_FETCH_TIMEOUT_MS = 15000;
 
 export type FetchWithTimeoutInit = RequestInit & {
   timeoutMs?: number;
