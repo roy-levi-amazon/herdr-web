@@ -851,7 +851,8 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         upload_dir: options.upload_dir.clone(),
     };
     spawn_agent_activity_watcher(state.clone());
-    // Seed snapshot cache in background — non-blocking so server starts quickly.
+    // Start debounced refresh loop and seed snapshot cache.
+    state.snapshot_cache.spawn_refresh_loop();
     {
         let cache = state.snapshot_cache.clone();
         tokio::spawn(async move {
@@ -2846,12 +2847,8 @@ fn run_agent_activity_structural_subscription(
     }
 
     while let Some(value) = stream.next_value()? {
-        if is_structural_event_value(&value) {
-            // Refresh the snapshot cache in the background.
-            let cache = state.snapshot_cache.clone();
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move { cache.on_structural_event().await });
-            }
+        if is_structural_event_value(&value) && !is_focus_only_event(&value) {
+            state.snapshot_cache.notify_structural_event();
             if resubscribe_tx.send(()).is_err() {
                 return Ok(());
             }
@@ -2872,7 +2869,10 @@ fn run_agent_activity_poll(
     resubscribe_rx: &mpsc::Receiver<()>,
 ) -> Result<(), BridgeError> {
     drain_resubscribe_signals(resubscribe_rx);
-    let mut prev_panes = current_panes(&state.api)?;
+    let mut prev_panes = state.snapshot_cache.panes();
+    if prev_panes.is_empty() {
+        prev_panes = current_panes(&state.api)?;
+    }
     observe_agent_activity_snapshot(state, &prev_panes);
     let mut prev_pane_ids = sorted_pane_ids(&prev_panes);
     if prev_pane_ids.is_empty() {
@@ -2901,7 +2901,12 @@ fn run_agent_activity_poll(
             return Ok(());
         }
 
-        let next_panes = current_panes(&state.api)?;
+        let cached = state.snapshot_cache.panes();
+        let next_panes = if cached.is_empty() {
+            current_panes(&state.api)?
+        } else {
+            cached
+        };
         let next_pane_ids = sorted_pane_ids(&next_panes);
 
         // If the pane set changed, return Ok(()) so the outer loop re-enters and
@@ -3001,17 +3006,14 @@ fn structural_event_subscriptions() -> Vec<Subscription> {
         Subscription::WorkspaceUpdated {},
         Subscription::WorkspaceRenamed {},
         Subscription::WorkspaceClosed {},
-        Subscription::WorkspaceFocused {},
         Subscription::WorktreeCreated {},
         Subscription::WorktreeOpened {},
         Subscription::WorktreeRemoved {},
         Subscription::TabCreated {},
         Subscription::TabClosed {},
-        Subscription::TabFocused {},
         Subscription::TabRenamed {},
         Subscription::PaneCreated {},
         Subscription::PaneClosed {},
-        Subscription::PaneFocused {},
         Subscription::PaneMoved {},
         Subscription::PaneExited {},
         Subscription::PaneAgentDetected {},
@@ -3049,6 +3051,17 @@ fn is_structural_event_value(value: &serde_json::Value) -> bool {
         .is_some_and(|event| event != "pane.agent_status_changed")
 }
 
+fn is_focus_only_event(value: &serde_json::Value) -> bool {
+    value
+        .get("event")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|event| {
+            event == "pane.focused"
+                || event == "tab.focused"
+                || event == "workspace.focused"
+        })
+}
+
 fn drain_resubscribe_signals(resubscribe_rx: &mpsc::Receiver<()>) -> bool {
     let mut received = false;
     while resubscribe_rx.try_recv().is_ok() {
@@ -3057,13 +3070,21 @@ fn drain_resubscribe_signals(resubscribe_rx: &mpsc::Receiver<()>) -> bool {
     received
 }
 
+fn ui_event_subscriptions() -> Vec<Subscription> {
+    let mut subs = structural_event_subscriptions();
+    subs.push(Subscription::WorkspaceFocused {});
+    subs.push(Subscription::TabFocused {});
+    subs.push(Subscription::PaneFocused {});
+    subs
+}
+
 fn open_event_subscription(
     api: ApiClient,
 ) -> Result<tokio::sync::mpsc::UnboundedReceiver<String>, BridgeError> {
     let request = Request {
         id: "herdr-web:events".to_string(),
         method: Method::EventsSubscribe(EventsSubscribeParams {
-            subscriptions: structural_event_subscriptions(),
+            subscriptions: ui_event_subscriptions(),
         }),
     };
     let (ack, mut stream) = api.subscribe_value(&request, None)?;

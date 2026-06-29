@@ -1,12 +1,16 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::time::Duration;
 
 use herdr_compat::api::client::ApiClient;
 use herdr_compat::api::schema::{
     EmptyParams, Method, PaneInfo, PaneListParams, Request, ResponseResult, TabInfo, TabListParams,
     WorkspaceInfo,
 };
+use tokio::sync::Notify;
 use crate::web_bridge::BridgeError;
+
+const REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// In-memory materialized view of workspace/tab/pane state.
 ///
@@ -16,6 +20,7 @@ pub struct SnapshotCache {
     state: RwLock<CachedSnapshot>,
     api: ApiClient,
     version: AtomicU64,
+    refresh_notify: Notify,
 }
 
 #[derive(Clone)]
@@ -50,7 +55,22 @@ impl SnapshotCache {
             state: RwLock::new(CachedSnapshot::empty()),
             api,
             version: AtomicU64::new(0),
+            refresh_notify: Notify::new(),
         }
+    }
+
+    /// Start the debounced refresh loop. Call once at startup.
+    pub fn spawn_refresh_loop(self: &std::sync::Arc<Self>) {
+        let cache = self.clone();
+        tokio::spawn(async move {
+            loop {
+                cache.refresh_notify.notified().await;
+                tokio::time::sleep(REFRESH_DEBOUNCE).await;
+                if let Err(err) = cache.refresh().await {
+                    tracing::warn!(error = %err, "snapshot cache debounced refresh failed");
+                }
+            }
+        });
     }
 
     /// Seed or refresh from daemon. Called on startup and on structural events.
@@ -137,10 +157,8 @@ impl SnapshotCache {
         self.version.load(Ordering::Acquire)
     }
 
-    /// Call when a structural event arrives. For now, triggers a refresh.
-    pub async fn on_structural_event(&self) {
-        if let Err(err) = self.refresh().await {
-            tracing::warn!(error = %err, "snapshot cache refresh failed on structural event");
-        }
+    /// Call when a structural event arrives. Signals the debounced refresh loop.
+    pub fn notify_structural_event(&self) {
+        self.refresh_notify.notify_one();
     }
 }
