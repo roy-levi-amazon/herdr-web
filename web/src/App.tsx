@@ -2486,11 +2486,16 @@ export function App() {
     }
   }
 
+  const pendingActivityRefresh = useRef<Record<string, number | null>>({});
   const refreshAgentActivityForBridge = (bridgeId: BridgeId) => {
-    const runtime = bridge.getRuntime(bridgeId);
-    if (runtime) {
-      void refreshBridgeAgentActivity(runtime, false);
-    }
+    if (pendingActivityRefresh.current[bridgeId] != null) return;
+    pendingActivityRefresh.current[bridgeId] = window.setTimeout(() => {
+      pendingActivityRefresh.current[bridgeId] = null;
+      const runtime = bridge.getRuntime(bridgeId);
+      if (runtime) {
+        void refreshBridgeAgentActivity(runtime, false);
+      }
+    }, 100);
   };
 
   useEffect(() => {
@@ -2577,11 +2582,16 @@ export function App() {
     }
   }
 
+  const pendingPinsRefresh = useRef<Record<string, number | null>>({});
   const refreshAgentPinsForBridge = (bridgeId: BridgeId) => {
-    const runtime = bridge.getRuntime(bridgeId);
-    if (runtime) {
-      void refreshBridgeAgentPins(runtime, false);
-    }
+    if (pendingPinsRefresh.current[bridgeId] != null) return;
+    pendingPinsRefresh.current[bridgeId] = window.setTimeout(() => {
+      pendingPinsRefresh.current[bridgeId] = null;
+      const runtime = bridge.getRuntime(bridgeId);
+      if (runtime) {
+        void refreshBridgeAgentPins(runtime, false);
+      }
+    }, 100);
   };
 
   useEffect(() => {
@@ -2679,14 +2689,19 @@ export function App() {
     }
   }
 
+  const pendingNotesRefresh = useRef<Record<string, number | null>>({});
   const refreshNotesForBridge = (bridgeId: BridgeId) => {
     if (!notesEnabled) {
       return;
     }
-    const runtime = bridge.getRuntime(bridgeId);
-    if (runtime) {
-      void refreshBridgeNotes(runtime, false);
-    }
+    if (pendingNotesRefresh.current[bridgeId] != null) return;
+    pendingNotesRefresh.current[bridgeId] = window.setTimeout(() => {
+      pendingNotesRefresh.current[bridgeId] = null;
+      const runtime = bridge.getRuntime(bridgeId);
+      if (runtime) {
+        void refreshBridgeNotes(runtime, false);
+      }
+    }, 100);
   };
 
   useEffect(() => {
@@ -3741,7 +3756,6 @@ export function BridgeConnectionController({
             (item) => item.pane_id === paneId,
           );
           onPaneSelection(runtime.id, paneId, pane?.workspace_id);
-          refresh();
           return;
         }
         if (isNotesChangedEvent(event)) {

@@ -1740,7 +1740,7 @@ async fn selection_handler(
     if pane_id.is_empty() {
         return Err(BridgeError::BadRequest("missing pane_id".to_string()));
     }
-    let panes = current_panes(&state.api)?;
+    let panes = state.snapshot_cache.panes();
     if !panes.iter().any(|pane| pane.pane_id == pane_id) {
         return Err(BridgeError::Protocol(format!("pane not found: {pane_id}")));
     }
@@ -2710,10 +2710,10 @@ fn release_terminal_session(
 }
 
 fn prune_detached_terminal_sessions(state: &BridgeState) {
-    let Ok(panes) = current_panes(&state.api) else {
-        warn!("failed to prune herdr web terminal sessions");
+    let panes = state.snapshot_cache.panes();
+    if panes.is_empty() {
         return;
-    };
+    }
     let active_terminal_ids = panes
         .iter()
         .map(|pane| pane.terminal_id.as_str())
