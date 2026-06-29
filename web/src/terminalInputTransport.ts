@@ -4,7 +4,7 @@ export type TerminalInputBatch = {
   bytes: number;
 };
 
-export const DEFAULT_TERMINAL_INPUT_TRANSPORT: TerminalInputTransport = "json";
+export const DEFAULT_TERMINAL_INPUT_TRANSPORT: TerminalInputTransport = "binary";
 export const DEFAULT_TERMINAL_INPUT_BATCH_DELAY_MS = 0;
 export const TERMINAL_INPUT_BATCH_MAX_BYTES = 32;
 export const TERMINAL_INPUT_BATCH_DELAY_OPTIONS_MS = [0, 32, 64, 128, 256] as const;

@@ -20,6 +20,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use axum::serve::ListenerExt;
 use axum::{extract::Request as AxumRequest, Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use herdr_compat::TryClone as _;
@@ -415,6 +416,12 @@ impl TerminalOutputCoalescer {
             return None;
         }
         Some(TerminalOutputFlushReason::Timer)
+    }
+
+    fn reset_deadline_for_input(&mut self) {
+        if self.pending.is_empty() {
+            self.deadline = None;
+        }
     }
 
     fn flush_pending(&mut self, reason: TerminalOutputFlushReason, now: Instant) -> Option<Bytes> {
@@ -931,7 +938,13 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .with_state(state);
     let bind = format!("{}:{}", options.host, options.port);
-    let listener = tokio::net::TcpListener::bind(&bind).await?;
+    let listener = tokio::net::TcpListener::bind(&bind)
+        .await?
+        .tap_io(|tcp_stream| {
+            if let Err(err) = tcp_stream.set_nodelay(true) {
+                tracing::trace!("failed to set TCP_NODELAY on incoming connection: {err:#}");
+            }
+        });
     info!(url = %format!("http://{bind}"), "herdr-web-bridge listening");
     axum::serve(listener, app).await
 }
@@ -2506,6 +2519,7 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
                     if !handle_terminal_client_message(&write_tx, message) {
                         break;
                     }
+                    output_coalescer.reset_deadline_for_input();
                 }
                 _ = tokio::time::sleep_until(deadline) => {
                     if !handle_terminal_output_deadline(
@@ -2532,6 +2546,13 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
             }
         } else {
             tokio::select! {
+                biased;
+                Some(message) = ws_receiver.next() => {
+                    if !handle_terminal_client_message(&write_tx, message) {
+                        break;
+                    }
+                    output_coalescer.reset_deadline_for_input();
+                }
                 output = terminal_rx.recv() => {
                     if !handle_terminal_output_message(
                         output,
@@ -2540,11 +2561,6 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
                     )
                     .await
                     {
-                        break;
-                    }
-                }
-                Some(message) = ws_receiver.next() => {
-                    if !handle_terminal_client_message(&write_tx, message) {
                         break;
                     }
                 }

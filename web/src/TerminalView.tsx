@@ -9,7 +9,7 @@ import {
   TextCursorInput,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, RefObject } from "react";
 import { autosizeMobileCommandTextarea } from "./mobileCommandTextarea";
 import { ConfirmDialog } from "./overlays";
@@ -125,7 +125,7 @@ type TerminalRendererReady = {
 const MAX_UPLOAD_FILES = 8;
 const DEBUG_TERMINAL_RECONNECT = false;
 
-export function TerminalView({
+function TerminalViewInner({
   pane,
   connectionKey,
   resumeToken,
@@ -1888,3 +1888,28 @@ class UploadConflictError extends Error {
     super(`file exists: ${path || name}`);
   }
 }
+
+export const TerminalView = memo(TerminalViewInner, (prev, next) => {
+  if (prev.pane?.terminal_id !== next.pane?.terminal_id) return false;
+  if (prev.pane?.pane_id !== next.pane?.pane_id) return false;
+  if (prev.connectionKey !== next.connectionKey) return false;
+  if (prev.resumeToken !== next.resumeToken) return false;
+  if (prev.httpUrl !== next.httpUrl) return false;
+  if (prev.wsUrl !== next.wsUrl) return false;
+  if (prev.autoFocus !== next.autoFocus) return false;
+  if (prev.scrollSensitivity !== next.scrollSensitivity) return false;
+  if (prev.mobileControls !== next.mobileControls) return false;
+  if (prev.terminalFontSizePx !== next.terminalFontSizePx) return false;
+  if (prev.mobileControlsScalePercent !== next.mobileControlsScalePercent) return false;
+  if (prev.mobileTapTarget !== next.mobileTapTarget) return false;
+  if (prev.mobileLongPressBehavior !== next.mobileLongPressBehavior) return false;
+  if (prev.mobileTouchSelectionEndpointTimeoutMs !== next.mobileTouchSelectionEndpointTimeoutMs) return false;
+  if (prev.mobileCommandExpandingInput !== next.mobileCommandExpandingInput) return false;
+  if (prev.mobileCommandEnterNewline !== next.mobileCommandEnterNewline) return false;
+  if (prev.terminalInputTransport !== next.terminalInputTransport) return false;
+  if (prev.terminalInputBatchDelayMs !== next.terminalInputBatchDelayMs) return false;
+  if (prev.terminalOutputCoalesceMs !== next.terminalOutputCoalesceMs) return false;
+  if (prev.refitToken !== next.refitToken) return false;
+  if (prev.focusToken !== next.focusToken) return false;
+  return true;
+});
