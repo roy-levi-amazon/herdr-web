@@ -3670,7 +3670,23 @@ export function BridgeConnectionController({
       interval = window.setInterval(refresh, SNAPSHOT_REFRESH_INTERVAL_MS);
     }, SNAPSHOT_REFRESH_INTERVAL_MS + refreshOffset);
 
-    const events = openEventsSocket(wsUrlRef.current, "/ws/events", refresh);
+    const events = openEventsSocket(wsUrlRef.current, "/ws/events", (event) => {
+      if (typeof event.data === "string") {
+        try {
+          const parsed = JSON.parse(event.data) as { event?: string };
+          if (
+            parsed.event === "workspace.focused" ||
+            parsed.event === "tab.focused" ||
+            parsed.event === "pane.focused"
+          ) {
+            return;
+          }
+        } catch {
+          // not JSON, refresh
+        }
+      }
+      refresh();
+    });
     const activity = openEventsSocket(
       wsUrlRef.current,
       "/ws/activity",

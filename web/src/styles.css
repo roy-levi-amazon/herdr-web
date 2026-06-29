@@ -1574,12 +1574,17 @@ button {
   outline: none;
   overflow: hidden;
   touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
   font-variant-ligatures: none;
   font-feature-settings: "liga" 0, "calt" 0, "kern" 0;
+  contain: layout style;
 }
 
 .terminal-host canvas {
   display: block;
+  will-change: contents;
 }
 
 .terminal-host .ghostty-hidden-input {
@@ -3136,7 +3141,8 @@ button {
 
 .app[data-touch="true"] .sb-head,
 .app[data-touch="true"] .stage-bar {
-  height: 60px;
+  height: calc(60px + env(safe-area-inset-top, 0px));
+  padding-top: env(safe-area-inset-top, 0px);
 }
 
 .app[data-touch="true"] .terminal-mobile-controls {

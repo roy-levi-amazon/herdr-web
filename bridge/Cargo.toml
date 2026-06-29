@@ -25,6 +25,11 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-width = "0.2"
 
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Wdk_System_Threading",
