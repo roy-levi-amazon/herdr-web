@@ -10,7 +10,7 @@ mkdir -p "$LOG_DIR"
 sleep 0.5
 
 # Start bridge
-nohup "$ROOT/scripts/run-bridge.sh" --allow-origin https://roylevi-herdr.c.tunnels.lab.aws.dev \
+nohup "$ROOT/scripts/run-bridge.sh" --allow-origin "https://${USER}-herdr.c.tunnels.lab.aws.dev" \
   > "$LOG_DIR/bridge.log" 2>&1 &
 BRIDGE_PID=$!
 
